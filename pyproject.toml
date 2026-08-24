@@ -1,0 +1,35 @@
+[project]
+name = "stato-italia-data"
+version = "0.1.0"
+description = "Reproducible official-data pipeline for Stato d'Italia"
+requires-python = ">=3.12"
+dependencies = [
+  "boto3>=1.35",
+  "mapbox-vector-tile>=2.1",
+  "mercantile>=1.2",
+  "pandas>=2.3",
+  "openpyxl>=3.1",
+  "pmtiles>=3.4",
+  "pyproj>=3.7",
+  "pyarrow>=18",
+  "pyshp>=2.3",
+  "PyYAML>=6.0",
+  "requests>=2.32",
+  "shapely>=2.0"
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[project.scripts]
+stato-data = "stato_italia.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stato_italia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

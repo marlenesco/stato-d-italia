@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CanonicalObservation",
+  "required": ["observation_id", "dataset_id", "source_asset_sha256", "metric_id", "territory_id", "territory_version_id", "territory_level", "period_start", "period_end", "value_decimal", "unit_ucum", "official_status", "ingested_at"],
+  "properties": {
+    "observation_id": {"type": "string"},
+    "dataset_id": {"type": "string"},
+    "source_asset_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "metric_id": {"type": "string"},
+    "territory_id": {"type": "string"},
+    "territory_version_id": {"type": "string"},
+    "territory_level": {"enum": ["country", "region", "province", "municipality"]},
+    "period_start": {"type": "string", "format": "date"},
+    "period_end": {"type": "string", "format": "date"},
+    "value_decimal": {"type": "number"},
+    "unit_ucum": {"type": "string"},
+    "official_status": {"enum": ["validated", "provisional", "unknown"]},
+    "ingested_at": {"type": "string", "format": "date-time"}
+  }
+}
+

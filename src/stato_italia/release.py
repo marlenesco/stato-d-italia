@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+import os
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+
+import boto3
+
+from .common import json_dump, now_iso, sha256_file
+
+
+class ObjectStore:
+    def put_file(self, key: str, source: Path, immutable: bool) -> None: ...
+    def put_json(self, key: str, payload: dict, immutable: bool) -> None: ...
+    def read_json(self, key: str) -> dict: ...
+    def exists(self, key: str) -> bool: ...
+
+
+@dataclass
+class LocalObjectStore(ObjectStore):
+    root: Path
+
+    def _path(self, key: str) -> Path:
+        return self.root / key
+
+    def put_file(self, key: str, source: Path, immutable: bool) -> None:
+        target = self._path(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if sha256_file(target) != sha256_file(source):
+                raise ValueError(f"Immutable object collision at {key}")
+            return
+        shutil.copy2(source, target)
+        if sha256_file(target) != sha256_file(source):
+            raise ValueError(f"Checksum verification failed for {key}")
+
+    def put_json(self, key: str, payload: dict, immutable: bool) -> None:
+        target = self._path(key)
+        if immutable and target.exists() and target.read_text() != __import__("json").dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n":
+            raise ValueError(f"Immutable object collision at {key}")
+        json_dump(target, payload)
+
+    def read_json(self, key: str) -> dict:
+        import json
+        return json.loads(self._path(key).read_text())
+
+    def exists(self, key: str) -> bool:
+        return self._path(key).exists()
+
+
+class R2ObjectStore(ObjectStore):
+    def __init__(self) -> None:
+        required = ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT", "R2_BUCKET")
+        missing = [key for key in required if not os.getenv(key)]
+        if missing:
+            raise RuntimeError(f"R2 publish requires: {', '.join(missing)}")
+        self.bucket = os.environ["R2_BUCKET"]
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=os.environ["R2_ENDPOINT"],
+            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+            region_name="auto",
+        )
+
+    def put_file(self, key: str, source: Path, immutable: bool) -> None:
+        self.client.upload_file(
+            str(source), self.bucket, key,
+            ExtraArgs={"CacheControl": "public, max-age=31536000, immutable" if immutable else "public, max-age=300", "Metadata": {"sha256": sha256_file(source)}},
+        )
+        response = self.client.head_object(Bucket=self.bucket, Key=key)
+        if response["Metadata"].get("sha256") != sha256_file(source):
+            raise ValueError(f"R2 checksum verification failed for {key}")
+
+    def put_json(self, key: str, payload: dict, immutable: bool) -> None:
+        import json
+        body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode() + b"\n"
+        self.client.put_object(
+            Bucket=self.bucket, Key=key, Body=body, ContentType="application/json",
+            CacheControl="public, max-age=31536000, immutable" if immutable else "public, max-age=300",
+        )
+
+    def read_json(self, key: str) -> dict:
+        import json
+        return json.loads(self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read())
+
+    def exists(self, key: str) -> bool:
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except self.client.exceptions.ClientError:
+            return False
+
+
+def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path]) -> dict:
+    """Upload immutable content first, then atomically advance sole mutable pointer."""
+    objects = []
+    for artifact in artifacts:
+        checksum = sha256_file(artifact)
+        key = f"objects/sha256/{checksum}/{artifact.name}"
+        store.put_file(key, artifact, immutable=True)
+        objects.append({"key": key, "sha256": checksum, "bytes": artifact.stat().st_size, "name": artifact.name})
+    release_key = f"releases/{release_id}/release.json"
+    release = {"schemaVersion": 1, "releaseId": release_id, "generatedAt": now_iso(), "objects": objects}
+    store.put_json(release_key, release, immutable=True)
+    if store.read_json(release_key) != release:
+        raise ValueError("Release verification failed")
+    manifest = {"schemaVersion": 1, "releaseId": release_id, "generatedAt": now_iso(), "releaseKey": release_key}
+    store.put_json("manifest.json", manifest, immutable=False)
+    return manifest
+
+
+def rollback(store: ObjectStore, release_id: str) -> dict:
+    key = f"releases/{release_id}/release.json"
+    if not store.exists(key):
+        raise ValueError(f"Release does not exist: {release_id}")
+    manifest = {"schemaVersion": 1, "releaseId": release_id, "generatedAt": now_iso(), "releaseKey": key, "rollback": True}
+    store.put_json("manifest.json", manifest, immutable=False)
+    return manifest
+

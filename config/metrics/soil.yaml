@@ -1,0 +1,32 @@
+metrics:
+  - id: soil_net_consumption_hectares
+    label_it: Incremento netto di suolo consumato
+    unit_ucum: ha
+    source_kind: official_observation
+    temporal_kind: period_change
+    higher_is: greater_pressure
+  - id: soil_gross_consumption_hectares
+    label_it: Incremento lordo di suolo consumato
+    unit_ucum: ha
+    source_kind: official_observation
+    temporal_kind: period_change
+    higher_is: greater_pressure
+  - id: soil_restoration_hectares
+    label_it: Ripristino di suolo
+    unit_ucum: ha
+    source_kind: official_observation
+    temporal_kind: period_change
+    higher_is: context_dependent
+  - id: soil_consumed_hectares
+    label_it: Suolo consumato
+    unit_ucum: ha
+    source_kind: official_observation
+    temporal_kind: point_in_time
+    higher_is: greater_pressure
+  - id: soil_consumed_share
+    label_it: Suolo consumato
+    unit_ucum: '%'
+    source_kind: official_observation
+    temporal_kind: point_in_time
+    higher_is: greater_pressure
+

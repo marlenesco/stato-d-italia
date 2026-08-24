@@ -1,0 +1,17 @@
+source_id: ispra-soil-2025
+publisher: ISPRA / SNPA
+dataset_name: Consumo di suolo, dinamiche territoriali e servizi ecosistemici — estratto dati 2025
+landing_url: https://www.isprambiente.gov.it/it/attivita/suolo-e-territorio/suolo/il-consumo-di-suolo/i-dati-sul-consumo-di-suolo
+download_url: https://www.isprambiente.gov.it/it/attivita/suolo-e-territorio/suolo/il-consumo-di-suolo/consumo_di_suolo_estratto_dati_2025_anni_2006_2024.xlsx
+license: CC BY 3.0 IT declared by ISPRA methodology page; verify downloaded artifact metadata before redistribution
+geographical_granularity: [country, region, province, municipality]
+temporal_granularity: "irregular periods: 2006-2012, 2012-2015, then annual increments through 2024"
+first_available_year: 2006
+latest_available_year: 2024
+publication_frequency: annual
+official_status: not explicitly labelled in workbook; preserve as unknown
+methodology_url: https://www.isprambiente.gov.it/it/attivita/suolo-e-territorio/suolo/il-consumo-di-suolo/la-misura-del-consumo-di-suolo
+known_limitations:
+  - Workbook supplies changes by period and stock values only for 2024; it is not an annual stock series.
+  - Province and region sheets have names, not ISTAT codes.
+  - Geographic reference date is 2025-01-01: all workbook municipality codes match ISTAT 2025, not ISTAT 2024.
