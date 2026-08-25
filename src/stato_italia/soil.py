@@ -152,7 +152,10 @@ def ingest_soil(raw_root: Path, canonical_root: Path, force: bool = False) -> di
     source = download(SOIL_URL, workbook, "ispra-soil-2025")
     destination = canonical_root / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet"
     if source.get("unchanged") and destination.exists() and not force:
-        return _summarize(source, destination) | {"changed": False, "skipped": True}
+        current = pd.read_parquet(destination, columns=["territory_id", "territory_version_id"])
+        country_version = set(current.loc[current["territory_id"] == "it:country:IT", "territory_version_id"])
+        if country_version == {"it:country:IT@2025-01-01"}:
+            return _summarize(source, destination) | {"changed": False, "skipped": True}
     # Workbook's three changed Veneto codes are present only in ISTAT 2025.
     # This factual join pins source geography to that boundary version.
     index = load_territory_index(canonical_root, 2025)

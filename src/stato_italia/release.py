@@ -49,6 +49,12 @@ class LocalObjectStore(ObjectStore):
         return self._path(key).exists()
 
 
+@dataclass(frozen=True)
+class ReleaseArtifact:
+    path: Path
+    logical_path: str
+
+
 class R2ObjectStore(ObjectStore):
     def __init__(self) -> None:
         required = ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT", "R2_BUCKET")
@@ -65,12 +71,22 @@ class R2ObjectStore(ObjectStore):
         )
 
     def put_file(self, key: str, source: Path, immutable: bool) -> None:
+        checksum = sha256_file(source)
+        if immutable:
+            try:
+                existing = self.client.head_object(Bucket=self.bucket, Key=key)
+                if existing["Metadata"].get("sha256") != checksum:
+                    raise ValueError(f"Immutable object collision at {key}")
+                return
+            except self.client.exceptions.ClientError as error:
+                if error.response.get("Error", {}).get("Code") not in {"404", "NoSuchKey", "NotFound"}:
+                    raise
         self.client.upload_file(
             str(source), self.bucket, key,
-            ExtraArgs={"CacheControl": "public, max-age=31536000, immutable" if immutable else "public, max-age=300", "Metadata": {"sha256": sha256_file(source)}},
+            ExtraArgs={"CacheControl": "public, max-age=31536000, immutable" if immutable else "public, max-age=300", "Metadata": {"sha256": checksum}},
         )
         response = self.client.head_object(Bucket=self.bucket, Key=key)
-        if response["Metadata"].get("sha256") != sha256_file(source):
+        if response["Metadata"].get("sha256") != checksum:
             raise ValueError(f"R2 checksum verification failed for {key}")
 
     def put_json(self, key: str, payload: dict, immutable: bool) -> None:
@@ -93,16 +109,20 @@ class R2ObjectStore(ObjectStore):
             return False
 
 
-def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path]) -> dict:
+def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | ReleaseArtifact]) -> dict:
     """Upload immutable content first, then atomically advance sole mutable pointer."""
     objects = []
     for artifact in artifacts:
-        checksum = sha256_file(artifact)
-        key = f"objects/sha256/{checksum}/{artifact.name}"
-        store.put_file(key, artifact, immutable=True)
-        objects.append({"key": key, "sha256": checksum, "bytes": artifact.stat().st_size, "name": artifact.name})
+        record = artifact if isinstance(artifact, ReleaseArtifact) else ReleaseArtifact(artifact, artifact.name)
+        checksum = sha256_file(record.path)
+        key = f"objects/sha256/{checksum}/{record.path.name}"
+        store.put_file(key, record.path, immutable=True)
+        objects.append({"key": key, "sha256": checksum, "bytes": record.path.stat().st_size, "name": record.path.name, "logicalPath": record.logical_path})
+    logical_paths = [item["logicalPath"] for item in objects]
+    if len(logical_paths) != len(set(logical_paths)):
+        raise ValueError("Release has duplicate logical paths")
     release_key = f"releases/{release_id}/release.json"
-    release = {"schemaVersion": 1, "releaseId": release_id, "generatedAt": now_iso(), "objects": objects}
+    release = {"schemaVersion": 2, "releaseId": release_id, "generatedAt": now_iso(), "objects": objects}
     store.put_json(release_key, release, immutable=True)
     if store.read_json(release_key) != release:
         raise ValueError("Release verification failed")
@@ -118,4 +138,3 @@ def rollback(store: ObjectStore, release_id: str) -> dict:
     manifest = {"schemaVersion": 1, "releaseId": release_id, "generatedAt": now_iso(), "releaseKey": key, "rollback": True}
     store.put_json("manifest.json", manifest, immutable=False)
     return manifest
-

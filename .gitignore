@@ -6,4 +6,6 @@ __pycache__/
 /artifacts/
 /reports/
 .env
-
+/apps/web/node_modules/
+/apps/web/.next/
+/apps/web/tsconfig.tsbuildinfo

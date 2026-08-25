@@ -15,7 +15,8 @@ dependencies = [
   "pyshp>=2.3",
   "PyYAML>=6.0",
   "requests>=2.32",
-  "shapely>=2.0"
+  "shapely>=2.0",
+  "rasterio>=1.5.1",
 ]
 
 [dependency-groups]

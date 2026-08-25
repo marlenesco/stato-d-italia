@@ -1,0 +1,12 @@
+[
+  {
+    "AllowedOrigins": [
+      "https://www.statoditalia.it",
+      "http://localhost:3000"
+    ],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["Range"],
+    "ExposeHeaders": ["ETag", "Content-Length", "Content-Range", "Accept-Ranges"],
+    "MaxAgeSeconds": 86400
+  }
+]
