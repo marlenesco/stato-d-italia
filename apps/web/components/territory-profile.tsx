@@ -1,11 +1,5 @@
-type Observation = { metricId: string; periodStart: string; periodEnd: string; value: number; unit: string };
-type Profile = {
-  territory: { name: string; level: string; istatCode: string; referenceDate: string; parents: Array<{ name: string; level: string }> };
-  latestObservations: Observation[];
-  historicalSeries: Array<{ metricId: string; columns: string[]; values: Array<[string, string, string, number, string]> }>;
-  derivedMetrics: Array<Record<string, unknown>>;
-  comparisons: Record<string, Array<{ scope: string; status: string; territoryId?: string; observation?: Observation }>>;
-};
+import Link from "next/link";
+import type { Observation, TerritoryProfileData } from "../lib/data";
 
 const labels: Record<string, string> = {
   soil_net_consumption_hectares: "Incremento netto di suolo consumato",
@@ -15,22 +9,65 @@ const labels: Record<string, string> = {
   soil_consumed_share: "Suolo consumato",
 };
 
-export function TerritoryProfile({ profile }: { profile: Profile }) {
+const levelLabels: Record<string, string> = { municipality: "Comune", province: "Provincia", region: "Regione", country: "Italia" };
+type Analytics = { changes?: Record<string, { value?: number | null; status?: string | null; reason?: string | null }>; trend?: { status?: string | null; direction?: string | null; slope_per_year?: number | null; reason?: string | null }; benchmarks?: Record<string, { percentile?: number | null; percentileStatus?: string | null; rank?: number | null; rankStatus?: string | null }> };
+
+function period(start: string, end: string) {
+  const from = start.slice(0, 4);
+  const to = end.slice(0, 4);
+  return from === to ? from : `${from}–${to}`;
+}
+
+function value(observation: Observation) {
+  return `${observation.value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ${observation.unit}`;
+}
+
+function availability(change?: { value?: number | null; status?: string | null; reason?: string | null }) {
+  if (change?.status === "available" && change.value !== undefined && change.value !== null) return `${change.value > 0 ? "+" : ""}${change.value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ha`;
+  if (change?.reason === "missing_required_period") return "Non disponibile: manca il periodo necessario per il confronto";
+  return "Non disponibile";
+}
+
+function trendLabel(direction?: string | null) {
+  if (direction === "increasing") return "in aumento";
+  if (direction === "decreasing") return "in diminuzione";
+  if (direction === "flat") return "stabile";
+  return "non stimabile";
+}
+
+export function TerritoryProfile({ profile }: { profile: TerritoryProfileData }) {
   const net = profile.latestObservations.find((item) => item.metricId === "soil_net_consumption_hectares");
   const netSeries = profile.historicalSeries.find((item) => item.metricId === "soil_net_consumption_hectares");
-  const netAnalytics = profile.derivedMetrics.find((item) => item.metricId === "soil_net_consumption_hectares") as { changes?: Record<string, { value?: number; status?: string }>; trend?: Record<string, unknown>; benchmarks?: Record<string, Record<string, unknown>> } | undefined;
+  const analytics = profile.derivedMetrics.find((item) => item.metricId === "soil_net_consumption_hectares") as Analytics | undefined;
+  const parents = profile.territory.parents.map((parent) => parent.name).join(" · ");
+  const national = analytics?.benchmarks?.national;
+
   return <>
-    <section className="profile-head"><p className="eyebrow">{profile.territory.level} · ISTAT {profile.territory.istatCode}</p><h1>{profile.territory.name}</h1><p>{profile.territory.parents.map((parent) => `${parent.name} (${parent.level})`).join(" · ")}</p><p className="muted">Riferimento territoriale: {profile.territory.referenceDate}</p></section>
-    {net && <section className="key-value"><p>Ultimo incremento netto disponibile</p><strong>{net.value.toLocaleString("it-IT")} {net.unit}</strong><span>{net.periodStart.slice(0, 4)}–{net.periodEnd.slice(0, 4)} · dato ufficiale ISPRA/SNPA</span></section>}
-    <section className="profile-grid"><div><h2>Variazioni e trend</h2>{netAnalytics ? <dl>
-      <dt>Vs periodo precedente</dt><dd>{netAnalytics.changes?.previous?.status === "available" ? `${netAnalytics.changes.previous.value?.toLocaleString("it-IT")} ha` : "Non disponibile"}</dd>
-      <dt>Vs 5 anni</dt><dd>{netAnalytics.changes?.fiveYears?.status === "available" ? `${netAnalytics.changes.fiveYears.value?.toLocaleString("it-IT")} ha` : "Non disponibile"}</dd>
-      <dt>Vs 10 anni</dt><dd>{netAnalytics.changes?.tenYears?.status === "available" ? `${netAnalytics.changes.tenYears.value?.toLocaleString("it-IT")} ha` : "Non disponibile: manca flusso annuale 2014"}</dd>
-      <dt>Trend OLS</dt><dd>{String(netAnalytics.trend?.direction ?? "Non disponibile")} · slope {Number(netAnalytics.trend?.slope_per_year ?? 0).toLocaleString("it-IT")} ha/anno</dd>
-      <dt>Percentile nazionale</dt><dd>{Number(netAnalytics.benchmarks?.national?.percentile ?? 0).toFixed(1)}</dd>
-      <dt>Ranking nazionale</dt><dd>{String(netAnalytics.benchmarks?.national?.rank ?? "—")}</dd>
-    </dl> : <p>Analytics non disponibile.</p>}</div><div><h2>Confronto stesso periodo</h2>{(profile.comparisons.soil_net_consumption_hectares ?? []).map((item) => <p key={item.scope}><strong>{item.scope}</strong>: {item.status === "available" ? `${item.observation?.value.toLocaleString("it-IT")} ${item.observation?.unit}` : "non disponibile"}</p>)}</div></section>
-    <section className="history"><h2>Storico ufficiale</h2>{netSeries ? <table><thead><tr><th>Periodo</th><th>Valore</th><th>Unità</th></tr></thead><tbody>{netSeries.values.map(([id, start, end, value, unit]) => <tr key={id}><th scope="row">{start.slice(0, 4)}–{end.slice(0, 4)}</th><td>{value.toLocaleString("it-IT")}</td><td>{unit}</td></tr>)}</tbody></table> : <p>Nessun dato.</p>}</section>
-    <section className="history"><h2>Altri indicatori ufficiali</h2><table><thead><tr><th>Indicatore</th><th>Periodo</th><th>Valore</th></tr></thead><tbody>{profile.latestObservations.map((item) => <tr key={item.metricId}><th scope="row">{labels[item.metricId] ?? item.metricId}</th><td>{item.periodStart.slice(0, 4)}–{item.periodEnd.slice(0, 4)}</td><td>{item.value.toLocaleString("it-IT")} {item.unit}</td></tr>)}</tbody></table></section>
+    <section className="profile-head">
+      <p className="eyebrow">{levelLabels[profile.territory.level] ?? profile.territory.level} · ISTAT {profile.territory.istatCode}</p>
+      <h1>{profile.territory.name}</h1>
+      {parents && <p className="profile-parent">{parents}</p>}
+      <p className="muted">Confini di riferimento: {profile.territory.referenceDate}</p>
+      <Link className="back-link" href="/suolo">← Torna all’esploratore</Link>
+    </section>
+
+    {net ? <section className="profile-lead" aria-label="Indicatore principale"><div><p className="eyebrow">Dato ufficiale ISPRA / SNPA</p><h2>Ultimo incremento netto disponibile</h2><strong>{value(net)}</strong><span>{period(net.periodStart, net.periodEnd)}</span></div><p>È un valore osservato. Cause, responsabilità e valutazioni richiedono contesto ulteriore.</p></section> : <section className="profile-lead"><p className="eyebrow">Dato ufficiale</p><h2>Incremento netto non pubblicato per questo territorio</h2></section>}
+
+    <section className="profile-grid">
+      <div className="profile-card"><p className="eyebrow">Lettura della serie</p><h2>Variazioni e trend</h2>{analytics ? <dl>
+        <dt>Rispetto al periodo precedente</dt><dd>{availability(analytics.changes?.previous)}</dd>
+        <dt>Rispetto a 5 anni</dt><dd>{availability(analytics.changes?.fiveYears)}</dd>
+        <dt>Rispetto a 10 anni</dt><dd>{availability(analytics.changes?.tenYears)}</dd>
+        <dt>Trend stimato</dt><dd>{trendLabel(analytics.trend?.direction)}{analytics.trend?.status === "available" && analytics.trend.slope_per_year !== undefined && analytics.trend.slope_per_year !== null ? ` · ${analytics.trend.slope_per_year.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ha/anno` : ""}</dd>
+      </dl> : <p className="state-copy">Elaborazioni non pubblicate per questo profilo.</p>}</div>
+      <div className="profile-card"><p className="eyebrow">Confronto nazionale</p><h2>Posizione nel periodo</h2>{national?.rankStatus === "available" || national?.percentileStatus === "available" ? <dl>
+        <dt>Posizione</dt><dd>{national.rankStatus === "available" ? national.rank ?? "—" : "Non disponibile"}</dd>
+        <dt>Percentile</dt><dd>{national.percentileStatus === "available" && national.percentile !== undefined && national.percentile !== null ? national.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : "Non disponibile"}</dd>
+      </dl> : <p className="state-copy">Confronto non pubblicato per questo territorio o livello.</p>}<p className="card-note">Posizione e percentile confrontano solo territori nello stesso livello e periodo.</p></div>
+    </section>
+
+    <section className="history"><div className="section-heading"><div><p className="eyebrow">Serie ufficiale</p><h2>Storico dell’incremento netto</h2></div><p>Ogni riga è un periodo pubblicato; non vengono stimati anni mancanti.</p></div>{netSeries ? <div className="table-scroll"><table><thead><tr><th>Periodo</th><th>Valore</th><th>Unità</th></tr></thead><tbody>{netSeries.values.map(([id, start, end, amount, unit]) => <tr key={id}><th scope="row">{period(start, end)}</th><td>{amount.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td><td>{unit}</td></tr>)}</tbody></table></div> : <p className="state-copy">Nessuna serie ufficiale pubblicata.</p>}</section>
+
+    <section className="history"><div className="section-heading"><div><p className="eyebrow">Ultime osservazioni</p><h2>Altri indicatori ufficiali</h2></div></div><div className="table-scroll"><table><thead><tr><th>Indicatore</th><th>Periodo</th><th>Valore</th></tr></thead><tbody>{profile.latestObservations.map((item) => <tr key={item.metricId}><th scope="row">{labels[item.metricId] ?? item.metricId}</th><td>{period(item.periodStart, item.periodEnd)}</td><td>{value(item)}</td></tr>)}</tbody></table></div></section>
   </>;
 }

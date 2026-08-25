@@ -1,6 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import Link from "next/link";
+import { useMemo } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { MapOption, SoilData } from "../lib/data";
 import { SoilMap } from "./soil-map";
 import { TimelineControl } from "./timeline-control";
@@ -28,28 +30,51 @@ function comparePeriods(left: string, right: string) {
   return Number(left.slice(0, 4)) - Number(right.slice(0, 4)) || left.localeCompare(right);
 }
 
+function levelLabel(level: MappableLevel) {
+  return level === "municipality" ? "Comuni" : level === "province" ? "Province" : "Regioni";
+}
+
 export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabel: string }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const metrics = useMemo(() => [...new Set(data.maps.map((item) => item.metricId))], [data.maps]);
-  const [metric, setMetric] = useState(metrics[0]);
-  const levels = useMemo(() => Array.from(new Set(data.maps.map((item) => item.level))).filter((item): item is MappableLevel => item !== "country"), [data.maps]);
-  const [level, setLevel] = useState<MappableLevel>(data.maps.some((item) => item.level === "municipality") ? "municipality" : "region");
+  const requestedMetric = searchParams.get("metric");
+  const metric = requestedMetric && metrics.includes(requestedMetric) ? requestedMetric : metrics[0];
+  const levels = useMemo(() => Array.from(new Set(data.maps.filter((item) => item.metricId === metric).map((item) => item.level))).filter((item): item is MappableLevel => item !== "country"), [data.maps, metric]);
+  const requestedLevel = searchParams.get("level") as MappableLevel | null;
+  const level = requestedLevel && levels.includes(requestedLevel) ? requestedLevel : (levels.includes("municipality") ? "municipality" : levels[0]);
   const available = data.maps.filter((item) => item.metricId === metric && item.level === level).sort((left, right) => comparePeriods(left.periodKey, right.periodKey));
-  const [period, setPeriod] = useState("");
-  const selected = available.find((item) => item.periodKey === period) ?? available.at(-1);
+  const requestedPeriod = searchParams.get("period");
+  const selected = available.find((item) => item.periodKey === requestedPeriod) ?? available.at(-1);
   const periods = available.map((item) => item.periodKey);
 
+  function update(params: Record<string, string | undefined>) {
+    const next = new URLSearchParams(searchParams.toString());
+    Object.entries(params).forEach(([key, value]) => value ? next.set(key, value) : next.delete(key));
+    router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+  }
+
+  function changeMetric(nextMetric: string) {
+    const nextLevels = Array.from(new Set(data.maps.filter((item) => item.metricId === nextMetric && item.level !== "country").map((item) => item.level))) as MappableLevel[];
+    const nextLevel = nextLevels.includes(level) ? level : (nextLevels.includes("municipality") ? "municipality" : nextLevels[0]);
+    const nextPeriods = data.maps.filter((item) => item.metricId === nextMetric && item.level === nextLevel).sort((left, right) => comparePeriods(left.periodKey, right.periodKey));
+    update({ metric: nextMetric, level: nextLevel, period: nextPeriods.at(-1)?.periodKey, territory: undefined });
+  }
+
   return <section className="workspace" aria-label={`Esplorazione ${themeLabel}`}>
+    <div className="workspace-kicker"><p className="eyebrow">Esplora dati</p><p>URL aggiornato con metrica, livello e periodo: vista condivisibile.</p></div>
     <div className="controls" aria-label="Filtri mappa">
-      <label>Metrica<select value={metric} onChange={(event) => { setMetric(event.target.value); setPeriod(""); }}>
-        {metrics.map((item) => <option key={item} value={item}>{metricLabels[item] ?? item}</option>)}
-      </select></label>
-      <label>Livello<select value={level} onChange={(event) => { setLevel(event.target.value as MappableLevel); setPeriod(""); }}>
-        {levels.map((item) => <option key={item} value={item}>{item === "municipality" ? "Comuni" : item === "province" ? "Province" : "Regioni"}</option>)}
-      </select></label>
-      {level === "municipality" && <a href="/territori/comuni/roma-058091">Profilo Roma</a>}
+      <label>Metrica<select value={metric} onChange={(event) => changeMetric(event.target.value)}>{metrics.map((item) => <option key={item} value={item}>{metricLabels[item] ?? item}</option>)}</select></label>
+      <label>Livello<select value={level} onChange={(event) => {
+        const nextLevel = event.target.value as MappableLevel;
+        const nextPeriod = data.maps.filter((item) => item.metricId === metric && item.level === nextLevel).sort((left, right) => comparePeriods(left.periodKey, right.periodKey)).at(-1)?.periodKey;
+        update({ level: nextLevel, period: nextPeriod, territory: undefined });
+      }}>{levels.map((item) => <option key={item} value={item}>{levelLabel(item)}</option>)}</select></label>
+      <Link className="control-link" href="/">Leggi panoramica nazionale</Link>
     </div>
-    {selected && <TimelineControl periods={periods} value={selected.periodKey} onChange={setPeriod} />}
-    {selected ? <SoilMap option={selected} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} /> : <p role="alert">Combinazione non disponibile.</p>}
-    <details className="provenance"><summary>Fonte, metodo, limiti</summary><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
+    {selected && <TimelineControl periods={periods} value={selected.periodKey} onChange={(period) => update({ period, territory: undefined })} />}
+    {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={searchParams.get("territory") ?? undefined} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
+    <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
   </section>;
 }
