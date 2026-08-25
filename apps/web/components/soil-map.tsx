@@ -61,6 +61,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     const target: HTMLDivElement = mapContainer;
     const pmtilesUrl = geometryUrl;
     let map: import("maplibre-gl").Map | undefined;
+    let resizeObserver: ResizeObserver | undefined;
     let disposed = false;
     async function createMap() {
       try {
@@ -91,6 +92,9 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
         activeMap.once("load", () => {
           if (disposed) return;
           mapRef.current = activeMap;
+          resizeObserver = new ResizeObserver(() => activeMap.resize());
+          resizeObserver.observe(target);
+          requestAnimationFrame(() => activeMap.resize());
           setMapReady(true);
           activeMap.on("click", "soil-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) setSelectedId(String(feature.id)); });
           const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
@@ -111,7 +115,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
       }
     }
     void createMap();
-    return () => { disposed = true; mapRef.current = null; featureIds.current = []; currentDataset.current = null; selectedFeatureId.current = null; map?.remove(); };
+    return () => { disposed = true; resizeObserver?.disconnect(); mapRef.current = null; featureIds.current = []; currentDataset.current = null; selectedFeatureId.current = null; map?.remove(); };
   }, [geometryUrl]);
 
   useEffect(() => {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { MapOption, SoilData } from "../lib/data";
+import { ExposedMenu, MapSidebar } from "./map-sidebar";
 import { SoilMap } from "./soil-map";
 import { TimelineControl } from "./timeline-control";
 
@@ -15,12 +16,9 @@ const metricLabels: Record<string, string> = {
   soil_restoration_hectares: "Ripristino di suolo",
   soil_consumed_hectares: "Suolo consumato (ha)",
   soil_consumed_share: "Suolo consumato (%)",
-  water_total_precipitation_mm: "Precipitazione totale",
-  water_actual_evapotranspiration_mm: "Evapotraspirazione effettiva",
-  water_internal_flow_mm: "Risorsa idrica rinnovabile",
-  water_aquifer_recharge_mm: "Ricarica acquiferi",
-  water_surface_runoff_mm: "Ruscellamento superficiale",
 };
+
+const metricUnits: Record<string, string> = { soil_net_consumption_hectares: "ha", soil_gross_consumption_hectares: "ha", soil_restoration_hectares: "ha", soil_consumed_hectares: "ha", soil_consumed_share: "%" };
 
 function rankingPath(option: MapOption) {
   return `delivery/soil/rankings/${option.metricId}/${option.periodKey}/${option.level}.json`;
@@ -62,19 +60,23 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
     update({ metric: nextMetric, level: nextLevel, period: nextPeriods.at(-1)?.periodKey, territory: undefined });
   }
 
-  return <section className="workspace" aria-label={`Esplorazione ${themeLabel}`}>
-    <div className="workspace-kicker"><p className="eyebrow">Esplora dati</p><p>URL aggiornato con metrica, livello e periodo: vista condivisibile.</p></div>
-    <div className="controls" aria-label="Filtri mappa">
-      <label>Metrica<select value={metric} onChange={(event) => changeMetric(event.target.value)}>{metrics.map((item) => <option key={item} value={item}>{metricLabels[item] ?? item}</option>)}</select></label>
-      <label>Livello<select value={level} onChange={(event) => {
-        const nextLevel = event.target.value as MappableLevel;
-        const nextPeriod = data.maps.filter((item) => item.metricId === metric && item.level === nextLevel).sort((left, right) => comparePeriods(left.periodKey, right.periodKey)).at(-1)?.periodKey;
-        update({ level: nextLevel, period: nextPeriod, territory: undefined });
-      }}>{levels.map((item) => <option key={item} value={item}>{levelLabel(item)}</option>)}</select></label>
-      <Link className="control-link" href="/">Leggi panoramica nazionale</Link>
+  function changeLevel(nextLevel: MappableLevel) {
+    const nextPeriod = data.maps.filter((item) => item.metricId === metric && item.level === nextLevel).sort((left, right) => comparePeriods(left.periodKey, right.periodKey)).at(-1)?.periodKey;
+    update({ level: nextLevel, period: nextPeriod, territory: undefined });
+  }
+
+  return <section className="workspace map-workspace" aria-label={`Esplorazione ${themeLabel}`}>
+    <MapSidebar title="Mappa suolo">
+      <ExposedMenu label="Metrica" value={metric} onChange={changeMetric} items={metrics.map((id) => ({ id, label: metricLabels[id] ?? id, meta: metricUnits[id] }))} />
+      <section className="sidebar-section"><h3>Livello territoriale</h3><div className="level-menu" role="group" aria-label="Livello territoriale">{levels.map((item) => <button type="button" key={item} onClick={() => changeLevel(item)} aria-pressed={item === level}>{levelLabel(item)}</button>)}</div></section>
+      {selected && <section className="sidebar-section"><TimelineControl periods={periods} value={selected.periodKey} onChange={(period) => update({ period, territory: undefined })} /></section>}
+      <section className="sidebar-section"><h3>Vista corrente</h3><p className="sidebar-context"><strong>{selected?.periodKey ?? "—"}</strong>{levelLabel(level)} · valori ufficiali ISPRA/SNPA.</p></section>
+      <section className="sidebar-section"><p className="sidebar-context">Mappa: osservazioni ufficiali. Confronto e percentile solo quando pubblicati.</p></section>
+      <Link className="sidebar-link" href="/">Panoramica nazionale →</Link>
+    </MapSidebar>
+    <div className="workspace-canvas">
+      {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={searchParams.get("territory") ?? undefined} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
+      <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
     </div>
-    {selected && <TimelineControl periods={periods} value={selected.periodKey} onChange={(period) => update({ period, territory: undefined })} />}
-    {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={searchParams.get("territory") ?? undefined} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
-    <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
   </section>;
 }
