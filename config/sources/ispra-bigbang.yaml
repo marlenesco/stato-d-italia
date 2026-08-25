@@ -1,0 +1,18 @@
+source_id: ispra-bigbang-10
+publisher: ISPRA
+dataset_name: BIGBANG 10.0 — Bilancio Idrologico Nazionale
+landing_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG_ISPRA.html
+download_urls:
+  italy: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/excel_tables/bigbang100_tables_italy_01/download/en/1/BIGBANG100_TABLES_ITALY_01.xlsx
+  regions: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/excel_tables/bigbang100_tables_regions_02/download/en/1/BIGBANG100_TABLES_REGIONS_02.xlsx
+license: IOLD2-Italian Open Data License v2.0
+geographical_granularity: [country, region]
+temporal_granularity: annual
+first_available_year: 1951
+latest_available_year: 2025
+publication_frequency: annual
+official_status: official national statistics; BIGBANG model estimate
+methodology_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG_ISPRA.html
+known_limitations:
+  - Model estimates are recalculated with each BIGBANG version; compare values only within same version.
+  - No municipality or province data is supplied by selected tables.

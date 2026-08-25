@@ -145,12 +145,12 @@ def load_territory_index(canonical_root: Path, year: int = 2024) -> dict[str, di
             index[properties["territory_id"]] = properties
     index["it:country:IT"] = {
         "territory_id": "it:country:IT",
-        "territory_version_id": "it:country:IT@2024-01-01",
+        "territory_version_id": f"it:country:IT@{year}-01-01",
         "level": "country",
         "istat_code": "IT",
         "name": "Italia",
         "name_normalized": "italia",
         "parent_istat_code": None,
-        "reference_date": "2024-01-01",
+        "reference_date": f"{year}-01-01",
     }
     return index

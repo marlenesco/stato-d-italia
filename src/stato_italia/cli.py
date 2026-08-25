@@ -6,10 +6,14 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .analytics import build_soil_analytics
 from .common import json_dump, now_iso
-from .release import LocalObjectStore, R2ObjectStore, publish_release, rollback
+from .delivery import generate_soil_delivery
+from .release import LocalObjectStore, R2ObjectStore, ReleaseArtifact, publish_release, rollback
 from .soil import ingest_soil
 from .territories import SOURCE_YEARS, ingest_boundaries
+from .water import ingest_water
+from .water_delivery import generate_water_delivery
 from .tiles import build_pmtiles
 
 
@@ -30,26 +34,56 @@ def run(args: argparse.Namespace) -> int:
     root = Path(args.workdir)
     output = Path(args.output)
     canonical = root / "canonical"
+    derived = root / "derived"
+    delivery = root / "delivery"
+    release_id = args.release_id or _release_id()
     boundaries = ingest_boundaries(root, canonical, SOURCE_YEARS, force=args.force)
     soil = ingest_soil(root, canonical, force=args.force)
-    changed = boundaries["changed"] or soil["changed"]
-    pmtiles_path = output / "generated" / "istat-municipalities-2025.pmtiles"
-    if changed or not pmtiles_path.exists():
-        pmtiles = build_pmtiles(canonical / "territories" / "reference_year=2025" / "municipality.parquet", pmtiles_path)
-    else:
-        pmtiles = {"path": str(pmtiles_path), "bytes": pmtiles_path.stat().st_size, "skipped": True}
-    artifacts = sorted({
-        *[path for path in (root / "raw").rglob("*") if path.is_file() and path.suffix in {".zip", ".xlsx", ".json"}],
-        *[path for path in canonical.rglob("*.parquet")],
-        Path(pmtiles["path"]),
-    })
+    water = ingest_water(root, canonical, force=args.force)
+    analytics = build_soil_analytics(
+        canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
+        canonical,
+        derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
+        force=args.force or soil["changed"],
+    )
+    changed = boundaries["changed"] or soil["changed"] or water["changed"] or analytics["changed"]
+    pmtiles: dict[str, dict] = {}
+    for level in ("municipality", "province", "region"):
+        pmtiles_path = delivery / "soil" / "geometry" / f"istat-{level}-2025.pmtiles"
+        if boundaries["changed"] or not pmtiles_path.exists():
+            pmtiles[level] = build_pmtiles(canonical / "territories" / "reference_year=2025" / f"{level}.parquet", pmtiles_path)
+        else:
+            pmtiles[level] = {"path": str(pmtiles_path), "bytes": pmtiles_path.stat().st_size, "skipped": True}
+    delivery_report = generate_soil_delivery(
+        canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
+        derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
+        canonical,
+        root,
+        delivery,
+        release_id,
+        force=args.force or boundaries["changed"] or soil["changed"] or analytics["changed"],
+    )
+    water_delivery = generate_water_delivery(
+        canonical / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet",
+        delivery, release_id, force=args.force or water["changed"],
+    )
+    changed = changed or water_delivery["changed"]
+    changed = changed or delivery_report["changed"]
+    artifacts = [
+        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in (root / "raw").rglob("*") if path.is_file() and path.suffix in {".zip", ".xlsx", ".json"}],
+        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in canonical.rglob("*.parquet")],
+        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in derived.rglob("*.parquet")],
+        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in delivery.rglob("*.json")],
+        *[ReleaseArtifact(Path(info["path"]), str(Path(info["path"]).relative_to(root))) for info in pmtiles.values()],
+    ]
+    artifacts.sort(key=lambda artifact: artifact.logical_path)
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
-    manifest = publish_release(store, args.release_id or _release_id(), artifacts) if changed else store.read_json("manifest.json")
+    manifest = publish_release(store, release_id, artifacts) if changed else store.read_json("manifest.json")
     raw_soil_bytes = soil["source"]["bytes"]
     soil_parquet_bytes = soil["canonical_bytes"]
     territory_parquet_bytes = _bytes_under(canonical / "territories", (".parquet",))
     raw_all_bytes = _bytes_under(root / "raw", (".zip", ".xlsx"))
-    shared_bytes = raw_all_bytes - raw_soil_bytes + territory_parquet_bytes + pmtiles["bytes"]
+    shared_bytes = raw_all_bytes - raw_soil_bytes + territory_parquet_bytes + sum(info["bytes"] for info in pmtiles.values())
     estimate = {
         "assumption": "Each analogous domain has ISPRA-soil-sized raw and canonical table; historical ISTAT and PMTiles are shared once.",
         "domains_5_bytes": shared_bytes + 5 * (raw_soil_bytes + soil_parquet_bytes),
@@ -65,12 +99,16 @@ def run(args: argparse.Namespace) -> int:
         "boundaries": boundaries,
         "pmtiles": pmtiles,
         "soil": soil,
+        "water": water,
+        "analytics": analytics,
+        "delivery": {key: value for key, value in delivery_report.items() if key != "files"},
+        "water_delivery": {key: value for key, value in water_delivery.items() if key != "files"},
         "storage": {
             "raw_all_bytes": raw_all_bytes,
             "raw_soil_bytes": raw_soil_bytes,
             "canonical_soil_parquet_bytes": soil_parquet_bytes,
             "canonical_territories_parquet_bytes": territory_parquet_bytes,
-            "pmtiles_bytes": pmtiles["bytes"],
+            "pmtiles_bytes": sum(info["bytes"] for info in pmtiles.values()),
             "analogue_domain_estimate": estimate,
         },
         "manifest": manifest,

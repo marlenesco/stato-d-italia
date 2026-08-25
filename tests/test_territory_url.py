@@ -2,7 +2,7 @@ import zipfile
 from pathlib import Path
 
 from stato_italia import territories
-from stato_italia.territories import boundary_url
+from stato_italia.territories import boundary_url, load_territory_index
 
 
 def test_istat_url_eras_are_explicit() -> None:
@@ -41,3 +41,15 @@ def test_boundary_ingest_creates_partition_directories(tmp_path: Path, monkeypat
 
     for level in ("municipality", "province", "region"):
         assert (canonical / "territories" / "reference_year=2025" / f"{level}.parquet").exists()
+
+
+def test_country_version_matches_requested_territory_reference_year(tmp_path: Path) -> None:
+    reference = tmp_path / "canonical" / "territories" / "reference_year=2025"
+    reference.mkdir(parents=True)
+    for level in ("municipality", "province", "region"):
+        # Empty Parquet is sufficient: country is injected by territory index.
+        import pandas as pd
+        pd.DataFrame(columns=["territory_id", "name", "geometry_wkb"]).to_parquet(reference / f"{level}.parquet")
+    country = load_territory_index(tmp_path / "canonical", year=2025)["it:country:IT"]
+    assert country["territory_version_id"] == "it:country:IT@2025-01-01"
+    assert country["reference_date"] == "2025-01-01"
