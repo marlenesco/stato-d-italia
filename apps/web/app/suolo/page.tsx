@@ -7,9 +7,8 @@ export const revalidate = 60;
 export default async function SoilPage() {
   try {
     const data = await loadSoilData();
-    return <main className="shell">
+    return <main className="shell soil-shell">
       <SiteNav section="soil" />
-      <section className="page-intro"><p className="eyebrow">ISPRA / SNPA · release {data.releaseId}</p><h1>Consumo di suolo</h1><p>Valori ufficiali per periodo. Analisi, ranking e percentili sono elaborazioni riproducibili del progetto.</p></section>
       <Suspense fallback={<section className="workspace-loading" aria-busy="true">Preparo l’esploratore…</section>}><ThemeWorkspace data={data} themeLabel="consumo di suolo" /></Suspense>
     </main>;
   } catch (error) {
