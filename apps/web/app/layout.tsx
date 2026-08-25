@@ -8,6 +8,10 @@ import "./map-sidebar-controls.css";
 import "./water-layout.css";
 import "./site-layout.css";
 import "./hero-system.css";
+import "./domain-workspace.css";
+import "./domain-theme.css";
+import "./domain-map.css";
+import "./emissions.css";
 
 export const metadata: Metadata = {
   title: "Stato d'Italia",

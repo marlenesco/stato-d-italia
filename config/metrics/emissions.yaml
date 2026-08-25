@@ -1,0 +1,33 @@
+metrics:
+  - {id: emissions_ghg_co2e, label_it: Emissioni nazionali di gas serra in CO2 equivalente, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_ghg_co2, label_it: Emissioni nazionali di CO2, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_ghg_ch4, label_it: Emissioni nazionali di CH4, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_ghg_n2o, label_it: Emissioni nazionali di N2O, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_ghg_f_gases, label_it: Emissioni nazionali di gas fluorurati, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_ghg_f_gases_co2e, label_it: Emissioni nazionali di gas fluorurati in CO2 equivalente, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_nox_as_no2, label_it: Emissioni nazionali di NOx come NO2, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_nmvoc, label_it: Emissioni nazionali di NMVOC, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_sox_as_so2, label_it: Emissioni nazionali di SOx come SO2, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_nh3, label_it: Emissioni nazionali di NH3, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_pm25, label_it: Emissioni nazionali di PM2.5, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_pm10, label_it: Emissioni nazionali di PM10, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_tsp, label_it: Emissioni nazionali di particolato totale sospeso, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_black_carbon, label_it: Emissioni nazionali di black carbon, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_co, label_it: Emissioni nazionali di monossido di carbonio, unit_ucum: kt, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_lead, label_it: Emissioni nazionali di piombo, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_cadmium, label_it: Emissioni nazionali di cadmio, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_mercury, label_it: Emissioni nazionali di mercurio, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_arsenic, label_it: Emissioni nazionali di arsenico, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_chromium, label_it: Emissioni nazionali di cromo, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_copper, label_it: Emissioni nazionali di rame, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_nickel, label_it: Emissioni nazionali di nichel, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_selenium, label_it: Emissioni nazionali di selenio, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_zinc, label_it: Emissioni nazionali di zinco, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_pcd_dioxins_furans, label_it: Emissioni nazionali di diossine e furani, unit_ucum: g, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_benzo_a_pyrene, label_it: Emissioni nazionali di benzo(a)pirene, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_benzo_b_fluoranthene, label_it: Emissioni nazionali di benzo(b)fluorantene, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_benzo_k_fluoranthene, label_it: Emissioni nazionali di benzo(k)fluorantene, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_indeno_123cd_pyrene, label_it: Emissioni nazionali di indeno(1,2,3-cd)pirene, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_pah_total_1_4, label_it: Emissioni nazionali di IPA totali 1-4, unit_ucum: t, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_hexachlorobenzene, label_it: Emissioni nazionali di esaclorobenzene, unit_ucum: kg, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}
+  - {id: emissions_air_pcbs, label_it: Emissioni nazionali di PCB, unit_ucum: kg, source_kind: official_observation, temporal_kind: annual, higher_is: greater_pressure}

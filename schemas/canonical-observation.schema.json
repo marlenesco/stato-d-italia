@@ -7,15 +7,16 @@
     "dataset_id": {"type": "string"},
     "source_asset_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "metric_id": {"type": "string"},
+    "source_dimensions_json": {"type": "string"},
     "territory_id": {"type": "string"},
     "territory_version_id": {"type": "string"},
     "territory_level": {"enum": ["country", "region", "province", "municipality"]},
     "period_start": {"type": "string", "format": "date"},
     "period_end": {"type": "string", "format": "date"},
-    "value_decimal": {"type": "number"},
+    "value_decimal": {"type": ["number", "null"]},
+    "value_state": {"enum": ["observed", "unavailable", "suppressed", "not_applicable"]},
     "unit_ucum": {"type": "string"},
     "official_status": {"enum": ["validated", "provisional", "unknown"]},
     "ingested_at": {"type": "string", "format": "date-time"}
   }
 }
-

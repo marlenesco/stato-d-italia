@@ -30,10 +30,10 @@ def _frame(path: Path, region: bool) -> pd.DataFrame:
     return frame
 
 
-def ingest_water(raw_root: Path, canonical_root: Path, force: bool = False) -> dict:
+def ingest_water(raw_root: Path, canonical_root: Path, force: bool = False, offline: bool = False) -> dict:
     raw_dir = raw_root / "raw" / SOURCE["source_id"]
-    italy = download(SOURCE["download_urls"]["italy"], raw_dir / "bigbang100-italy.xlsx", SOURCE["source_id"])
-    regions = download(SOURCE["download_urls"]["regions"], raw_dir / "bigbang100-regions.xlsx", SOURCE["source_id"])
+    italy = download(SOURCE["download_urls"]["italy"], raw_dir / "bigbang100-italy.xlsx", SOURCE["source_id"], offline=offline)
+    regions = download(SOURCE["download_urls"]["regions"], raw_dir / "bigbang100-regions.xlsx", SOURCE["source_id"], offline=offline)
     destination = canonical_root / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet"
     if italy.get("unchanged") and regions.get("unchanged") and destination.exists() and not force:
         table = pd.read_parquet(destination)

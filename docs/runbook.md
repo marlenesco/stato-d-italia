@@ -21,6 +21,50 @@ uv run stato-data run --workdir data --output artifacts
 
 L'esecuzione locale non deve modificare la release R2 attiva.
 
+## Acquisizione automatica locale
+
+Ogni dominio scarica direttamente dalla propria fonte ufficiale e archivia raw,
+licenza/metadati, checksum e URL. Nessun `cp` o input manuale.
+
+Per acquisire solo dissesto IdroGEO:
+
+```sh
+uv run stato-data fetch dissesto --workdir data
+```
+
+Per acquisire solo raw del dominio Emissioni ISPRA:
+
+```sh
+uv run stato-data fetch emissions --workdir data
+```
+
+Per acquisire, validare e pubblicare nella object store locale tutti i domini
+configurati:
+
+```sh
+uv run stato-data run --workdir data --output artifacts --report reports/local-ingestion.json
+```
+
+`run` invoca anche l'acquisizione IdroGEO. Usa i quattro export JSON ufficiali
+senza `outputFormat`, quindi non scarica CSV/Excel né effettua richieste per
+singolo territorio. Archivio raw conserva le risposte esatte. Un errore HTTP,
+schema o copertura territoriale interrompe flusso.
+
+## Riesecuzione offline
+
+`--offline` non effettua richieste HTTP e riusa solo raw già acquisiti:
+
+```sh
+uv run stato-data run --offline --workdir data --output artifacts --report reports/local-ingestion.json
+```
+
+Poi controlli obbligatori:
+
+```sh
+uv run pytest -q
+git diff --check
+```
+
 ## Publish R2
 
 ```sh
