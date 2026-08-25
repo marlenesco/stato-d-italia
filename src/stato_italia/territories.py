@@ -90,14 +90,17 @@ def _features(shp: Path, level: str, reference_date: str) -> list[dict]:
     return dissolved
 
 
-def ingest_boundaries(raw_root: Path, canonical_root: Path, years: Iterable[int] = SOURCE_YEARS, force: bool = False) -> dict:
+def ingest_boundaries(
+    raw_root: Path, canonical_root: Path, years: Iterable[int] = SOURCE_YEARS,
+    force: bool = False, offline: bool = False,
+) -> dict:
     """Archive official ZIPs, retain every source geometry version as canonical GeoJSON."""
     run = {"source_id": "istat-administrative-boundaries", "years": [], "errors": [], "changed": False}
     for year in years:
         url = boundary_url(year)
         archive = raw_root / "raw" / "istat-administrative-boundaries" / str(year) / f"limiti-{year}-generalized.zip"
         try:
-            metadata = download(url, archive, "istat-administrative-boundaries")
+            metadata = download(url, archive, "istat-administrative-boundaries", offline=offline)
             existing = canonical_root / "territories" / f"reference_year={year}"
             existing_files = [existing / f"{level}.parquet" for level in ("municipality", "province", "region")]
             if metadata.get("unchanged") and not force and all(path.exists() for path in existing_files):

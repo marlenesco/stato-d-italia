@@ -1,11 +1,13 @@
 import Link from "next/link";
 
-type Section = "home" | "soil" | "water" | "territory";
+type Section = "home" | "soil" | "water" | "emissions" | "hydrogeological-risk" | "territory";
 
 const items: Array<{ id: Exclude<Section, "territory">; href: string; label: string }> = [
   { id: "home", href: "/", label: "Panoramica" },
   { id: "soil", href: "/suolo", label: "Suolo" },
   { id: "water", href: "/acqua", label: "Acqua" },
+  { id: "emissions", href: "/emissioni", label: "Emissioni" },
+  { id: "hydrogeological-risk", href: "/dissesto", label: "Dissesto" },
 ];
 
 export function SiteNav({ section }: { section?: Section }) {

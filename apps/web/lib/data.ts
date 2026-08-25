@@ -52,6 +52,14 @@ export type WaterProfile = {
 
 export type WaterData = SoilData & { profileUrls: Record<string, string> };
 export type WaterOverview = { releaseId: string; countryProfile: WaterProfile };
+export type DissestoData = SoilData;
+export type EmissionsOverview = {
+  releaseId: string;
+  greenhouseGases: { label: string; coverage: string; unit: string; seriesLabel: string; series: Array<[number, number]>; metrics: string[] };
+  airPollutantsNfr: { label: string; coverage: string; metrics: number; sourceDimensions: string[] };
+  provincialDisaggregation: { label: string; coverage: string; metrics: number; sourceDimensions: string[] };
+  provenanceRef: string;
+};
 
 export type HomeOverview = {
   releaseId: string;
@@ -107,6 +115,22 @@ async function waterRelease() {
   return { base, release, index };
 }
 
+async function dissestoRelease() {
+  const { base, release } = await activeRelease();
+  const index = await fetchJson<SoilIndex>(asset(base, release, "delivery/dissesto/index.json"), 300);
+  return { base, release, index };
+}
+
+async function emissionsRelease() {
+  const { base, release } = await activeRelease();
+  const index = await fetchJson<{ overview: string; provenance: string }>(asset(base, release, "delivery/emissions/index.json"), 300);
+  return { base, release, index };
+}
+
+function geometryUrls(base: string, release: Release, paths: string[]) {
+  return Object.fromEntries(paths.map((path) => [path.match(/istat-(municipality|province|region)-\d{4}/)?.[1] ?? "unknown", `${asset(base, release, path)}?release=${release.releaseId}`]));
+}
+
 async function profileFromShard(base: string, release: Release, logicalPath: string, territoryId?: string) {
   const shard = await fetchJson<{ profiles: TerritoryProfileData[] }>(asset(base, release, logicalPath), 300);
   const profile = territoryId ? shard.profiles.find((candidate) => candidate.territory.territoryId === territoryId) : shard.profiles[0];
@@ -122,8 +146,25 @@ export async function loadSoilData(): Promise<SoilData> {
     provenance,
     maps: index.maps.map((path) => parseMap(path, asset(base, release, path))),
     rankings: Object.fromEntries(index.rankings.map((path) => [path, asset(base, release, path)])),
-    geometry: Object.fromEntries(index.geometry.map((path) => [path.match(/istat-(municipality|province|region)-2025/)?.[1] ?? "unknown", `${asset(base, release, path)}?release=${release.releaseId}`])),
+    geometry: geometryUrls(base, release, index.geometry),
   };
+}
+
+export async function loadDissestoData(): Promise<DissestoData> {
+  const { base, release, index } = await dissestoRelease();
+  const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
+  return {
+    releaseId: release.releaseId,
+    provenance,
+    maps: index.maps.map((path) => parseMap(path, asset(base, release, path))),
+    rankings: {},
+    geometry: geometryUrls(base, release, index.geometry),
+  };
+}
+
+export async function loadEmissionsOverview(): Promise<EmissionsOverview> {
+  const { base, release, index } = await emissionsRelease();
+  return fetchJson<EmissionsOverview>(asset(base, release, index.overview), 300);
 }
 
 export async function loadWaterData(): Promise<WaterData> {

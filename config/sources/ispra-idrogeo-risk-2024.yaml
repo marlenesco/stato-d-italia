@@ -1,0 +1,43 @@
+source_id: ispra-idrogeo-risk-2024
+publisher: ISPRA — Piattaforma nazionale IdroGEO
+dataset_name: Pericolosità e indicatori di rischio idrogeologico
+landing_url: https://idrogeo.isprambiente.it/app/page/open-data
+license: CC BY 4.0; retain downloaded licence and metadata with raw asset
+geographical_granularity: [country, region, province, municipality]
+temporal_granularity: "snapshot: landslide indicators 2024; flood indicators 2020"
+first_available_year: 2020
+latest_available_year: 2024
+publication_frequency: irregular
+official_status: official snapshot; preserve any source status field
+methodology_url: https://www.isprambiente.gov.it/it/pubblicazioni/rapporti/dissesto-idrogeologico-in-italia-pericolosita-e-indicatori-di-rischio-edizione-2024
+known_limitations:
+  - This is not an annual time series.
+  - The value -1 means data unavailable and must never become zero.
+  - Source indicators use ISTAT 2024 administrative limits.
+source_contract:
+  api_base_url: https://idrogeo.isprambiente.it/api/pir
+  json_exports:
+    country: italia/export
+    region: regioni/export
+    province: province/export
+    municipality: comuni/export
+  metadata_urls:
+    Metadati_open_data_PIR.xlsx: https://idrogeo.isprambiente.it/app/assets/data/Metadati_open_data_PIR.xlsx
+    Licenza_Condizioni_Uso_Pericolosita_Indicatori_Rischio_Frane_Alluvioni_ISPRA.pdf: https://idrogeo.isprambiente.it/cms/wp-content/uploads/2025/07/Licenza_Condizioni_Uso_Pericolosita_Indicatori_Rischio_Frane_Alluvioni_ISPRA.pdf
+  metrics:
+    ar_id_p3:
+      metric_id: hydrogeological_flood_high_hazard_area_km2
+      unit_ucum: km2
+      reference_year: 2020
+    pop_idr_p3:
+      metric_id: hydrogeological_flood_high_hazard_population
+      unit_ucum: '{persons}'
+      reference_year: 2020
+    ar_fr_p4:
+      metric_id: hydrogeological_landslide_very_high_hazard_area_km2
+      unit_ucum: km2
+      reference_year: 2024
+    pop_fr_p4:
+      metric_id: hydrogeological_landslide_very_high_hazard_population
+      unit_ucum: '{persons}'
+      reference_year: 2024

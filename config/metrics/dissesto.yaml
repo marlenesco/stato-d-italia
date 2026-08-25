@@ -1,0 +1,25 @@
+metrics:
+  - id: hydrogeological_flood_high_hazard_area_km2
+    label_it: Superficie a pericolosità idraulica elevata
+    unit_ucum: km2
+    source_kind: official_observation
+    temporal_kind: snapshot
+    higher_is: greater_pressure
+  - id: hydrogeological_flood_high_hazard_population
+    label_it: Popolazione in area a pericolosità idraulica elevata
+    unit_ucum: '{persons}'
+    source_kind: official_observation
+    temporal_kind: snapshot
+    higher_is: greater_pressure
+  - id: hydrogeological_landslide_very_high_hazard_area_km2
+    label_it: Superficie a pericolosità da frana molto elevata
+    unit_ucum: km2
+    source_kind: official_observation
+    temporal_kind: snapshot
+    higher_is: greater_pressure
+  - id: hydrogeological_landslide_very_high_hazard_population
+    label_it: Popolazione in area a pericolosità da frana molto elevata
+    unit_ucum: '{persons}'
+    source_kind: official_observation
+    temporal_kind: snapshot
+    higher_is: greater_pressure

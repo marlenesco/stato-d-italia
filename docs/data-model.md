@@ -83,9 +83,18 @@ dataset
 metric
 territory_version
 period
+source_dimensions (quando presenti nella fonte)
 ```
 
 Deve mantenere provenance verso l'artefatto raw.
+
+`source_dimensions_json` conserva dimensioni ufficiali necessarie a
+distinguere osservazioni altrimenti omonime, ad esempio attività CORINAIR SNAP
+nelle emissioni. Non contiene dimensioni inventate dal progetto.
+
+`value_state`, se presente, distingue `observed`, `unavailable`, `suppressed`
+e `not_applicable`. Per un valore indisponibile `value_decimal` resta `null`:
+non viene convertito in zero.
 
 ### DerivedMetric
 

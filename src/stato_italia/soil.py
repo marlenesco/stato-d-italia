@@ -147,9 +147,9 @@ def _summarize(source: dict, destination: Path) -> dict:
     }
 
 
-def ingest_soil(raw_root: Path, canonical_root: Path, force: bool = False) -> dict:
+def ingest_soil(raw_root: Path, canonical_root: Path, force: bool = False, offline: bool = False) -> dict:
     workbook = raw_root / "raw" / "ispra-soil-2025" / "consumo-di-suolo-2025.xlsx"
-    source = download(SOIL_URL, workbook, "ispra-soil-2025")
+    source = download(SOIL_URL, workbook, "ispra-soil-2025", offline=offline)
     destination = canonical_root / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet"
     if source.get("unchanged") and destination.exists() and not force:
         current = pd.read_parquet(destination, columns=["territory_id", "territory_version_id"])

@@ -13,7 +13,7 @@ def test_istat_url_eras_are_explicit() -> None:
 
 
 def test_boundary_ingest_creates_partition_directories(tmp_path: Path, monkeypatch) -> None:
-    def fake_download(_url: str, destination: Path, _source_id: str) -> dict:
+    def fake_download(_url: str, destination: Path, _source_id: str, *, offline: bool = False) -> dict:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(destination, "w") as archive:
             archive.writestr("placeholder", "")

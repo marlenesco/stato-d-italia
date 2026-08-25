@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { MapOption } from "../lib/data";
+import { domainColorRamps, type DomainColorName, type DomainColorRamp } from "../lib/domain-colors";
 import { territoryLabel } from "../lib/territory-labels";
 
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
@@ -12,9 +13,9 @@ type RankingState = "loading" | "available" | "not-applicable" | "unavailable";
 
 let protocol: import("pmtiles").Protocol | undefined;
 
-function fillColorExpression(min: number, max: number): import("maplibre-gl").ExpressionSpecification {
+function fillColorExpression(min: number, max: number, ramp: DomainColorRamp): import("maplibre-gl").ExpressionSpecification {
   const midpoint = min + (max - min) / 2;
-  return ["interpolate", ["linear"], ["coalesce", ["feature-state", "value"], min], min, "#f2e7be", midpoint, "#d98c4b", max, "#8e2f25"];
+  return ["interpolate", ["linear"], ["coalesce", ["feature-state", "value"], min], min, ramp.low, midpoint, ramp.mid, max, ramp.high];
 }
 
 function formatNumber(value: number, unit?: string) {
@@ -32,7 +33,8 @@ function territoryHref(level: string, istatCode: string) {
   return `/territori/${route}/${istatCode}`;
 }
 
-export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string }) {
+export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, colorRamp = "soil" }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; colorRamp?: DomainColorName }) {
+  const ramp = domainColorRamps[colorRamp];
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const featureIds = useRef<string[]>([]);
@@ -78,9 +80,9 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
             version: 8,
             sources: { territories: { type: "vector", url: `pmtiles://${pmtilesUrl}`, promoteId: "territory_id" } },
             layers: [
-              { id: "background", type: "background", paint: { "background-color": "#f1f2ec" } },
-              { id: "soil-fill", type: "fill", source: "territories", "source-layer": "territories", paint: { "fill-color": fillColorExpression(0, 1), "fill-opacity": 0.82 } },
-              { id: "soil-line", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": "#fffdf7", "line-width": 0.4 } },
+              { id: "background", type: "background", paint: { "background-color": ramp.surface } },
+              { id: "soil-fill", type: "fill", source: "territories", "source-layer": "territories", paint: { "fill-color": fillColorExpression(0, 1, ramp), "fill-opacity": 0.82 } },
+              { id: "soil-line", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": ramp.outline, "line-width": 0.4 } },
               { id: "soil-selected", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": "#182120", "line-width": ["case", ["boolean", ["feature-state", "selected"], false], 2.2, 0] } },
             ],
           },
@@ -116,7 +118,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     }
     void createMap();
     return () => { disposed = true; resizeObserver?.disconnect(); mapRef.current = null; featureIds.current = []; currentDataset.current = null; selectedFeatureId.current = null; map?.remove(); };
-  }, [geometryUrl]);
+  }, [geometryUrl, ramp]);
 
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
@@ -136,7 +138,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
         featureIds.current.forEach((territoryId) => activeMap.removeFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }));
         nextDataset.values.forEach(([territoryId, value]) => activeMap.setFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }, { value }));
         featureIds.current = nextDataset.values.map(([territoryId]) => territoryId);
-        activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(Math.min(...values), Math.max(...values)));
+        activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(Math.min(...values), Math.max(...values), ramp));
         currentDataset.current = nextDataset;
         setDataset(nextDataset);
       } catch (caught) {
@@ -147,7 +149,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     }
     void updateValues();
     return () => controller.abort();
-  }, [mapReady, option.url]);
+  }, [mapReady, option.url, ramp]);
 
   useEffect(() => { setSelectedId(selectedTerritoryId ?? null); }, [selectedTerritoryId]);
 
@@ -183,7 +185,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const middle = min !== null && max !== null ? min + (max - min) / 2 : null;
 
   return <>
-    <section className="map-stage" aria-labelledby="map-title">
+    <section className={`map-stage map-stage--${colorRamp}`} style={{ "--map-ramp-low": ramp.low, "--map-ramp-mid": ramp.mid, "--map-ramp-high": ramp.high, "--map-ramp-outline": ramp.outline } as CSSProperties} aria-labelledby="map-title">
       <header className="map-heading"><div><p className="eyebrow">Mappa tematica</p><h2 id="map-title">{metricLabel}</h2><p>{dataset ? `${formatPeriod(dataset.periodStart, dataset.periodEnd)} · ${dataset.unit}` : option.periodKey}</p></div><p className="map-status" aria-live="polite">{valuesLoading ? "Carico valori…" : mapError ? "Valori non disponibili" : "Seleziona un territorio"}</p></header>
       <div className="map-wrap"><div ref={container} className="map" role="img" aria-label="Mappa tematica interattiva. La tabella di confronto è disponibile sotto." />
         {min !== null && middle !== null && max !== null && <aside className="map-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore pubblicato</strong><div className="legend-scale" aria-hidden="true" /><div className="legend-values"><span>{formatNumber(min, dataset?.unit)}</span><span>{formatNumber(middle, dataset?.unit)}</span><span>{formatNumber(max, dataset?.unit)}</span></div><p>Il colore mostra l’intensità del valore, non un giudizio sul territorio.</p></aside>}

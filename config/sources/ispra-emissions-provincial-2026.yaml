@@ -1,0 +1,39 @@
+source_id: ispra-emissions-provincial-2026
+publisher: ISPRA — Sezione Emissioni in atmosfera
+dataset_name: Disaggregazione provinciale dell'inventario nazionale delle emissioni in atmosfera
+landing_url: https://emissioni.sina.isprambiente.it/disaggregazione-provinciale/
+download_url: https://emissioni.sina.isprambiente.it/wp-content/uploads/2026/06/Disaggregazione_provinciale_inventario_2023_rev06_2026.xlsx
+download_link_filename_pattern: '^Disaggregazione_provinciale_inventario_\d{4}_rev\d{2}_\d{4}\.xlsx$'
+dataset_version: 2026-2023-disaggregation
+license: verify licence and conditions attached to the downloaded workbook before redistribution
+geographical_granularity: [province, grid]
+temporal_granularity: "annual inventory snapshots: 1990, 1995, 2000, 2005, 2010, 2015, 2019, 2023"
+first_available_year: 1990
+latest_available_year: 2023
+publication_frequency: irregular
+official_status: official top-down disaggregation; preserve publication status as unknown
+methodology_url: https://emissioni.sina.isprambiente.it/disaggregazione-provinciale-emissioni/
+known_limitations:
+  - The workbook is an official top-down disaggregation of the national inventory, not direct measurement data.
+  - Province rows are disaggregated by CORINAIR SNAP activity and pollutant; values must not be silently summed into a total.
+  - The initial slice retains 2019 and 2023 only, because matching ISTAT territory versions are already archived by this project.
+  - Historical values before 2019 require explicitly matched ISTAT territory versions; four obsolete Sardinian provinces occur in 2010 and 2015.
+  - Grid records are outside the initial administrative-territory slice.
+source_contract:
+  workbook_sheet: DB_ON_LINE_1
+  required_columns:
+    - COD_REGI
+    - NOM_REGI
+    - COD_PROV
+    - NOME_PROV
+    - G_EMEP
+    - SNAP
+    - Descrizione
+    - COD_POL
+    - NOMPOL
+    - UNI_mis
+    - '2019'
+    - '2023'
+  province_reference_year_by_period:
+    '2019': 2019
+    '2023': 2023
