@@ -5,6 +5,7 @@ import "./mobile-overrides.css";
 import "./water.css";
 import "./map-sidebar.css";
 import "./map-sidebar-controls.css";
+import "./water-layout.css";
 
 export const metadata: Metadata = {
   title: "Stato d'Italia",
