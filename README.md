@@ -2,6 +2,9 @@
 
 Milestone 1–4 only. No Next.js UI.
 
+Start with [project context](project-context.md), [working rules](AGENTS.md),
+and the accepted [architecture decisions](docs/adr/).
+
 ```sh
 uv sync --all-groups
 uv run stato-data run --workdir data --output artifacts
@@ -21,4 +24,3 @@ R2_SECRET_ACCESS_KEY
 R2_ENDPOINT
 R2_BUCKET
 ```
-
