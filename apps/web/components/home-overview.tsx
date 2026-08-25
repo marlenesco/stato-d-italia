@@ -50,16 +50,14 @@ export function HomeOverview({ overview }: { overview: HomeOverview }) {
     </PageSidebar>
     <div className="home-site-content">
     <section className="home-hero">
-      <p className="eyebrow">Osservatorio territoriale · dati ufficiali</p>
-      <h1>Come cambia<br />l&apos;Italia.</h1>
-      <p className="home-lede">Leggi cambiamenti ambientali e territoriali nel tempo. Fonti, periodi e limiti restano sempre visibili.</p>
-      <Link className="primary-link" href={signalHref(overview.periodKey.replace("–", "-"))}>Esplora consumo di suolo <span aria-hidden="true">→</span></Link>
+      <div className="home-hero-title"><p className="eyebrow">Osservatorio territoriale · dati ufficiali</p><h1>Come cambia l&apos;Italia.</h1></div>
+      <div className="home-hero-copy"><p className="home-lede">Leggi cambiamenti ambientali e territoriali nel tempo. Fonti, periodi e limiti restano sempre visibili.</p><Link className="primary-link" href={signalHref(overview.periodKey.replace("–", "-"))}>Esplora consumo di suolo <span aria-hidden="true">→</span></Link></div>
+      <TrendLine series={overview.netSeries} />
     </section>
 
     <section id="lettura" className="national-reading" aria-labelledby="national-reading-title" tabIndex={-1}>
       <div><p className="eyebrow">Italia · {overview.periodKey}</p><h2 id="national-reading-title">Cosa emerge</h2></div>
       <p className="reading-copy">Nel periodo più recente, incremento netto nazionale: <strong>{number(overview.latestNet.value, 0)} {overview.latestNet.unit}</strong>. Rispetto al periodo annuale precedente: <strong>{previous}</strong>. Il valore è osservazione ufficiale; ranking e segnali sono elaborazioni versionate.</p>
-      <TrendLine series={overview.netSeries} />
     </section>
 
     <section id="segnali" className="signal-grid" aria-label="Segnali regionali" tabIndex={-1}>
