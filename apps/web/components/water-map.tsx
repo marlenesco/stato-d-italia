@@ -41,6 +41,7 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
     const pmtilesUrl = geometryUrl;
     const mapTarget = target;
     let map: import("maplibre-gl").Map | undefined;
+    let resizeObserver: ResizeObserver | undefined;
     let disposed = false;
     async function createMap() {
       try {
@@ -57,6 +58,9 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
         activeMap.once("load", () => {
           if (disposed) return;
           mapRef.current = activeMap;
+          resizeObserver = new ResizeObserver(() => activeMap.resize());
+          resizeObserver.observe(mapTarget);
+          requestAnimationFrame(() => activeMap.resize());
           setMapReady(true);
           activeMap.on("click", "water-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) setSelected({ id: String(feature.id), name: typeof feature.properties?.name === "string" ? feature.properties.name : undefined }); });
           const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
@@ -78,7 +82,7 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
       }
     }
     void createMap();
-    return () => { disposed = true; mapRef.current = null; featureIds.current = []; currentDataset.current = null; map?.remove(); };
+    return () => { disposed = true; resizeObserver?.disconnect(); mapRef.current = null; featureIds.current = []; currentDataset.current = null; map?.remove(); };
   }, [geometryUrl]);
 
   useEffect(() => {

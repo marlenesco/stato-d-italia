@@ -3,6 +3,8 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 import "./mobile-overrides.css";
 import "./water.css";
+import "./map-sidebar.css";
+import "./map-sidebar-controls.css";
 
 export const metadata: Metadata = {
   title: "Stato d'Italia",
