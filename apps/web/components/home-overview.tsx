@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { HomeOverview } from "../lib/data";
+import { PageSidebar } from "./page-sidebar";
 
 function number(value: number, maximumFractionDigits = 0) {
   return new Intl.NumberFormat("it-IT", { maximumFractionDigits }).format(value);
@@ -34,14 +35,20 @@ function TrendLine({ series }: { series: HomeOverview["netSeries"] }) {
 function signalHref(period: string, territoryId?: string) {
   const params = new URLSearchParams({ metric: "soil_net_consumption_hectares", level: "region", period });
   if (territoryId) params.set("territory", territoryId);
-  return `/suolo?${params.toString()}`;
+  return `/suolo?${params.toString()}#mappa`;
 }
 
 export function HomeOverview({ overview }: { overview: HomeOverview }) {
   const previous = overview.previousChange?.status === "available" && overview.previousChange.value !== undefined && overview.previousChange.value !== null
     ? `${overview.previousChange.value > 0 ? "+" : ""}${number(overview.previousChange.value, 1)} ${overview.previousChange.unit}`
     : "Non disponibile";
-  return <>
+  return <section className="home-site-layout">
+    <PageSidebar eyebrow="Osservatorio" title="Italia">
+      <nav className="page-sidebar-nav" aria-label="Sezioni panoramica"><a href="#lettura">Cosa emerge</a><a href="#segnali">Segnali regionali</a><Link href={signalHref(overview.periodKey.replace("–", "-"))}>Esplora mappa suolo →</Link></nav>
+      <section className="sidebar-section"><h3>Periodo corrente</h3><p className="sidebar-context"><strong>{overview.periodKey}</strong>Incremento netto di suolo consumato.</p></section>
+      <section className="sidebar-section"><p className="sidebar-context">Fonti, periodi e limiti restano visibili in ogni approfondimento.</p></section>
+    </PageSidebar>
+    <div className="home-site-content">
     <section className="home-hero">
       <p className="eyebrow">Osservatorio territoriale · dati ufficiali</p>
       <h1>Come cambia<br />l&apos;Italia.</h1>
@@ -49,13 +56,13 @@ export function HomeOverview({ overview }: { overview: HomeOverview }) {
       <Link className="primary-link" href={signalHref(overview.periodKey.replace("–", "-"))}>Esplora consumo di suolo <span aria-hidden="true">→</span></Link>
     </section>
 
-    <section className="national-reading" aria-labelledby="national-reading-title">
+    <section id="lettura" className="national-reading" aria-labelledby="national-reading-title" tabIndex={-1}>
       <div><p className="eyebrow">Italia · {overview.periodKey}</p><h2 id="national-reading-title">Cosa emerge</h2></div>
       <p className="reading-copy">Nel periodo più recente, incremento netto nazionale: <strong>{number(overview.latestNet.value, 0)} {overview.latestNet.unit}</strong>. Rispetto al periodo annuale precedente: <strong>{previous}</strong>. Il valore è osservazione ufficiale; ranking e segnali sono elaborazioni versionate.</p>
       <TrendLine series={overview.netSeries} />
     </section>
 
-    <section className="signal-grid" aria-label="Segnali regionali">
+    <section id="segnali" className="signal-grid" aria-label="Segnali regionali" tabIndex={-1}>
       <article className="signal-panel signal-panel-alert">
         <p className="eyebrow">Da approfondire</p>
         <h2>Incrementi netti più alti</h2>
@@ -70,6 +77,7 @@ export function HomeOverview({ overview }: { overview: HomeOverview }) {
       </article>
     </section>
 
-    <section className="method-note"><p><strong>Come leggere questa pagina.</strong> “Da approfondire” ordina valori ufficiali per incremento netto. Non assegna cause né giudizi. Algoritmo ranking: {overview.algorithmVersion}. <Link href="/suolo">Apri dati, mappa e metodo</Link>.</p><span>Release {overview.releaseId}</span></section>
-  </>;
+    <section className="method-note"><p><strong>Come leggere questa pagina.</strong> “Da approfondire” ordina valori ufficiali per incremento netto. Non assegna cause né giudizi. Algoritmo ranking: {overview.algorithmVersion}. <Link href="/suolo#mappa">Apri dati, mappa e metodo</Link>.</p><span>Release {overview.releaseId}</span></section>
+    </div>
+  </section>;
 }

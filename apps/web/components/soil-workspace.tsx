@@ -65,8 +65,9 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
     update({ level: nextLevel, period: nextPeriod, territory: undefined });
   }
 
-  return <section className="workspace map-workspace" aria-label={`Esplorazione ${themeLabel}`}>
-    <MapSidebar title="Mappa suolo">
+  return <section className="soil-site-layout" aria-label={`Esplorazione ${themeLabel}`}>
+    <MapSidebar title="Consumo di suolo">
+      <a className="sidebar-link sidebar-atlas-link" href="#mappa">Vai alla mappa ↓</a>
       <ExposedMenu label="Metrica" value={metric} onChange={changeMetric} items={metrics.map((id) => ({ id, label: metricLabels[id] ?? id, meta: metricUnits[id] }))} />
       <section className="sidebar-section"><h3>Livello territoriale</h3><div className="level-menu" role="group" aria-label="Livello territoriale">{levels.map((item) => <button type="button" key={item} onClick={() => changeLevel(item)} aria-pressed={item === level}>{levelLabel(item)}</button>)}</div></section>
       {selected && <section className="sidebar-section"><TimelineControl periods={periods} value={selected.periodKey} onChange={(period) => update({ period, territory: undefined })} /></section>}
@@ -74,9 +75,12 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
       <section className="sidebar-section"><p className="sidebar-context">Mappa: osservazioni ufficiali. Confronto e percentile solo quando pubblicati.</p></section>
       <Link className="sidebar-link" href="/">Panoramica nazionale →</Link>
     </MapSidebar>
-    <div className="workspace-canvas">
-      {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={searchParams.get("territory") ?? undefined} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
-      <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
+    <div className="soil-site-content">
+      <section className="soil-hero"><p className="eyebrow">ISPRA / SNPA · release {data.releaseId}</p><h1>Consumo di suolo</h1><p>Valori ufficiali per periodo. Analisi, ranking e percentili sono elaborazioni riproducibili del progetto.</p></section>
+      <section id="mappa" className="soil-workspace" tabIndex={-1} aria-label="Mappa consumo di suolo">
+        {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={searchParams.get("territory") ?? undefined} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
+        <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
+      </section>
     </div>
   </section>;
 }
