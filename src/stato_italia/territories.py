@@ -124,6 +124,7 @@ def ingest_boundaries(raw_root: Path, canonical_root: Path, years: Iterable[int]
                         for feature in features
                     ])
                     parquet = canonical_root / "territories" / f"reference_year={year}" / f"{level}.parquet"
+                    parquet.parent.mkdir(parents=True, exist_ok=True)
                     attributes.to_parquet(parquet, index=False, compression="zstd")
                     record["levels"][level] = len(features)
                 run["years"].append(record)
