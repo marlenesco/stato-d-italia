@@ -44,6 +44,15 @@ type SoilIndex = { maps: string[]; rankings: string[]; geometry: string[]; prove
 
 export type SoilData = { releaseId: string; provenance: Record<string, unknown>; maps: MapOption[]; rankings: Record<string, string>; geometry: Record<string, string> };
 
+export type WaterObservation = { metricId: string; periodEnd: string; value: number; unit: string };
+export type WaterProfile = {
+  latestObservations: WaterObservation[];
+  historicalSeries: Array<{ metricId: string; values: Array<[number, number]> }>;
+};
+
+export type WaterData = SoilData & { profileUrls: Record<string, string> };
+export type WaterOverview = { releaseId: string; countryProfile: WaterProfile };
+
 export type HomeOverview = {
   releaseId: string;
   algorithmVersion: string;
@@ -92,6 +101,12 @@ async function soilRelease() {
   return { base, release, index };
 }
 
+async function waterRelease() {
+  const { base, release } = await activeRelease();
+  const index = await fetchJson<{ maps: string[]; geometry: string[]; provenance: string; profiles?: string[] }>(asset(base, release, "delivery/water/index.json"), 300);
+  return { base, release, index };
+}
+
 async function profileFromShard(base: string, release: Release, logicalPath: string, territoryId?: string) {
   const shard = await fetchJson<{ profiles: TerritoryProfileData[] }>(asset(base, release, logicalPath), 300);
   const profile = territoryId ? shard.profiles.find((candidate) => candidate.territory.territoryId === territoryId) : shard.profiles[0];
@@ -111,11 +126,24 @@ export async function loadSoilData(): Promise<SoilData> {
   };
 }
 
-export async function loadWaterData(): Promise<SoilData> {
-  const { base, release } = await activeRelease();
-  const index = await fetchJson<{ maps: string[]; geometry: string[]; provenance: string }>(asset(base, release, "delivery/water/index.json"), 300);
+export async function loadWaterData(): Promise<WaterData> {
+  const { base, release, index } = await waterRelease();
   const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
-  return { releaseId: release.releaseId, provenance, maps: index.maps.map((path) => parseMap(path, asset(base, release, path))), rankings: {}, geometry: { region: `${asset(base, release, index.geometry[0])}?release=${release.releaseId}` } };
+  return {
+    releaseId: release.releaseId,
+    provenance,
+    maps: index.maps.map((path) => parseMap(path, asset(base, release, path))),
+    rankings: {},
+    geometry: { region: `${asset(base, release, index.geometry[0])}?release=${release.releaseId}` },
+    profileUrls: Object.fromEntries((index.profiles ?? []).map((path) => [path.replace("delivery/water/profiles/", "").replace(".json", ""), asset(base, release, path)])),
+  };
+}
+
+export async function loadWaterOverview(): Promise<WaterOverview> {
+  const { base, release, index } = await waterRelease();
+  const profilePath = index.profiles?.find((path) => path === "delivery/water/profiles/country/IT.json");
+  if (!profilePath) throw new Error("Country water profile unavailable in active release");
+  return { releaseId: release.releaseId, countryProfile: await fetchJson<WaterProfile>(asset(base, release, profilePath), 300) };
 }
 
 export async function loadHomeOverview(): Promise<HomeOverview> {
