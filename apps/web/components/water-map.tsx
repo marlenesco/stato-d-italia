@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { MapOption } from "../lib/data";
+import { territoryLabel } from "../lib/territory-labels";
 
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
 let protocol: import("pmtiles").Protocol | undefined;
@@ -19,6 +20,7 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const featureIds = useRef<string[]>([]);
+  const currentDataset = useRef<MapDataset | null>(null);
   const [dataset, setDataset] = useState<MapDataset | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -57,8 +59,18 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
           mapRef.current = activeMap;
           setMapReady(true);
           activeMap.on("click", "water-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) setSelected({ id: String(feature.id), name: typeof feature.properties?.name === "string" ? feature.properties.name : undefined }); });
+          const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
+          activeMap.on("mousemove", "water-fill", (event) => {
+            const feature = event.features?.[0];
+            if (feature?.id === undefined) return;
+            const id = String(feature.id);
+            const value = activeMap.getFeatureState({ source: "territories", sourceLayer: "territories", id }).value;
+            const unit = currentDataset.current?.unit ?? "mm";
+            const label = territoryLabel(id, typeof feature.properties?.name === "string" ? feature.properties.name : undefined);
+            hoverPopup.setLngLat(event.lngLat).setText(`${label} · ${typeof value === "number" ? display(value, unit) : "valore non disponibile"}`).addTo(activeMap);
+          });
           activeMap.on("mouseenter", "water-fill", () => { activeMap.getCanvas().style.cursor = "pointer"; });
-          activeMap.on("mouseleave", "water-fill", () => { activeMap.getCanvas().style.cursor = ""; });
+          activeMap.on("mouseleave", "water-fill", () => { activeMap.getCanvas().style.cursor = ""; hoverPopup.remove(); });
         });
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Impossibile caricare la mappa.");
@@ -66,7 +78,7 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
       }
     }
     void createMap();
-    return () => { disposed = true; mapRef.current = null; featureIds.current = []; map?.remove(); };
+    return () => { disposed = true; mapRef.current = null; featureIds.current = []; currentDataset.current = null; map?.remove(); };
   }, [geometryUrl]);
 
   useEffect(() => {
@@ -84,6 +96,7 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
       nextDataset.values.forEach(([id, value]) => map.setFeatureState({ source: "territories", sourceLayer: "territories", id }, { value }));
       featureIds.current = nextDataset.values.map(([id]) => id);
       map.setPaintProperty("water-fill", "fill-color", colorExpression(Math.min(...values), Math.max(...values)));
+      currentDataset.current = nextDataset;
       setDataset(nextDataset);
     }).catch((caught) => { if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "Impossibile caricare i valori."); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -95,5 +108,5 @@ export function WaterMap({ option, metricLabel, geometryUrl }: { option: MapOpti
   const middle = min !== null && max !== null ? min + (max - min) / 2 : null;
   const selectedValue = selected && dataset?.values.find(([id]) => id === selected.id)?.[1];
 
-  return <section className="water-map-stage" aria-labelledby="water-map-title"><header className="map-heading"><div><p className="eyebrow">Atlante regionale</p><h2 id="water-map-title">{metricLabel}</h2><p>{dataset ? dataset.periodEnd.slice(0, 4) : option.periodKey} · valori annui</p></div><p className="map-status" aria-live="polite">{loading ? "Carico valori…" : error ? "Valori non disponibili" : "Seleziona regione"}</p></header><div className="map-wrap"><div ref={container} className="map water-map" role="img" aria-label="Mappa regionale interattiva. I colori mostrano valori ufficiali modellistici." />{min !== null && middle !== null && max !== null && <aside className="water-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore annuale stimato</strong><div className="water-legend-scale" aria-hidden="true" /><div className="legend-values"><span>{display(min, dataset?.unit ?? "mm")}</span><span>{display(middle, dataset?.unit ?? "mm")}</span><span>{display(max, dataset?.unit ?? "mm")}</span></div><p>Scala relativa a metrica e anno selezionati.</p></aside>}</div>{error && <p className="map-message" role="alert">{error}</p>}{selected && <aside className="water-selection" aria-live="polite"><p className="eyebrow">Regione selezionata</p><h3>{selected.name ?? selected.id}</h3><strong>{selectedValue == null ? "Valore non disponibile" : display(selectedValue, dataset?.unit ?? "mm")}</strong><p>Anno {dataset?.periodEnd.slice(0, 4) ?? option.periodKey} · stima ufficiale modellistica</p></aside>}</section>;
+  return <section className="water-map-stage" aria-labelledby="water-map-title"><header className="map-heading"><div><p className="eyebrow">Atlante regionale</p><h2 id="water-map-title">{metricLabel}</h2><p>{dataset ? dataset.periodEnd.slice(0, 4) : option.periodKey} · valori annui</p></div><p className="map-status" aria-live="polite">{loading ? "Carico valori…" : error ? "Valori non disponibili" : "Seleziona regione"}</p></header><div className="map-wrap"><div ref={container} className="map water-map" role="img" aria-label="Mappa regionale interattiva. I colori mostrano valori ufficiali modellistici." />{min !== null && middle !== null && max !== null && <aside className="water-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore annuale stimato</strong><div className="water-legend-scale" aria-hidden="true" /><div className="legend-values"><span>{display(min, dataset?.unit ?? "mm")}</span><span>{display(middle, dataset?.unit ?? "mm")}</span><span>{display(max, dataset?.unit ?? "mm")}</span></div><p>Scala relativa a metrica e anno selezionati.</p></aside>}</div>{error && <p className="map-message" role="alert">{error}</p>}{selected && <aside className="water-selection" aria-live="polite"><p className="eyebrow">Regione selezionata</p><h3>{territoryLabel(selected.id, selected.name)}</h3><strong>{selectedValue == null ? "Valore non disponibile" : display(selectedValue, dataset?.unit ?? "mm")}</strong><p>Anno {dataset?.periodEnd.slice(0, 4) ?? option.periodKey} · stima ufficiale modellistica</p></aside>}</section>;
 }
