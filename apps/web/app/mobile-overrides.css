@@ -1,0 +1,4 @@
+@media(max-width:700px){
+  .controls label{flex:none;width:100%;min-width:0}
+  .controls select,.control-link{width:100%}
+}

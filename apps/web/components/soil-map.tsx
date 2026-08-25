@@ -1,10 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { MapOption } from "../lib/data";
 
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
-type Ranking = { rows: Array<{ territoryId: string; name: string; istatCode: string; value: number; percentile: number | null; rank: number | null }> };
+type RankingRow = { territoryId: string; name: string; istatCode: string; value: number; percentile: number | null; rank: number | null };
+type Ranking = { rows: RankingRow[] };
+type RankingState = "loading" | "available" | "not-applicable" | "unavailable";
+
 let protocol: import("pmtiles").Protocol | undefined;
 
 function fillColorExpression(min: number, max: number): import("maplibre-gl").ExpressionSpecification {
@@ -12,20 +16,46 @@ function fillColorExpression(min: number, max: number): import("maplibre-gl").Ex
   return ["interpolate", ["linear"], ["coalesce", ["feature-state", "value"], min], min, "#f2e7be", midpoint, "#d98c4b", max, "#8e2f25"];
 }
 
-export function SoilMap({ option, geometryUrl, rankingUrl }: { option: MapOption; geometryUrl?: string; rankingUrl?: string }) {
+function formatNumber(value: number, unit?: string) {
+  return `${value.toLocaleString("it-IT", { maximumFractionDigits: 1 })}${unit ? ` ${unit}` : ""}`;
+}
+
+function formatPeriod(periodStart: string, periodEnd: string) {
+  const start = periodStart.slice(0, 4);
+  const end = periodEnd.slice(0, 4);
+  return start === end ? start : `${start}–${end}`;
+}
+
+function territoryHref(level: string, istatCode: string) {
+  const route = level === "municipality" ? "comuni" : level === "province" ? "province" : "regioni";
+  return `/territori/${route}/${istatCode}`;
+}
+
+export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string }) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
-  const currentDataset = useRef<MapDataset | null>(null);
   const featureIds = useRef<string[]>([]);
+  const selectedFeatureId = useRef<string | null>(null);
   const [ranking, setRanking] = useState<Ranking | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [rankingState, setRankingState] = useState<RankingState>(rankingUrl ? "loading" : "not-applicable");
+  const [rankingError, setRankingError] = useState<string | null>(null);
+  const [mapError, setMapError] = useState<string | null>(null);
+  const [valuesLoading, setValuesLoading] = useState(true);
+  const [dataset, setDataset] = useState<MapDataset | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(selectedTerritoryId ?? null);
 
   useEffect(() => {
     setMapReady(false);
-    setError(null);
+    setMapError(null);
+    setDataset(null);
+    setValuesLoading(true);
     const mapContainer = container.current;
-    if (!geometryUrl || !mapContainer) { setError("PMTiles per livello non disponibile"); return; }
+    if (!geometryUrl || !mapContainer) {
+      setMapError("La geometria per questo livello territoriale non è disponibile.");
+      setValuesLoading(false);
+      return;
+    }
     const target: HTMLDivElement = mapContainer;
     const pmtilesUrl = geometryUrl;
     let map: import("maplibre-gl").Map | undefined;
@@ -39,78 +69,114 @@ export function SoilMap({ option, geometryUrl, rankingUrl }: { option: MapOption
           maplibregl.addProtocol("pmtiles", protocol.tile);
         }
         protocol.add(new PMTiles(pmtilesUrl));
-        map = new maplibregl.Map({ container: target, style: {
-          version: 8,
-          sources: { territories: { type: "vector", url: `pmtiles://${pmtilesUrl}`, promoteId: "territory_id" } },
-          layers: [
-            { id: "background", type: "background", paint: { "background-color": "#f1f2ec" } },
-            { id: "soil-fill", type: "fill", source: "territories", "source-layer": "territories", paint: { "fill-color": fillColorExpression(0, 1), "fill-opacity": 0.82 } },
-            { id: "soil-line", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": "#fffdf7", "line-width": 0.4 } },
-          ],
-        }, center: [12.5, 42.8], zoom: 5 });
+        map = new maplibregl.Map({
+          container: target,
+          style: {
+            version: 8,
+            sources: { territories: { type: "vector", url: `pmtiles://${pmtilesUrl}`, promoteId: "territory_id" } },
+            layers: [
+              { id: "background", type: "background", paint: { "background-color": "#f1f2ec" } },
+              { id: "soil-fill", type: "fill", source: "territories", "source-layer": "territories", paint: { "fill-color": fillColorExpression(0, 1), "fill-opacity": 0.82 } },
+              { id: "soil-line", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": "#fffdf7", "line-width": 0.4 } },
+              { id: "soil-selected", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": "#182120", "line-width": ["case", ["boolean", ["feature-state", "selected"], false], 2.2, 0] } },
+            ],
+          },
+          center: [12.5, 42.8],
+          zoom: 5,
+        });
         const activeMap = map;
-        activeMap.on("error", (event) => setError(event.error.message));
+        activeMap.on("error", (event) => setMapError(event.error.message));
         activeMap.once("load", () => {
           if (disposed) return;
           mapRef.current = activeMap;
           setMapReady(true);
-          activeMap.on("click", "soil-fill", (event) => {
-            const feature = event.features?.[0];
-            if (!feature) return;
-            const value = activeMap.getFeatureState({ source: "territories", sourceLayer: "territories", id: feature.id }).value;
-            new maplibregl.Popup().setLngLat(event.lngLat).setText(`${feature.properties?.territory_id}: ${Number(value).toLocaleString("it-IT")} ${currentDataset.current?.unit ?? ""}`).addTo(activeMap);
-          });
+          activeMap.on("click", "soil-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) setSelectedId(String(feature.id)); });
+          activeMap.on("mouseenter", "soil-fill", () => { activeMap.getCanvas().style.cursor = "pointer"; });
+          activeMap.on("mouseleave", "soil-fill", () => { activeMap.getCanvas().style.cursor = ""; });
         });
-      } catch (caught) { setError(caught instanceof Error ? caught.message : "Errore mappa"); }
+      } catch (caught) {
+        setMapError(caught instanceof Error ? caught.message : "Impossibile caricare la mappa.");
+        setValuesLoading(false);
+      }
     }
     void createMap();
-    return () => {
-      disposed = true;
-      mapRef.current = null;
-      currentDataset.current = null;
-      featureIds.current = [];
-      map?.remove();
-    };
+    return () => { disposed = true; mapRef.current = null; featureIds.current = []; selectedFeatureId.current = null; map?.remove(); };
   }, [geometryUrl]);
 
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
     const controller = new AbortController();
+    setValuesLoading(true);
+    setMapError(null);
+    setDataset(null);
     async function updateValues() {
       try {
         const response = await fetch(option.url, { signal: controller.signal });
-        if (!response.ok) throw new Error(`Map values ${response.status}`);
-        const dataset = await response.json() as MapDataset;
-        const values = dataset.values.map((item) => item[1]).filter(Number.isFinite);
-        if (!values.length) throw new Error("Map values vuoti o non numerici");
+        if (!response.ok) throw new Error(`Valori della mappa non disponibili (${response.status}).`);
+        const nextDataset = await response.json() as MapDataset;
+        const values = nextDataset.values.map((item) => item[1]).filter(Number.isFinite);
+        if (!values.length) throw new Error("La mappa non contiene valori numerici pubblicati.");
         const activeMap = mapRef.current;
         if (controller.signal.aborted || !activeMap) return;
         featureIds.current.forEach((territoryId) => activeMap.removeFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }));
-        dataset.values.forEach(([territoryId, value]) => activeMap.setFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }, { value }));
-        featureIds.current = dataset.values.map(([territoryId]) => territoryId);
-        currentDataset.current = dataset;
+        nextDataset.values.forEach(([territoryId, value]) => activeMap.setFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }, { value }));
+        featureIds.current = nextDataset.values.map(([territoryId]) => territoryId);
         activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(Math.min(...values), Math.max(...values)));
-        setError(null);
+        setDataset(nextDataset);
       } catch (caught) {
-        if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "Errore valori mappa");
+        if (!controller.signal.aborted) setMapError(caught instanceof Error ? caught.message : "Impossibile caricare i valori della mappa.");
+      } finally {
+        if (!controller.signal.aborted) setValuesLoading(false);
       }
     }
     void updateValues();
     return () => controller.abort();
   }, [mapReady, option.url]);
 
+  useEffect(() => { setSelectedId(selectedTerritoryId ?? null); }, [selectedTerritoryId]);
+
   useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+    if (selectedFeatureId.current) map.setFeatureState({ source: "territories", sourceLayer: "territories", id: selectedFeatureId.current }, { selected: false });
+    if (selectedId) map.setFeatureState({ source: "territories", sourceLayer: "territories", id: selectedId }, { selected: true });
+    selectedFeatureId.current = selectedId;
+  }, [mapReady, selectedId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
     setRanking(null);
-    if (!rankingUrl) return;
-    fetch(rankingUrl).then((response) => response.ok ? response.json() : Promise.reject(new Error(`Ranking ${response.status}`))).then(setRanking).catch(() => setRanking(null));
+    setRankingError(null);
+    if (!rankingUrl) {
+      setRankingState("not-applicable");
+      return () => controller.abort();
+    }
+    setRankingState("loading");
+    fetch(rankingUrl, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() as Promise<Ranking> : Promise.reject(new Error(`Confronto non disponibile (${response.status}).`)))
+      .then((nextRanking) => { if (!controller.signal.aborted) { setRanking(nextRanking); setRankingState("available"); } })
+      .catch((caught) => { if (!controller.signal.aborted) { setRankingState("unavailable"); setRankingError(caught instanceof Error ? caught.message : "Impossibile caricare il confronto."); } });
+    return () => controller.abort();
   }, [rankingUrl]);
 
+  const selectedRow = ranking?.rows.find((row) => row.territoryId === selectedId);
+  const selectedValue = dataset?.values.find(([territoryId]) => territoryId === selectedId)?.[1];
+  const mapValues = dataset?.values.map(([, value]) => value).filter(Number.isFinite) ?? [];
+  const min = mapValues.length ? Math.min(...mapValues) : null;
+  const max = mapValues.length ? Math.max(...mapValues) : null;
+  const middle = min !== null && max !== null ? min + (max - min) / 2 : null;
+
   return <>
-    <div className="map-meta"><strong>{option.metricId.replaceAll("_", " ")}</strong><span>{option.periodKey}</span></div>
-    <div ref={container} className="map" aria-label="Mappa tematica. Dati completi nella tabella seguente." />
-    {error && <p role="alert">{error}</p>}
-    <section className="ranking" aria-labelledby="ranking-title"><h2 id="ranking-title">Ranking nazionale — alternativa alla mappa</h2>
-      {ranking ? <table><thead><tr><th>Territorio</th><th>Valore</th><th>Rank</th><th>Percentile</th></tr></thead><tbody>{ranking.rows.slice(0, 25).map((row) => <tr key={row.territoryId}><th scope="row">{row.name} <small>{row.istatCode}</small></th><td>{row.value.toLocaleString("it-IT")}</td><td>{row.rank ?? "—"}</td><td>{row.percentile?.toFixed(1) ?? "—"}</td></tr>)}</tbody></table> : <p>Ranking non applicabile a questa metrica o gruppo.</p>}
+    <section className="map-stage" aria-labelledby="map-title">
+      <header className="map-heading"><div><p className="eyebrow">Mappa tematica</p><h2 id="map-title">{metricLabel}</h2><p>{dataset ? `${formatPeriod(dataset.periodStart, dataset.periodEnd)} · ${dataset.unit}` : option.periodKey}</p></div><p className="map-status" aria-live="polite">{valuesLoading ? "Carico valori…" : mapError ? "Valori non disponibili" : "Seleziona un territorio"}</p></header>
+      <div className="map-wrap"><div ref={container} className="map" role="img" aria-label="Mappa tematica interattiva. La tabella di confronto è disponibile sotto." />
+        {min !== null && middle !== null && max !== null && <aside className="map-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore pubblicato</strong><div className="legend-scale" aria-hidden="true" /><div className="legend-values"><span>{formatNumber(min, dataset?.unit)}</span><span>{formatNumber(middle, dataset?.unit)}</span><span>{formatNumber(max, dataset?.unit)}</span></div><p>Il colore mostra l’intensità del valore, non un giudizio sul territorio.</p></aside>}
+      </div>
+      {mapError && <p className="map-message" role="alert">{mapError}</p>}
+      {selectedId && <aside className="territory-inspector" aria-live="polite"><p className="eyebrow">Territorio selezionato</p>{selectedRow ? <><h3>{selectedRow.name}</h3><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p><Link href={territoryHref(option.level, selectedRow.istatCode)}>Apri profilo territoriale</Link></> : <><h3>{selectedId}</h3><p>{selectedValue === undefined ? "Nessun valore associato nel dataset visualizzato." : formatNumber(selectedValue, dataset?.unit)}</p></>}</aside>}
+    </section>
+    <section className="ranking" aria-labelledby="ranking-title"><div className="section-heading"><div><p className="eyebrow">Confronto</p><h2 id="ranking-title">Territori nello stesso periodo</h2></div><p>Alternativa testuale alla mappa</p></div>
+      {rankingState === "available" && ranking ? <div className="table-scroll"><table><thead><tr><th>Territorio</th><th>Valore</th><th>Posizione</th><th>Percentile</th></tr></thead><tbody>{ranking.rows.slice(0, 25).map((row) => <tr key={row.territoryId} className={row.territoryId === selectedId ? "is-selected" : undefined}><th scope="row"><button type="button" onClick={() => setSelectedId(row.territoryId)}>{row.name}</button></th><td>{formatNumber(row.value, dataset?.unit)}</td><td>{row.rank ?? "—"}</td><td>{row.percentile === null ? "—" : row.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div> : rankingState === "loading" ? <p className="state-copy" role="status">Carico il confronto territoriale pubblicato…</p> : rankingState === "not-applicable" ? <p className="state-copy">Per questa combinazione di metrica, livello e periodo non è pubblicato un confronto territoriale.</p> : <p className="state-copy" role="alert">Il confronto non è momentaneamente disponibile. {rankingError}</p>}
     </section>
   </>;
 }
