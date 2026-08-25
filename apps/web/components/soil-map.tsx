@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { MapOption } from "../lib/data";
+import { territoryLabel } from "../lib/territory-labels";
 
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
 type RankingRow = { territoryId: string; name: string; istatCode: string; value: number; percentile: number | null; rank: number | null };
@@ -35,6 +36,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const featureIds = useRef<string[]>([]);
+  const currentDataset = useRef<MapDataset | null>(null);
   const selectedFeatureId = useRef<string | null>(null);
   const [ranking, setRanking] = useState<Ranking | null>(null);
   const [rankingState, setRankingState] = useState<RankingState>(rankingUrl ? "loading" : "not-applicable");
@@ -91,8 +93,17 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
           mapRef.current = activeMap;
           setMapReady(true);
           activeMap.on("click", "soil-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) setSelectedId(String(feature.id)); });
+          const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
+          activeMap.on("mousemove", "soil-fill", (event) => {
+            const feature = event.features?.[0];
+            if (feature?.id === undefined) return;
+            const id = String(feature.id);
+            const value = activeMap.getFeatureState({ source: "territories", sourceLayer: "territories", id }).value;
+            const label = territoryLabel(id, typeof feature.properties?.name === "string" ? feature.properties.name : undefined);
+            hoverPopup.setLngLat(event.lngLat).setText(`${label} · ${typeof value === "number" ? formatNumber(value, currentDataset.current?.unit) : "valore non disponibile"}`).addTo(activeMap);
+          });
           activeMap.on("mouseenter", "soil-fill", () => { activeMap.getCanvas().style.cursor = "pointer"; });
-          activeMap.on("mouseleave", "soil-fill", () => { activeMap.getCanvas().style.cursor = ""; });
+          activeMap.on("mouseleave", "soil-fill", () => { activeMap.getCanvas().style.cursor = ""; hoverPopup.remove(); });
         });
       } catch (caught) {
         setMapError(caught instanceof Error ? caught.message : "Impossibile caricare la mappa.");
@@ -100,7 +111,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
       }
     }
     void createMap();
-    return () => { disposed = true; mapRef.current = null; featureIds.current = []; selectedFeatureId.current = null; map?.remove(); };
+    return () => { disposed = true; mapRef.current = null; featureIds.current = []; currentDataset.current = null; selectedFeatureId.current = null; map?.remove(); };
   }, [geometryUrl]);
 
   useEffect(() => {
@@ -122,6 +133,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
         nextDataset.values.forEach(([territoryId, value]) => activeMap.setFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }, { value }));
         featureIds.current = nextDataset.values.map(([territoryId]) => territoryId);
         activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(Math.min(...values), Math.max(...values)));
+        currentDataset.current = nextDataset;
         setDataset(nextDataset);
       } catch (caught) {
         if (!controller.signal.aborted) setMapError(caught instanceof Error ? caught.message : "Impossibile caricare i valori della mappa.");
@@ -173,7 +185,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
         {min !== null && middle !== null && max !== null && <aside className="map-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore pubblicato</strong><div className="legend-scale" aria-hidden="true" /><div className="legend-values"><span>{formatNumber(min, dataset?.unit)}</span><span>{formatNumber(middle, dataset?.unit)}</span><span>{formatNumber(max, dataset?.unit)}</span></div><p>Il colore mostra l’intensità del valore, non un giudizio sul territorio.</p></aside>}
       </div>
       {mapError && <p className="map-message" role="alert">{mapError}</p>}
-      {selectedId && <aside className="territory-inspector" aria-live="polite"><p className="eyebrow">Territorio selezionato</p>{selectedRow ? <><h3>{selectedRow.name}</h3><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p><Link href={territoryHref(option.level, selectedRow.istatCode)}>Apri profilo territoriale</Link></> : <><h3>{selectedId}</h3><p>{selectedValue === undefined ? "Nessun valore associato nel dataset visualizzato." : formatNumber(selectedValue, dataset?.unit)}</p></>}</aside>}
+      {selectedId && <aside className="territory-inspector" aria-live="polite"><p className="eyebrow">Territorio selezionato</p>{selectedRow ? <><h3>{territoryLabel(selectedRow.territoryId, selectedRow.name)}</h3><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p><Link href={territoryHref(option.level, selectedRow.istatCode)}>Apri profilo territoriale</Link></> : <><h3>{territoryLabel(selectedId)}</h3><p>{selectedValue === undefined ? "Nessun valore associato nel dataset visualizzato." : formatNumber(selectedValue, dataset?.unit)}</p></>}</aside>}
     </section>
     <section className="ranking" aria-labelledby="ranking-title"><div className="section-heading"><div><p className="eyebrow">Confronto</p><h2 id="ranking-title">Territori nello stesso periodo</h2></div><p>Alternativa testuale alla mappa</p></div>
       {rankingState === "available" && ranking ? <div className="table-scroll"><table><thead><tr><th>Territorio</th><th>Valore</th><th>Posizione</th><th>Percentile</th></tr></thead><tbody>{ranking.rows.slice(0, 25).map((row) => <tr key={row.territoryId} className={row.territoryId === selectedId ? "is-selected" : undefined}><th scope="row"><button type="button" onClick={() => setSelectedId(row.territoryId)}>{row.name}</button></th><td>{formatNumber(row.value, dataset?.unit)}</td><td>{row.rank ?? "—"}</td><td>{row.percentile === null ? "—" : row.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div> : rankingState === "loading" ? <p className="state-copy" role="status">Carico il confronto territoriale pubblicato…</p> : rankingState === "not-applicable" ? <p className="state-copy">Per questa combinazione di metrica, livello e periodo non è pubblicato un confronto territoriale.</p> : <p className="state-copy" role="alert">Il confronto non è momentaneamente disponibile. {rankingError}</p>}
