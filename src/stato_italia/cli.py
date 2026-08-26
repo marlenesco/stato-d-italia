@@ -75,6 +75,16 @@ def run(args: argparse.Namespace) -> int:
             dissesto_pmtiles[level] = build_pmtiles(canonical / "territories" / "reference_year=2024" / f"{level}.parquet", pmtiles_path)
         else:
             dissesto_pmtiles[level] = {"path": str(pmtiles_path), "bytes": pmtiles_path.stat().st_size, "skipped": True}
+    emissions_pmtiles: dict[int, dict] = {}
+    for year in (2019, 2023):
+        emissions_pmtiles_path = delivery / "emissions" / "geometry" / f"istat-province-{year}.pmtiles"
+        if provincial_emissions["changed"] or not emissions_pmtiles_path.exists():
+            emissions_pmtiles[year] = build_pmtiles(
+                canonical / "territories" / f"reference_year={year}" / "province.parquet",
+                emissions_pmtiles_path,
+            )
+        else:
+            emissions_pmtiles[year] = {"path": str(emissions_pmtiles_path), "bytes": emissions_pmtiles_path.stat().st_size, "skipped": True}
     delivery_report = generate_soil_delivery(
         canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
@@ -97,6 +107,7 @@ def run(args: argparse.Namespace) -> int:
         canonical / "emissions" / "national" / "greenhouse-gases" / "dataset_version=2026-1990-2024" / "observations.parquet",
         canonical / "emissions" / "national" / "air-pollutants-nfr" / "dataset_version=2026-1990-2024" / "observations.parquet",
         canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
+        {year: Path(info["path"]) for year, info in emissions_pmtiles.items()},
         delivery, release_id, force=args.force or emissions["changed"],
     )
     changed = changed or water_delivery["changed"]
@@ -108,7 +119,7 @@ def run(args: argparse.Namespace) -> int:
         *[ReleaseArtifact(path, str(path.relative_to(root))) for path in canonical.rglob("*.parquet")],
         *[ReleaseArtifact(path, str(path.relative_to(root))) for path in derived.rglob("*.parquet")],
         *[ReleaseArtifact(path, str(path.relative_to(root))) for path in delivery.rglob("*.json")],
-        *[ReleaseArtifact(Path(info["path"]), str(Path(info["path"]).relative_to(root))) for info in [*pmtiles.values(), *dissesto_pmtiles.values()]],
+        *[ReleaseArtifact(Path(info["path"]), str(Path(info["path"]).relative_to(root))) for info in [*pmtiles.values(), *dissesto_pmtiles.values(), *emissions_pmtiles.values()]],
     ]
     artifacts.sort(key=lambda artifact: artifact.logical_path)
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
@@ -133,6 +144,7 @@ def run(args: argparse.Namespace) -> int:
         "boundaries": boundaries,
         "pmtiles": pmtiles,
         "dissesto_pmtiles": dissesto_pmtiles,
+        "emissions_pmtiles": emissions_pmtiles,
         "soil": soil,
         "water": water,
         "emissions": emissions,
