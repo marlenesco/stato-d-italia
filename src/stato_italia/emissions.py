@@ -83,6 +83,7 @@ def _record(
         "period_end": end,
         "reference_year": period,
         "value_decimal": float(row[str(period)]),
+        "value_state": "observed",
         "unit_ucum": _text(row["UNI_mis"], "UNI_mis"),
         "official_status": "unknown",
         "quality_flags": ["official_top_down_disaggregation"],

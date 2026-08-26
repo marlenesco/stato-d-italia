@@ -58,3 +58,4 @@ def test_records_keep_snap_dimension_and_exclude_grid(monkeypatch: pytest.Monkey
     assert all(row["metric_id"] == "emissions_pollutant_006" for row in rows)
     assert '"snap_code":"070101"' in rows[0]["source_dimensions_json"]
     assert rows[0]["quality_flags"] == ["official_top_down_disaggregation"]
+    assert all(row["value_state"] == "observed" for row in rows)

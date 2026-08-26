@@ -8,7 +8,12 @@ import pandas as pd
 from .registry import load_source
 
 DELIVERY_SCHEMA_VERSION = 1
-DELIVERY_ALGORITHM_VERSION = "emissions-overview-v1"
+DELIVERY_ALGORITHM_VERSION = "emissions-overview-v3"
+MAP_METRIC_ID = "emissions_pollutant_002"
+MAP_SNAP_CODE = "07010302"
+MAP_REFERENCE_YEARS = (2019, 2023)
+MAP_LABEL = "Ossidi di azoto · automobili diesel su strade urbane"
+MAP_DETAIL = "Osservazione ISPRA per attività SNAP 07010302. Non è il totale del traffico né la concentrazione dell'aria."
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -33,9 +38,26 @@ def _ghg_total_series(table: pd.DataFrame) -> list[list[float | int]]:
     return [[int(row.reference_year), float(row.value_decimal)] for row in total.sort_values("reference_year").itertuples()]
 
 
+def _provincial_map_rows(table: pd.DataFrame, reference_year: int) -> pd.DataFrame:
+    observed = table.loc[
+        (table["metric_id"] == MAP_METRIC_ID)
+        & (table["reference_year"] == reference_year)
+        & (table["value_state"] == "observed")
+    ].copy()
+    observed = observed.loc[
+        observed["source_dimensions_json"].map(lambda value: _dimensions(value).get("snap_code") == MAP_SNAP_CODE)
+    ]
+    if len(observed) != 107 or observed["territory_id"].duplicated().any():
+        raise ValueError("Unexpected ISPRA provincial emissions map contract")
+    reference_dates = observed["territory_version_id"].str.rsplit("@", n=1).str[-1].unique().tolist()
+    if reference_dates != [f"{reference_year}-01-01"]:
+        raise ValueError(f"Unexpected ISPRA provincial map territory reference: {reference_dates}")
+    return observed.sort_values("territory_id")
+
+
 def generate_emissions_delivery(
     greenhouse_gases_path: Path, air_pollutants_nfr_path: Path, provincial_path: Path,
-    destination: Path, release_id: str, force: bool = False,
+    province_geometry_paths: dict[int, Path], destination: Path, release_id: str, force: bool = False,
 ) -> dict:
     index_path = destination / "emissions" / "index.json"
     if index_path.exists() and not force:
@@ -52,6 +74,8 @@ def generate_emissions_delivery(
         missing = required - set(table.columns)
         if missing:
             raise ValueError(f"{name} emissions canonical contract missing columns: {sorted(missing)}")
+    if set(province_geometry_paths) != set(MAP_REFERENCE_YEARS) or not all(path.exists() for path in province_geometry_paths.values()):
+        raise ValueError("Missing matching ISTAT province PMTiles geometry required for emissions delivery")
 
     series = _ghg_total_series(ghg)
     root = destination / "emissions"
@@ -95,8 +119,34 @@ def generate_emissions_delivery(
             "metrics": int(provincial["metric_id"].nunique()),
             "sourceDimensions": ["provincia", "attività SNAP", "inquinante"],
         },
+        "map": {
+            "label": MAP_LABEL,
+            "detail": MAP_DETAIL,
+            "coverage": "Province · 2019 e 2023 · SNAP 07010302",
+        },
         "provenanceRef": "delivery/emissions/provenance.json",
     })
+    map_paths: list[str] = []
+    for reference_year in MAP_REFERENCE_YEARS:
+        map_rows = _provincial_map_rows(provincial, reference_year)
+        map_path = f"delivery/emissions/maps/{MAP_METRIC_ID}/{reference_year}/province.json"
+        _write(destination / map_path.removeprefix("delivery/"), {
+            "schemaVersion": DELIVERY_SCHEMA_VERSION,
+            "releaseId": release_id,
+            "theme": "emissions",
+            "kind": "official_snapshot_map_values",
+            "metricId": MAP_METRIC_ID,
+            "unit": map_rows.iloc[0]["unit_ucum"],
+            "periodStart": f"{reference_year}-01-01",
+            "periodEnd": f"{reference_year}-12-31",
+            "territoryLevel": "province",
+            "territoryReferenceDate": f"{reference_year}-01-01",
+            "sourceDimensions": {"pollutant_code": "002", "snap_code": MAP_SNAP_CODE},
+            "columns": ["territoryId", "value"],
+            "values": [[row.territory_id, float(row.value_decimal)] for row in map_rows.itertuples()],
+            "provenanceRef": "delivery/emissions/provenance.json",
+        })
+        map_paths.append(map_path)
     _write(index_path, {
         "schemaVersion": DELIVERY_SCHEMA_VERSION,
         "releaseId": release_id,
@@ -104,6 +154,8 @@ def generate_emissions_delivery(
         "algorithmVersion": DELIVERY_ALGORITHM_VERSION,
         "overview": "delivery/emissions/overview.json",
         "provenance": "delivery/emissions/provenance.json",
+        "maps": map_paths,
+        "geometry": [f"delivery/emissions/geometry/{province_geometry_paths[year].name}" for year in MAP_REFERENCE_YEARS],
     })
     files = sorted(path for path in root.rglob("*.json"))
     return {"changed": True, "files": files, "bytes": sum(path.stat().st_size for path in files)}
