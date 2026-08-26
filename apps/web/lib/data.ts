@@ -58,8 +58,10 @@ export type EmissionsOverview = {
   greenhouseGases: { label: string; coverage: string; unit: string; seriesLabel: string; series: Array<[number, number]>; metrics: string[] };
   airPollutantsNfr: { label: string; coverage: string; metrics: number; sourceDimensions: string[] };
   provincialDisaggregation: { label: string; coverage: string; metrics: number; sourceDimensions: string[] };
+  map?: { label: string; detail: string; coverage: string };
   provenanceRef: string;
 };
+export type EmissionsData = { overview: EmissionsOverview; maps: MapOption[]; geometryByPeriod: Record<string, string> };
 
 export type HomeOverview = {
   releaseId: string;
@@ -123,7 +125,7 @@ async function dissestoRelease() {
 
 async function emissionsRelease() {
   const { base, release } = await activeRelease();
-  const index = await fetchJson<{ overview: string; provenance: string }>(asset(base, release, "delivery/emissions/index.json"), 300);
+  const index = await fetchJson<{ overview: string; provenance: string; maps?: string[]; geometry?: string[] }>(asset(base, release, "delivery/emissions/index.json"), 300);
   return { base, release, index };
 }
 
@@ -162,9 +164,13 @@ export async function loadDissestoData(): Promise<DissestoData> {
   };
 }
 
-export async function loadEmissionsOverview(): Promise<EmissionsOverview> {
+export async function loadEmissionsData(): Promise<EmissionsData> {
   const { base, release, index } = await emissionsRelease();
-  return fetchJson<EmissionsOverview>(asset(base, release, index.overview), 300);
+  return {
+    overview: await fetchJson<EmissionsOverview>(asset(base, release, index.overview), 300),
+    maps: (index.maps ?? []).map((path) => parseMap(path, asset(base, release, path))),
+    geometryByPeriod: Object.fromEntries((index.geometry ?? []).map((path) => [path.match(/istat-province-(\d{4})/)?.[1] ?? "unknown", `${asset(base, release, path)}?release=${release.releaseId}`])),
+  };
 }
 
 export async function loadWaterData(): Promise<WaterData> {

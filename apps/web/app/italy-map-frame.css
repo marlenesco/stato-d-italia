@@ -1,0 +1,21 @@
+/* Italy is taller than it is wide in the Mercator viewport used by MapLibre. */
+.map-stage .map-heading,
+.water-map-stage .map-heading,
+.map-wrap {
+  width: 100%;
+}
+
+.map,
+.map-workspace .map {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  aspect-ratio: .74;
+}
+
+@media (max-width: 700px) {
+  .map,
+  .map-workspace .map {
+    aspect-ratio: .82;
+  }
+}

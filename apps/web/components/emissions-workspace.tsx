@@ -1,5 +1,11 @@
-import type { EmissionsOverview } from "../lib/data";
+"use client";
+
+import { useCallback, useMemo, useState } from "react";
+import type { EmissionsData, EmissionsOverview } from "../lib/data";
 import { MapSidebar } from "./map-sidebar";
+import { SoilMap } from "./soil-map";
+import { TimelineControl } from "./timeline-control";
+import { TerritoryMapSeries } from "./territory-map-series";
 
 function format(value: number) {
   return value.toLocaleString("it-IT", { maximumFractionDigits: 0 });
@@ -20,19 +26,29 @@ function DataRow({ id, label, coverage, detail, note }: { id: string; label: str
   return <section id={id} className="emissions-data-row"><div><p className="eyebrow">Dataset ufficiale</p><h2>{label}</h2></div><div><strong>{coverage}</strong><p>{detail}</p></div><p className="emissions-data-note">{note}</p></section>;
 }
 
-export function EmissionsWorkspace({ overview }: { overview: EmissionsOverview }) {
+export function EmissionsWorkspace({ data }: { data: EmissionsData }) {
+  const { overview } = data;
   const latest = overview.greenhouseGases.series.at(-1);
+  const maps = useMemo(() => [...data.maps].sort((left, right) => Number(left.periodKey) - Number(right.periodKey)), [data.maps]);
+  const [period, setPeriod] = useState(maps.at(-1)?.periodKey);
+  const map = maps.find((item) => item.periodKey === period) ?? maps.at(-1);
+  const [territory, setTerritory] = useState<{ id: string; name?: string } | undefined>();
+  const selectTerritory = useCallback((id: string, name?: string) => setTerritory({ id, name }), []);
   return <section className="domain-site-layout domain-emissions" aria-label="Atlante emissioni">
     <MapSidebar title="Atlante emissioni">
-      <a className="sidebar-link sidebar-atlas-link" href="#serra">Vai ai dati ↓</a>
+      <a className="sidebar-link sidebar-atlas-link" href="#mappa">Vai alla mappa ↓</a>
       <section className="sidebar-section"><h3>Serie disponibili</h3><ul className="domain-metric-list"><li>Gas serra · Italia</li><li>Inquinanti NFR · Italia</li><li>SNAP provinciale</li></ul></section>
+      <TerritoryMapSeries options={maps} territoryId={territory?.id} territoryName={territory?.name} selectedPeriod={map?.periodKey} />
       <section className="sidebar-section"><h3>Copertura</h3><p className="sidebar-context"><strong>1990–2024 nazionale</strong>Provincia: solo 2019 e 2023.</p></section>
-      <section className="sidebar-section"><p className="sidebar-context">Emissioni territoriali, emissioni industriali dichiarate e concentrazioni nell’aria restano dataset diversi.</p></section>
+      <section className="sidebar-section"><h3>Come leggere</h3><p className="sidebar-context">Non sono concentrazioni misurate né attribuzioni comunali ricavate dividendo la provincia. Emissioni territoriali e dichiarazioni industriali restano dataset diversi.</p></section>
       <a className="sidebar-link" href="#metodo">Fonte e limiti →</a>
     </MapSidebar>
     <div className="domain-site-content">
-      <section className="emissions-hero"><div className="emissions-hero-title"><p className="eyebrow">ISPRA · inventari ufficiali</p><h1>Emissioni</h1></div><div className="emissions-hero-copy"><p>Leggi serie nazionali e stime provinciali senza farle diventare la stessa cosa.</p><a className="primary-link" href="#serra">Esplora fonti <span aria-hidden="true">→</span></a></div><div className="emissions-latest"><p className="eyebrow">Italia · {latest?.[0]}</p><strong>{format(latest?.[1] ?? 0)}</strong><span>{overview.greenhouseGases.unit}</span><small>Totale emissioni nette ufficiale.</small></div><GreenhouseTrend overview={overview.greenhouseGases} /></section>
-      <section className="emissions-reading" aria-labelledby="emissions-reading-title"><div><p className="eyebrow">Prima lettura</p><h2 id="emissions-reading-title">Stessa parola, dati diversi.</h2></div><p>Qui non ci sono concentrazioni misurate. Né attribuzioni comunali ottenute dividendo la provincia. Ogni vista mantiene metodo, scala e soggetto che ha prodotto il dato.</p></section>
+      <section className="emissions-hero"><div className="emissions-hero-title"><p className="eyebrow">ISPRA · inventari ufficiali</p><h1>Emissioni</h1></div><div className="emissions-hero-copy"><p>Leggi serie nazionali e stime provinciali senza farle diventare la stessa cosa.</p><a className="primary-link" href="#mappa">Apri mappa <span aria-hidden="true">→</span></a></div><div className="emissions-latest"><p className="eyebrow">Italia · {latest?.[0]}</p><strong>{format(latest?.[1] ?? 0)}</strong><span>{overview.greenhouseGases.unit}</span><small>Totale emissioni nette ufficiale.</small></div><GreenhouseTrend overview={overview.greenhouseGases} /></section>
+      <section id="mappa" className="domain-workspace emissions-map-workspace" tabIndex={-1} aria-label="Mappa provinciale delle emissioni">
+        {map && <TimelineControl periods={maps.map((item) => item.periodKey)} value={map.periodKey} onChange={setPeriod} />}
+        {map && overview.map ? <><SoilMap option={map} metricLabel={overview.map.label} geometryUrl={data.geometryByPeriod[map.periodKey]} colorRamp="emissions" selectedTerritoryId={territory?.id} onTerritorySelect={selectTerritory} /><p className="emissions-map-note">{overview.map.detail} {overview.map.coverage}.</p></> : <p role="status">Mappa provinciale in preparazione nella release attiva.</p>}
+      </section>
       <div className="emissions-data-list">
         <DataRow id="serra" label={overview.greenhouseGases.label} coverage={overview.greenhouseGases.coverage} detail={overview.greenhouseGases.metrics.join(" · ")} note="Inventario territoriale nazionale. Serie storica ufficiale; le categorie sorgente restano separate." />
         <DataRow id="inquinanti" label={overview.airPollutantsNfr.label} coverage={overview.airPollutantsNfr.coverage} detail={`${overview.airPollutantsNfr.metrics} inquinanti · ${overview.airPollutantsNfr.sourceDimensions.join(" · ")}`} note="Inventario territoriale nazionale per settore NFR. Nessun totale derivato dalla UI." />

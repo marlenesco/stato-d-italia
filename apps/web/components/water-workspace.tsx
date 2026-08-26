@@ -1,11 +1,13 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { WaterData, WaterOverview as WaterOverviewData } from "../lib/data";
 import { ExposedMenu, MapSidebar } from "./map-sidebar";
 import { WaterMap } from "./water-map";
 import { WaterOverview } from "./water-overview";
+import { TimelineControl } from "./timeline-control";
+import { TerritoryMapSeries } from "./territory-map-series";
 
 const labels: Record<string, string> = {
   water_total_precipitation_mm: "Precipitazione totale",
@@ -27,6 +29,8 @@ export function WaterWorkspace({ data, overview }: { data: WaterData; overview: 
   const requestedYear = searchParams.get("period");
   const yearIndex = Math.max(0, years.indexOf(requestedYear ?? years.at(-1) ?? ""));
   const selected = available[yearIndex] ?? available.at(-1);
+  const [territory, setTerritory] = useState<{ id: string; name?: string } | undefined>();
+  const selectTerritory = useCallback((id: string, name?: string) => setTerritory({ id, name }), []);
 
   function update(nextMetric: string, nextPeriod: string) {
     const query = new URLSearchParams({ metric: nextMetric, period: nextPeriod });
@@ -42,14 +46,15 @@ export function WaterWorkspace({ data, overview }: { data: WaterData; overview: 
     <MapSidebar title="Atlante acqua">
       <a className="sidebar-link sidebar-atlas-link" href="#atlante">Vai alla mappa ↓</a>
       <ExposedMenu label="Metrica" value={metric} onChange={changeMetric} items={metrics.map((id) => ({ id, label: labels[id] ?? id, meta: "mm" }))} />
-      <section className="sidebar-section"><h3>Anno di riferimento</h3><output className="sidebar-year" aria-live="polite">{selected?.periodKey ?? "—"}</output><input className="sidebar-range" type="range" min="0" max={Math.max(0, years.length - 1)} value={yearIndex} onChange={(event) => update(metric, years[Number(event.target.value)])} aria-label="Cambia anno" /><div className="sidebar-range-bounds" aria-hidden="true"><span>{years[0]}</span><span>{years[Math.floor(years.length / 2)]}</span><span>{years.at(-1)}</span></div></section>
+      <TerritoryMapSeries options={available} territoryId={territory?.id} territoryName={territory?.name} selectedPeriod={selected?.periodKey} />
       <section className="sidebar-section"><h3>Copertura</h3><p className="sidebar-context"><strong>Regioni · 1951–2025</strong>Stime ufficiali modellistiche BIGBANG 10.0.</p></section>
       <section className="sidebar-section"><p className="sidebar-context">Release corrente non pubblica ranking o “migliore/peggiore”.</p></section>
     </MapSidebar>
     <div className="water-site-content">
       <WaterOverview overview={overview} />
       <section id="atlante" className="water-workspace" tabIndex={-1} aria-label="Mappa regionale">
-        {selected ? <WaterMap option={selected} metricLabel={labels[metric] ?? metric} geometryUrl={data.geometry.region} /> : <p role="alert">Metrica o anno non presenti nella release attiva.</p>}
+        {selected && <TimelineControl periods={years} value={selected.periodKey} onChange={(period) => update(metric, period)} />}
+        {selected ? <WaterMap option={selected} metricLabel={labels[metric] ?? metric} geometryUrl={data.geometry.region} onTerritorySelect={selectTerritory} /> : <p role="alert">Metrica o anno non presenti nella release attiva.</p>}
         <section className="water-limit"><p className="eyebrow">Come leggere</p><p>Valori BIGBANG 10.0: stime modellistiche annuali. Scala colori relativa a metrica e anno selezionati.</p></section>
         <details className="provenance"><summary>Fonte e metodo · release {data.releaseId}</summary><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
       </section>

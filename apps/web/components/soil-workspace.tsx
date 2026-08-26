@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { MapOption, SoilData } from "../lib/data";
 import { ExposedMenu, MapSidebar } from "./map-sidebar";
 import { SoilMap } from "./soil-map";
 import { TimelineControl } from "./timeline-control";
+import { TerritoryMapSeries } from "./territory-map-series";
 
 type MappableLevel = Exclude<MapOption["level"], "country">;
 
@@ -38,7 +39,10 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
   const searchParams = useSearchParams();
   const metrics = useMemo(() => [...new Set(data.maps.map((item) => item.metricId))], [data.maps]);
   const requestedMetric = searchParams.get("metric");
-  const metric = requestedMetric && metrics.includes(requestedMetric) ? requestedMetric : metrics[0];
+  // Start on a metric with a real published time series, so the timeline and
+  // its period-on-period comparison are useful without an extra choice.
+  const defaultMetric = metrics.includes("soil_net_consumption_hectares") ? "soil_net_consumption_hectares" : metrics[0];
+  const metric = requestedMetric && metrics.includes(requestedMetric) ? requestedMetric : defaultMetric;
   const levels = useMemo(() => Array.from(new Set(data.maps.filter((item) => item.metricId === metric).map((item) => item.level))).filter((item): item is MappableLevel => item !== "country"), [data.maps, metric]);
   const requestedLevel = searchParams.get("level") as MappableLevel | null;
   const level = requestedLevel && levels.includes(requestedLevel) ? requestedLevel : (levels.includes("municipality") ? "municipality" : levels[0]);
@@ -46,6 +50,11 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
   const requestedPeriod = searchParams.get("period");
   const selected = available.find((item) => item.periodKey === requestedPeriod) ?? available.at(-1);
   const periods = available.map((item) => item.periodKey);
+  const [territory, setTerritory] = useState<{ id: string; name?: string } | undefined>(() => {
+    const id = searchParams.get("territory");
+    return id ? { id } : undefined;
+  });
+  const selectTerritory = useCallback((id: string, name?: string) => setTerritory({ id, name }), []);
 
   function update(params: Record<string, string | undefined>) {
     const next = new URLSearchParams(searchParams.toString());
@@ -57,11 +66,13 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
     const nextLevels = Array.from(new Set(data.maps.filter((item) => item.metricId === nextMetric && item.level !== "country").map((item) => item.level))) as MappableLevel[];
     const nextLevel = nextLevels.includes(level) ? level : (nextLevels.includes("municipality") ? "municipality" : nextLevels[0]);
     const nextPeriods = data.maps.filter((item) => item.metricId === nextMetric && item.level === nextLevel).sort((left, right) => comparePeriods(left.periodKey, right.periodKey));
+    setTerritory(undefined);
     update({ metric: nextMetric, level: nextLevel, period: nextPeriods.at(-1)?.periodKey, territory: undefined });
   }
 
   function changeLevel(nextLevel: MappableLevel) {
     const nextPeriod = data.maps.filter((item) => item.metricId === metric && item.level === nextLevel).sort((left, right) => comparePeriods(left.periodKey, right.periodKey)).at(-1)?.periodKey;
+    setTerritory(undefined);
     update({ level: nextLevel, period: nextPeriod, territory: undefined });
   }
 
@@ -70,15 +81,16 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
       <a className="sidebar-link sidebar-atlas-link" href="#mappa">Vai alla mappa ↓</a>
       <ExposedMenu label="Metrica" value={metric} onChange={changeMetric} items={metrics.map((id) => ({ id, label: metricLabels[id] ?? id, meta: metricUnits[id] }))} />
       <section className="sidebar-section"><h3>Livello territoriale</h3><div className="level-menu" role="group" aria-label="Livello territoriale">{levels.map((item) => <button type="button" key={item} onClick={() => changeLevel(item)} aria-pressed={item === level}>{levelLabel(item)}</button>)}</div></section>
-      {selected && <section className="sidebar-section"><TimelineControl periods={periods} value={selected.periodKey} onChange={(period) => update({ period, territory: undefined })} /></section>}
+      <TerritoryMapSeries options={available} territoryId={territory?.id} territoryName={territory?.name} selectedPeriod={selected?.periodKey} />
       <section className="sidebar-section"><h3>Vista corrente</h3><p className="sidebar-context"><strong>{selected?.periodKey ?? "—"}</strong>{levelLabel(level)} · valori ufficiali ISPRA/SNPA.</p></section>
-      <section className="sidebar-section"><p className="sidebar-context">Mappa: osservazioni ufficiali. Confronto e percentile solo quando pubblicati.</p></section>
+      <section className="sidebar-section"><h3>Copertura</h3><p className="sidebar-context">Mappa: osservazioni ufficiali. Confronto e percentile solo quando pubblicati.</p></section>
       <Link className="sidebar-link" href="/">Panoramica nazionale →</Link>
     </MapSidebar>
     <div className="soil-site-content">
       <section className="soil-hero"><div className="soil-hero-title"><p className="eyebrow">ISPRA / SNPA · release {data.releaseId}</p><h1>Consumo di suolo</h1></div><div className="soil-hero-copy"><p>Valori ufficiali per periodo. Analisi, ranking e percentili sono elaborazioni riproducibili del progetto.</p><a className="primary-link" href="#mappa">Apri mappa <span aria-hidden="true">→</span></a></div><section className="soil-hero-context" aria-label="Copertura esploratore"><div><p className="eyebrow">Copertura mappa</p><strong>Comuni · Province · Regioni</strong></div><p><strong>{metrics.length} metriche</strong><br />Solo periodi ufficialmente pubblicati.</p></section></section>
       <section id="mappa" className="soil-workspace" tabIndex={-1} aria-label="Mappa consumo di suolo">
-        {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={searchParams.get("territory") ?? undefined} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
+        {selected && <TimelineControl periods={periods} value={selected.periodKey} onChange={(period) => update({ period })} />}
+        {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={territory?.id} onTerritorySelect={selectTerritory} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
         <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
       </section>
     </div>
