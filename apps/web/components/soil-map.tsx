@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { MapOption } from "../lib/data";
 import { domainColorRamps, type DomainColorName, type DomainColorRamp } from "../lib/domain-colors";
+import { italyMapCamera } from "../lib/italy-map-bounds";
 import { territoryLabel } from "../lib/territory-labels";
 
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
@@ -33,7 +34,7 @@ function territoryHref(level: string, istatCode: string) {
   return `/territori/${route}/${istatCode}`;
 }
 
-export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, colorRamp = "soil" }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; colorRamp?: DomainColorName }) {
+export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, colorRamp = "soil", onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; colorRamp?: DomainColorName; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
   const ramp = domainColorRamps[colorRamp];
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
@@ -81,13 +82,11 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
             sources: { territories: { type: "vector", url: `pmtiles://${pmtilesUrl}`, promoteId: "territory_id" } },
             layers: [
               { id: "background", type: "background", paint: { "background-color": ramp.surface } },
-              { id: "soil-fill", type: "fill", source: "territories", "source-layer": "territories", paint: { "fill-color": fillColorExpression(0, 1, ramp), "fill-opacity": 0.82 } },
-              { id: "soil-line", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": ramp.outline, "line-width": 0.4 } },
-              { id: "soil-selected", type: "line", source: "territories", "source-layer": "territories", paint: { "line-color": "#182120", "line-width": ["case", ["boolean", ["feature-state", "selected"], false], 2.2, 0] } },
+              { id: "soil-fill", type: "fill", source: "territories", "source-layer": "territories", paint: { "fill-color": fillColorExpression(0, 1, ramp), "fill-outline-color": ramp.outline, "fill-opacity": 0.82 } },
+              { id: "soil-selected", type: "fill", source: "territories", "source-layer": "territories", paint: { "fill-color": "#182120", "fill-opacity": ["case", ["boolean", ["feature-state", "selected"], false], 0.16, 0] } },
             ],
           },
-          center: [12.5, 42.8],
-          zoom: 5,
+          ...italyMapCamera,
         });
         const activeMap = map;
         activeMap.on("error", (event) => setMapError(event.error.message));
@@ -98,7 +97,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
           resizeObserver.observe(target);
           requestAnimationFrame(() => activeMap.resize());
           setMapReady(true);
-          activeMap.on("click", "soil-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) setSelectedId(String(feature.id)); });
+          activeMap.on("click", "soil-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) { const id = String(feature.id); setSelectedId(id); onTerritorySelect?.(id, typeof feature.properties?.name === "string" ? feature.properties.name : undefined); } });
           const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
           activeMap.on("mousemove", "soil-fill", (event) => {
             const feature = event.features?.[0];
@@ -118,7 +117,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     }
     void createMap();
     return () => { disposed = true; resizeObserver?.disconnect(); mapRef.current = null; featureIds.current = []; currentDataset.current = null; selectedFeatureId.current = null; map?.remove(); };
-  }, [geometryUrl, ramp]);
+  }, [geometryUrl, onTerritorySelect, ramp]);
 
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
@@ -183,10 +182,11 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const min = mapValues.length ? Math.min(...mapValues) : null;
   const max = mapValues.length ? Math.max(...mapValues) : null;
   const middle = min !== null && max !== null ? min + (max - min) / 2 : null;
+  const selectedLabel = selectedRow ? territoryLabel(selectedRow.territoryId, selectedRow.name) : selectedId ? territoryLabel(selectedId) : null;
 
   return <>
     <section className={`map-stage map-stage--${colorRamp}`} style={{ "--map-ramp-low": ramp.low, "--map-ramp-mid": ramp.mid, "--map-ramp-high": ramp.high, "--map-ramp-outline": ramp.outline } as CSSProperties} aria-labelledby="map-title">
-      <header className="map-heading"><div><p className="eyebrow">Mappa tematica</p><h2 id="map-title">{metricLabel}</h2><p>{dataset ? `${formatPeriod(dataset.periodStart, dataset.periodEnd)} · ${dataset.unit}` : option.periodKey}</p></div><p className="map-status" aria-live="polite">{valuesLoading ? "Carico valori…" : mapError ? "Valori non disponibili" : "Seleziona un territorio"}</p></header>
+      <header className="map-heading"><div><p className="eyebrow">Mappa tematica</p><h2 id="map-title">{metricLabel}</h2><p>{dataset ? `${formatPeriod(dataset.periodStart, dataset.periodEnd)} · ${dataset.unit}` : option.periodKey}</p></div><p className="map-status" aria-live="polite">{valuesLoading ? "Carico valori…" : mapError ? "Valori non disponibili" : selectedLabel ? `Selezionato: ${selectedLabel}` : "Seleziona un territorio"}</p></header>
       <div className="map-wrap"><div ref={container} className="map" role="img" aria-label="Mappa tematica interattiva. La tabella di confronto è disponibile sotto." />
         {min !== null && middle !== null && max !== null && <aside className="map-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore pubblicato</strong><div className="legend-scale" aria-hidden="true" /><div className="legend-values"><span>{formatNumber(min, dataset?.unit)}</span><span>{formatNumber(middle, dataset?.unit)}</span><span>{formatNumber(max, dataset?.unit)}</span></div><p>Il colore mostra l’intensità del valore, non un giudizio sul territorio.</p></aside>}
       </div>
@@ -194,7 +194,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
       {selectedId && <aside className="territory-inspector" aria-live="polite"><p className="eyebrow">Territorio selezionato</p>{selectedRow ? <><h3>{territoryLabel(selectedRow.territoryId, selectedRow.name)}</h3><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p><Link href={territoryHref(option.level, selectedRow.istatCode)}>Apri profilo territoriale</Link></> : <><h3>{territoryLabel(selectedId)}</h3><p>{selectedValue === undefined ? "Nessun valore associato nel dataset visualizzato." : formatNumber(selectedValue, dataset?.unit)}</p></>}</aside>}
     </section>
     <section className="ranking" aria-labelledby="ranking-title"><div className="section-heading"><div><p className="eyebrow">Confronto</p><h2 id="ranking-title">Territori nello stesso periodo</h2></div><p>Alternativa testuale alla mappa</p></div>
-      {rankingState === "available" && ranking ? <div className="table-scroll"><table><thead><tr><th>Territorio</th><th>Valore</th><th>Posizione</th><th>Percentile</th></tr></thead><tbody>{ranking.rows.slice(0, 25).map((row) => <tr key={row.territoryId} className={row.territoryId === selectedId ? "is-selected" : undefined}><th scope="row"><button type="button" onClick={() => setSelectedId(row.territoryId)}>{row.name}</button></th><td>{formatNumber(row.value, dataset?.unit)}</td><td>{row.rank ?? "—"}</td><td>{row.percentile === null ? "—" : row.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div> : rankingState === "loading" ? <p className="state-copy" role="status">Carico il confronto territoriale pubblicato…</p> : rankingState === "not-applicable" ? <p className="state-copy">Per questa combinazione di metrica, livello e periodo non è pubblicato un confronto territoriale.</p> : <p className="state-copy" role="alert">Il confronto non è momentaneamente disponibile. {rankingError}</p>}
+      {rankingState === "available" && ranking ? <div className="table-scroll"><table><thead><tr><th>Territorio</th><th>Valore</th><th>Posizione</th><th>Percentile</th></tr></thead><tbody>{ranking.rows.slice(0, 25).map((row) => <tr key={row.territoryId} className={row.territoryId === selectedId ? "is-selected" : undefined}><th scope="row"><button type="button" onClick={() => { setSelectedId(row.territoryId); onTerritorySelect?.(row.territoryId, row.name); }}>{row.name}</button></th><td>{formatNumber(row.value, dataset?.unit)}</td><td>{row.rank ?? "—"}</td><td>{row.percentile === null ? "—" : row.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div> : rankingState === "loading" ? <p className="state-copy" role="status">Carico il confronto territoriale pubblicato…</p> : rankingState === "not-applicable" ? <p className="state-copy">Per questa combinazione di metrica, livello e periodo non è pubblicato un confronto territoriale.</p> : <p className="state-copy" role="alert">Il confronto non è momentaneamente disponibile. {rankingError}</p>}
     </section>
   </>;
 }

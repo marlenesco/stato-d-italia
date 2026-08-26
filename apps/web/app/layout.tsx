@@ -12,6 +12,10 @@ import "./domain-workspace.css";
 import "./domain-theme.css";
 import "./domain-map.css";
 import "./emissions.css";
+import "./emissions-map.css";
+import "./italy-map-frame.css";
+import "./timeline.css";
+import "./comparison-gauge.css";
 
 export const metadata: Metadata = {
   title: "Stato d'Italia",

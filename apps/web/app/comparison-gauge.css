@@ -1,0 +1,1 @@
+.comparison-gauge{padding:12px 0;border-bottom:1px solid var(--line)}.comparison-gauge svg{min-height:128px}.comparison-gauge-needle{stroke-width:2.5}.comparison-gauge-empty-dot{fill:var(--line)}.comparison-gauge--empty{opacity:.75}
