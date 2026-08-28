@@ -23,14 +23,16 @@ grafici o portali esistenti.
 
 ## Fase corrente
 
-Sono autorizzate le milestone **1–4**:
+Sono implementate le milestone dati **1–4**:
 
 1. contratti, registry, schemi e ADR;
 2. infrastruttura di release R2;
 3. territori storici ISTAT e geometrie/PMTiles;
 4. ingestione reale ISPRA/SNPA del consumo di suolo.
 
-La vertical slice Next.js non fa ancora parte della fase corrente.
+È inoltre autorizzata la vertical slice Next.js data-first descritta da ADR 0010.
+La UI legge gli artifact delivery pubblicati senza introdurre database, proxy dati
+ordinario o calcoli che inventino granularità non presenti nelle fonti.
 
 ## Architettura accettata
 
@@ -120,6 +122,11 @@ sono mai contenute nel repository.
 - `docs/adr/0004-maps.md`
 - `docs/adr/0005-source-provenance.md`
 - `docs/adr/0006-source-contracts-and-validation.md`
+- `docs/adr/0007-analytics-and-comparisons.md`
+- `docs/adr/0008-multidimensional-official-observations.md`
+- `docs/adr/0009-temporal-ui-comparisons.md`
+- `docs/adr/0010-responsive-data-explorer.md`
+- `docs/adr/0011-persistent-map-selection.md`
 
 ## Documenti operativi
 

@@ -1,6 +1,5 @@
 import Link from "next/link";
-import type { HomeOverview } from "../lib/data";
-import { PageSidebar } from "./page-sidebar";
+import type { HomeDomainSignal, HomeOverview } from "../lib/data";
 
 function number(value: number, maximumFractionDigits = 0) {
   return new Intl.NumberFormat("it-IT", { maximumFractionDigits }).format(value);
@@ -16,66 +15,33 @@ function TrendLine({ series }: { series: HomeOverview["netSeries"] }) {
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min || 1;
-  const coordinates = points.map(([, , end, value], index) => {
-    const x = 10 + (index / Math.max(1, points.length - 1)) * 280;
-    const y = 82 - ((value - min) / span) * 64;
-    return `${x},${y}`;
-  }).join(" ");
-  return <figure className="trend-figure">
-    <figcaption><span>Serie annua comparabile</span><strong>2015–2024</strong></figcaption>
-    <svg viewBox="0 0 300 96" role="img" aria-label={`Incremento netto nazionale annuo: da ${number(values[0])} a ${number(values.at(-1) ?? 0)} ettari`}>
-      <path d="M10 82H290" className="chart-axis" />
-      <polyline points={coordinates} className="chart-line" />
-      {coordinates.split(" ").map((point, index) => <circle key={point} cx={point.split(",")[0]} cy={point.split(",")[1]} r={index === points.length - 1 ? 4 : 2.2} className="chart-dot" />)}
-    </svg>
-    <div className="trend-scale"><span>{points[0]?.[2].slice(0, 4)}</span><span>{points.at(-1)?.[2].slice(0, 4)}</span></div>
-  </figure>;
+  const coordinates = points.map(([, , , value], index) => `${10 + index / Math.max(1, points.length - 1) * 280},${82 - (value - min) / span * 64}`).join(" ");
+  return <figure className="home-trend"><figcaption><span>Incremento netto annuo</span><strong>{points[0]?.[2].slice(0, 4)}–{points.at(-1)?.[2].slice(0, 4)}</strong></figcaption><svg viewBox="0 0 300 96" role="img" aria-label={`Incremento netto nazionale annuo: da ${number(values[0])} a ${number(values.at(-1) ?? 0)} ettari`}><path d="M10 82H290" className="chart-axis" /><polyline points={coordinates} className="chart-line" /></svg></figure>;
 }
 
-function signalHref(period: string, territoryId?: string) {
-  const params = new URLSearchParams({ metric: "soil_net_consumption_hectares", level: "region", period });
-  if (territoryId) params.set("territory", territoryId);
-  return `/suolo?${params.toString()}#mappa`;
+function DomainSignal({ signal }: { signal: HomeDomainSignal }) {
+  const kind = signal.kind === "official" ? "Dato ufficiale" : signal.kind === "modelled" ? "Stima ufficiale" : "Elaborazione dichiarata";
+  return <article className={`home-domain-row home-domain-${signal.id}`}>
+    <div className="home-domain-name"><p>{kind}</p><h3>{signal.title}</h3></div>
+    <div className="home-domain-value"><span>{signal.label}</span><strong>{signal.displayValue} <small>{signal.unit}</small></strong><p>{signal.period}</p></div>
+    <p className="home-domain-note">{signal.note}</p>
+    <Link href={signal.href}>Apri {signal.title.toLowerCase()} <span aria-hidden="true">→</span></Link>
+  </article>;
 }
 
-export function HomeOverview({ overview }: { overview: HomeOverview }) {
+export function HomeOverview({ overview, signals }: { overview: HomeOverview; signals: HomeDomainSignal[] }) {
   const previous = overview.previousChange?.status === "available" && overview.previousChange.value !== undefined && overview.previousChange.value !== null
     ? `${overview.previousChange.value > 0 ? "+" : ""}${number(overview.previousChange.value, 1)} ${overview.previousChange.unit}`
     : "Non disponibile";
-  return <section className="home-site-layout">
-    <PageSidebar eyebrow="Osservatorio" title="Italia">
-      <nav className="page-sidebar-nav" aria-label="Sezioni panoramica"><a href="#lettura">Cosa emerge</a><a href="#segnali">Segnali regionali</a><Link href={signalHref(overview.periodKey.replace("–", "-"))}>Esplora mappa suolo →</Link></nav>
-      <section className="sidebar-section"><h3>Periodo corrente</h3><p className="sidebar-context"><strong>{overview.periodKey}</strong>Incremento netto di suolo consumato.</p></section>
-      <section className="sidebar-section"><p className="sidebar-context">Fonti, periodi e limiti restano visibili in ogni approfondimento.</p></section>
-    </PageSidebar>
-    <div className="home-site-content">
-    <section className="home-hero">
-      <div className="home-hero-title"><p className="eyebrow">Osservatorio territoriale · dati ufficiali</p><h1>Come cambia l&apos;Italia.</h1></div>
-      <div className="home-hero-copy"><p className="home-lede">Leggi cambiamenti ambientali e territoriali nel tempo. Fonti, periodi e limiti restano sempre visibili.</p><Link className="primary-link" href={signalHref(overview.periodKey.replace("–", "-"))}>Esplora consumo di suolo <span aria-hidden="true">→</span></Link></div>
-      <TrendLine series={overview.netSeries} />
-    </section>
+  return <div className="home-dashboard">
+    <header className="home-intro"><div><p className="eyebrow">Osservatorio territoriale · fonti verificabili</p><h1>Dati per leggere l&apos;Italia.</h1></div><p>Ambiente e territorio, senza punteggi opachi. Ogni dato mantiene periodo, scala geografica e provenienza.</p><small>Release {overview.releaseId}</small></header>
 
-    <section id="lettura" className="national-reading" aria-labelledby="national-reading-title" tabIndex={-1}>
-      <div><p className="eyebrow">Italia · {overview.periodKey}</p><h2 id="national-reading-title">Cosa emerge</h2></div>
-      <p className="reading-copy">Nel periodo più recente, incremento netto nazionale: <strong>{number(overview.latestNet.value, 0)} {overview.latestNet.unit}</strong>. Rispetto al periodo annuale precedente: <strong>{previous}</strong>. Il valore è osservazione ufficiale; ranking e segnali sono elaborazioni versionate.</p>
-    </section>
+    <section className="home-current" aria-labelledby="home-current-title"><div><p className="eyebrow">Italia · {overview.periodKey}</p><h2 id="home-current-title">Suolo consumato: ultimo incremento netto</h2><p>Osservazione ufficiale ISPRA/SNPA. Rispetto al periodo precedente: <strong>{previous}</strong>.</p><Link href={`/suolo?metric=soil_net_consumption_hectares&level=region&period=${overview.periodKey.replace("–", "-")}#mappa`}>Vedi territori e mappa →</Link></div><div className="home-current-value"><strong>{number(overview.latestNet.value, 0)}</strong><span>{overview.latestNet.unit}</span><TrendLine series={overview.netSeries} /></div></section>
 
-    <section id="segnali" className="signal-grid" aria-label="Segnali regionali" tabIndex={-1}>
-      <article className="signal-panel signal-panel-alert">
-        <p className="eyebrow">Da approfondire</p>
-        <h2>Incrementi netti più alti</h2>
-        <p>Regioni con maggior incremento netto registrato. Non è un giudizio di qualità o responsabilità.</p>
-        <ol className="signal-list">{overview.watchRegions.map((region) => <li key={region.territoryId}><Link href={signalHref(overview.periodKey.replace("–", "-"), region.territoryId)}><span>{region.name}</span><strong>{number(region.value, 1)} ha</strong></Link></li>)}</ol>
-      </article>
-      <article className="signal-panel signal-panel-calm">
-        <p className="eyebrow">Incremento più contenuto</p>
-        <h2>Valori più bassi nel periodo</h2>
-        <p>Confronto sul solo incremento netto osservato. Non equivale a “regione migliore”.</p>
-        <ol className="signal-list">{overview.lowerChangeRegions.map((region) => <li key={region.territoryId}><Link href={signalHref(overview.periodKey.replace("–", "-"), region.territoryId)}><span>{region.name}</span><strong>{number(region.value, 1)} ha</strong></Link></li>)}</ol>
-      </article>
-    </section>
+    <section className="home-domains" aria-labelledby="home-domains-title"><header><p className="eyebrow">Domini disponibili</p><h2 id="home-domains-title">Un ingresso chiaro per ogni tema</h2><p>Valori nazionali quando pubblicati; copertura della release quando un totale nazionale non sarebbe corretto.</p></header>{signals.map((signal) => <DomainSignal key={signal.id} signal={signal} />)}</section>
 
-    <section className="method-note"><p><strong>Come leggere questa pagina.</strong> “Da approfondire” ordina valori ufficiali per incremento netto. Non assegna cause né giudizi. Algoritmo ranking: {overview.algorithmVersion}. <Link href="/suolo#mappa">Apri dati, mappa e metodo</Link>.</p><span>Release {overview.releaseId}</span></section>
-    </div>
-  </section>;
+    <section className="home-regions" aria-labelledby="home-regions-title"><header><p className="eyebrow">Confronto regionale · {overview.periodKey}</p><h2 id="home-regions-title">Incrementi netti più alti</h2><p>Ordine del valore osservato, non giudizio su qualità o responsabilità.</p></header><ol>{overview.watchRegions.map((region) => <li key={region.territoryId}><span>{region.name}</span><strong>{number(region.value, 1)} ha</strong></li>)}</ol><Link href="/suolo?metric=soil_net_consumption_hectares&level=region#mappa">Apri confronto completo →</Link></section>
+
+    <footer className="home-method"><p><strong>Come leggere.</strong> Valori ufficiali, stime modellistiche ed elaborazioni del progetto restano distinti. Nessuna granularità o periodo viene inventato.</p><span>Ranking {overview.algorithmVersion}</span></footer>
+  </div>;
 }
