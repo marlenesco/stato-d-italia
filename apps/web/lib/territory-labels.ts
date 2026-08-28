@@ -16,3 +16,7 @@ export function territoryLabel(territoryId: string, officialName?: string) {
   if (level === "region") return regionNames[code] ?? `Regione ISTAT ${code}`;
   return `${levelNames[level] ?? "Territorio"} ISTAT ${code}`;
 }
+
+export function territoryIstatCode(territoryId: string, officialCode?: string) {
+  return officialCode ?? territoryId.split(":")[2] ?? "—";
+}

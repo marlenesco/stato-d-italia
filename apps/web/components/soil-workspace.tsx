@@ -1,13 +1,14 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { MapOption, SoilData } from "../lib/data";
-import { ExposedMenu, MapSidebar } from "./map-sidebar";
+import type { MenuGroup, MenuItem } from "./map-sidebar";
+import { ExplorerToolbar } from "./explorer-toolbar";
+import { ForestMetricCompanion, type ForestMetricCompanionConfig } from "./forest-metric-companion";
 import { SoilMap } from "./soil-map";
 import { TimelineControl } from "./timeline-control";
-import { TerritoryMapSeries } from "./territory-map-series";
+import type { DomainColorName } from "../lib/domain-colors";
 
 type MappableLevel = Exclude<MapOption["level"], "country">;
 
@@ -21,28 +22,47 @@ const metricLabels: Record<string, string> = {
 
 const metricUnits: Record<string, string> = { soil_net_consumption_hectares: "ha", soil_gross_consumption_hectares: "ha", soil_restoration_hectares: "ha", soil_consumed_hectares: "ha", soil_consumed_share: "%" };
 
-function rankingPath(option: MapOption) {
-  return `delivery/soil/rankings/${option.metricId}/${option.periodKey}/${option.level}.json`;
+function rankingPath(option: MapOption, root: string) {
+  return `delivery/${root}/rankings/${option.metricId}/${option.periodKey}/${option.level}.json`;
 }
 
 function comparePeriods(left: string, right: string) {
   return Number(left.slice(0, 4)) - Number(right.slice(0, 4)) || left.localeCompare(right);
 }
 
+function periodLabel(period: string | undefined) {
+  if (!period) return "—";
+  const [start, end] = period.split("-");
+  return start === end ? start : period;
+}
+
 function levelLabel(level: MappableLevel) {
   return level === "municipality" ? "Comuni" : level === "province" ? "Province" : "Regioni";
 }
 
-export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabel: string }) {
+type MetricGuide = {
+  family: string;
+  reading: string;
+  source: string;
+  sourceNote?: string;
+  mapStatusNote?: string;
+  seriesStatusNote?: string;
+};
+type MetricMenuGroup = { id: string; label: string; meta?: string; metricIds: string[] };
+type WorkspaceConfig = { title?: string; eyebrow?: string; description?: string; metricLabels?: Record<string, string>; metricUnits?: Record<string, string>; metricGuides?: Record<string, MetricGuide>; defaultMetric?: string; hiddenMetricIds?: string[]; metricAliases?: Record<string, string>; metricGroups?: MetricMenuGroup[]; forestCompanions?: ForestMetricCompanionConfig[]; dataRoot?: string; colorRamp?: DomainColorName; sourceNote?: string; mapStatusNote?: string; seriesStatusNote?: string; provenanceSummary?: string; availabilityNote?: string; comparisonNote?: string; domainClass?: string; coverage?: string };
+
+export function ThemeWorkspace({ data, themeLabel, config = {} }: { data: SoilData; themeLabel: string; config?: WorkspaceConfig }) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const metrics = useMemo(() => [...new Set(data.maps.map((item) => item.metricId))], [data.maps]);
+  const publishedMetrics = useMemo(() => [...new Set(data.maps.map((item) => item.metricId))], [data.maps]);
+  const metrics = useMemo(() => publishedMetrics.filter((metricId) => !config.hiddenMetricIds?.includes(metricId)), [config.hiddenMetricIds, publishedMetrics]);
   const requestedMetric = searchParams.get("metric");
+  const resolvedRequestedMetric = requestedMetric ? config.metricAliases?.[requestedMetric] ?? requestedMetric : null;
   // Start on a metric with a real published time series, so the timeline and
   // its period-on-period comparison are useful without an extra choice.
-  const defaultMetric = metrics.includes("soil_net_consumption_hectares") ? "soil_net_consumption_hectares" : metrics[0];
-  const metric = requestedMetric && metrics.includes(requestedMetric) ? requestedMetric : defaultMetric;
+  const defaultMetric = config.defaultMetric && metrics.includes(config.defaultMetric) ? config.defaultMetric : (metrics.includes("soil_net_consumption_hectares") ? "soil_net_consumption_hectares" : metrics[0]);
+  const metric = resolvedRequestedMetric && metrics.includes(resolvedRequestedMetric) ? resolvedRequestedMetric : defaultMetric;
   const levels = useMemo(() => Array.from(new Set(data.maps.filter((item) => item.metricId === metric).map((item) => item.level))).filter((item): item is MappableLevel => item !== "country"), [data.maps, metric]);
   const requestedLevel = searchParams.get("level") as MappableLevel | null;
   const level = requestedLevel && levels.includes(requestedLevel) ? requestedLevel : (levels.includes("municipality") ? "municipality" : levels[0]);
@@ -50,11 +70,12 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
   const requestedPeriod = searchParams.get("period");
   const selected = available.find((item) => item.periodKey === requestedPeriod) ?? available.at(-1);
   const periods = available.map((item) => item.periodKey);
-  const [territory, setTerritory] = useState<{ id: string; name?: string } | undefined>(() => {
-    const id = searchParams.get("territory");
-    return id ? { id } : undefined;
-  });
-  const selectTerritory = useCallback((id: string, name?: string) => setTerritory({ id, name }), []);
+  const requestedTerritory = searchParams.get("territory") ?? undefined;
+  const [territory, setTerritory] = useState<{ id: string; name?: string } | undefined>(() => requestedTerritory ? { id: requestedTerritory } : undefined);
+
+  useEffect(() => {
+    setTerritory((current) => requestedTerritory ? current?.id === requestedTerritory ? current : { id: requestedTerritory } : undefined);
+  }, [requestedTerritory]);
 
   function update(params: Record<string, string | undefined>) {
     const next = new URLSearchParams(searchParams.toString());
@@ -62,12 +83,18 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
   }
 
+  const selectTerritory = useCallback((id: string, name?: string) => {
+    setTerritory({ id, name });
+    update({ territory: id });
+  }, [pathname, router, searchParams]);
+
   function changeMetric(nextMetric: string) {
     const nextLevels = Array.from(new Set(data.maps.filter((item) => item.metricId === nextMetric && item.level !== "country").map((item) => item.level))) as MappableLevel[];
     const nextLevel = nextLevels.includes(level) ? level : (nextLevels.includes("municipality") ? "municipality" : nextLevels[0]);
     const nextPeriods = data.maps.filter((item) => item.metricId === nextMetric && item.level === nextLevel).sort((left, right) => comparePeriods(left.periodKey, right.periodKey));
-    setTerritory(undefined);
-    update({ metric: nextMetric, level: nextLevel, period: nextPeriods.at(-1)?.periodKey, territory: undefined });
+    const retainedTerritory = nextLevel === level ? territory?.id ?? requestedTerritory : undefined;
+    if (!retainedTerritory) setTerritory(undefined);
+    update({ metric: nextMetric, level: nextLevel, period: nextPeriods.at(-1)?.periodKey, territory: retainedTerritory });
   }
 
   function changeLevel(nextLevel: MappableLevel) {
@@ -76,22 +103,38 @@ export function ThemeWorkspace({ data, themeLabel }: { data: SoilData; themeLabe
     update({ level: nextLevel, period: nextPeriod, territory: undefined });
   }
 
-  return <section className="soil-site-layout" aria-label={`Esplorazione ${themeLabel}`}>
-    <MapSidebar title="Consumo di suolo">
-      <a className="sidebar-link sidebar-atlas-link" href="#mappa">Vai alla mappa ↓</a>
-      <ExposedMenu label="Metrica" value={metric} onChange={changeMetric} items={metrics.map((id) => ({ id, label: metricLabels[id] ?? id, meta: metricUnits[id] }))} />
-      <section className="sidebar-section"><h3>Livello territoriale</h3><div className="level-menu" role="group" aria-label="Livello territoriale">{levels.map((item) => <button type="button" key={item} onClick={() => changeLevel(item)} aria-pressed={item === level}>{levelLabel(item)}</button>)}</div></section>
-      <TerritoryMapSeries options={available} territoryId={territory?.id} territoryName={territory?.name} selectedPeriod={selected?.periodKey} />
-      <section className="sidebar-section"><h3>Vista corrente</h3><p className="sidebar-context"><strong>{selected?.periodKey ?? "—"}</strong>{levelLabel(level)} · valori ufficiali ISPRA/SNPA.</p></section>
-      <section className="sidebar-section"><h3>Copertura</h3><p className="sidebar-context">Mappa: osservazioni ufficiali. Confronto e percentile solo quando pubblicati.</p></section>
-      <Link className="sidebar-link" href="/">Panoramica nazionale →</Link>
-    </MapSidebar>
+  const labels = config.metricLabels ?? metricLabels;
+  const units = config.metricUnits ?? metricUnits;
+  const menuItems: MenuItem[] = metrics.map((id) => ({ id, label: labels[id] ?? id, meta: config.metricGuides?.[id]?.family ?? units[id] }));
+  const groupedMetricIds = new Set(config.metricGroups?.flatMap((group) => group.metricIds) ?? []);
+  const menuGroups: MenuGroup[] | undefined = config.metricGroups?.map((group) => ({ id: group.id, label: group.label, meta: group.meta, items: group.metricIds.flatMap((metricId) => {
+    const item = menuItems.find((candidate) => candidate.id === metricId);
+    return item ? [{ ...item, meta: undefined }] : [];
+  }) })).filter((group) => group.items.length);
+  const ungroupedItems = menuItems.filter((item) => !groupedMetricIds.has(item.id));
+  if (ungroupedItems.length) menuGroups?.push({ id: "other", label: "Altre misure", meta: undefined, items: ungroupedItems });
+  const title = config.title ?? "Consumo di suolo";
+  const guide = config.metricGuides?.[metric];
+  const sourceNote = guide?.sourceNote ?? config.sourceNote ?? "valori ufficiali ISPRA/SNPA.";
+  const mapStatusNote = guide?.mapStatusNote ?? config.mapStatusNote ?? "Mappa: osservazioni ufficiali. Confronto e percentile solo quando pubblicati.";
+  const provenanceSummary = config.provenanceSummary ?? "Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.";
+  const availabilityNote = config.availabilityNote ?? "Solo periodi ufficialmente pubblicati.";
+  const coverage = config.coverage ?? ["municipality", "province", "region"].filter((item) => levels.includes(item as MappableLevel)).map((item) => levelLabel(item as MappableLevel)).join(" · ");
+  return <section className={`soil-site-layout explorer-layout ${config.domainClass ?? ""}`} aria-label={`Esplorazione ${themeLabel}`}>
     <div className="soil-site-content">
-      <section className="soil-hero"><div className="soil-hero-title"><p className="eyebrow">ISPRA / SNPA · release {data.releaseId}</p><h1>Consumo di suolo</h1></div><div className="soil-hero-copy"><p>Valori ufficiali per periodo. Analisi, ranking e percentili sono elaborazioni riproducibili del progetto.</p><a className="primary-link" href="#mappa">Apri mappa <span aria-hidden="true">→</span></a></div><section className="soil-hero-context" aria-label="Copertura esploratore"><div><p className="eyebrow">Copertura mappa</p><strong>Comuni · Province · Regioni</strong></div><p><strong>{metrics.length} metriche</strong><br />Solo periodi ufficialmente pubblicati.</p></section></section>
-      <section id="mappa" className="soil-workspace" tabIndex={-1} aria-label="Mappa consumo di suolo">
+      <header className="workspace-header">
+        <div><p className="eyebrow">{guide?.source ?? config.eyebrow ?? "ISPRA / SNPA"}</p><h1>{title}</h1></div>
+        <p>{config.description ?? "Valori ufficiali per periodo. Analisi, ranking e percentili sono elaborazioni riproducibili del progetto."}</p>
+        <dl><div><dt>Copertura</dt><dd>{coverage}</dd></div><div><dt>Misure</dt><dd>{metrics.length}</dd></div><div><dt>Release</dt><dd>{data.releaseId}</dd></div></dl>
+      </header>
+      <ExplorerToolbar label="Misura" value={metric} onChange={changeMetric} items={menuItems} groups={menuGroups} levels={levels.map((item) => ({ id: item, label: levelLabel(item) }))} level={level} onLevelChange={(id) => changeLevel(id as MappableLevel)} context={`${periodLabel(selected?.periodKey)} · ${sourceNote}`} />
+      {guide && <section className="metric-reading" aria-live="polite"><div><p className="eyebrow">Come leggere</p><h2>{labels[metric] ?? metric}</h2></div><p>{guide.reading}</p><p><strong>{guide.family}</strong><br />{guide.source}</p></section>}
+      <section id="mappa" className="soil-workspace map-workspace-v2" tabIndex={-1} aria-label={`Mappa ${title.toLowerCase()}`}>
         {selected && <TimelineControl periods={periods} value={selected.periodKey} onChange={(period) => update({ period })} />}
-        {selected ? <SoilMap option={selected} metricLabel={metricLabels[selected.metricId] ?? selected.metricId} geometryUrl={data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected)]} selectedTerritoryId={territory?.id} onTerritorySelect={selectTerritory} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
-        <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori in mappa: osservazioni ufficiali. Ranking e percentili: elaborazioni riproducibili del progetto.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
+        {selected ? <SoilMap option={selected} metricLabel={labels[selected.metricId] ?? selected.metricId} geometryUrl={data.mapGeometry?.[selected.logicalPath] ?? data.geometry[level]} rankingUrl={data.rankings[rankingPath(selected, config.dataRoot ?? "soil")]} selectedTerritoryId={territory?.id} seriesOptions={available} seriesStatusNote={guide?.seriesStatusNote ?? config.seriesStatusNote} colorRamp={config.colorRamp} comparisonNote={config.comparisonNote} onTerritorySelect={selectTerritory} /> : <p role="alert">Combinazione non disponibile nella release attiva.</p>}
+        <div className="map-reading-panel"><p>{mapStatusNote}</p></div>
+        {selected && config.forestCompanions && <ForestMetricCompanion activeMetricId={metric} selectedOption={selected} selectedTerritoryId={territory?.id} selectedTerritoryName={territory?.name} maps={data.maps} metricLabels={labels} companions={config.forestCompanions} />}
+        <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>{provenanceSummary} {availabilityNote}</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
       </section>
     </div>
   </section>;
