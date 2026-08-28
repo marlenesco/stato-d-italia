@@ -11,7 +11,12 @@ from pmtiles.writer import Writer
 from shapely import wkb
 from shapely.geometry import box
 
-REQUIRED_TERRITORY_FIELDS = frozenset({"territory_id", "territory_level", "istat_code", "name"})
+REQUIRED_TERRITORY_FIELDS = frozenset({
+    "territory_id", "territory_level", "istat_code", "name",
+    "parent_territory_id", "parent_istat_code", "parent_name", "parent_level",
+    "region_territory_id", "region_istat_code", "region_name",
+    "territory_hierarchy_version",
+})
 
 
 def is_readable_pmtiles(path: Path) -> bool:
@@ -33,8 +38,37 @@ def is_readable_pmtiles(path: Path) -> bool:
 
 def build_pmtiles(territory_parquet: Path, destination: Path, max_zoom: int = 7) -> dict:
     """Build bounded, generalized MVT PMTiles without external map service/tooling."""
+    records = pd.read_parquet(territory_parquet).to_dict("records")
+    by_level_code: dict[tuple[str, str], dict] = {}
+    for level in ("province", "region"):
+        path = territory_parquet.parent / f"{level}.parquet"
+        if path.exists():
+            for row in pd.read_parquet(path).to_dict("records"):
+                by_level_code[(level, str(row["istat_code"]))] = row
+
+    def hierarchy(feature: dict) -> dict[str, str]:
+        parent: dict | None = None
+        region: dict | None = None
+        if feature["level"] == "municipality":
+            parent = by_level_code.get(("province", str(feature.get("parent_istat_code", ""))))
+            if parent:
+                region = by_level_code.get(("region", str(parent.get("parent_istat_code", ""))))
+        elif feature["level"] == "province":
+            parent = by_level_code.get(("region", str(feature.get("parent_istat_code", ""))))
+            region = parent
+        output = {
+            "parent_territory_id": parent["territory_id"] if parent else "",
+            "parent_istat_code": parent["istat_code"] if parent else "",
+            "parent_name": parent["name"] if parent else "",
+            "parent_level": parent["level"] if parent else "",
+            "region_territory_id": region["territory_id"] if region else "",
+            "region_istat_code": region["istat_code"] if region else "",
+            "region_name": region["name"] if region else "",
+        }
+        return output
+
     tile_features: dict[tuple[int, int, int], list[dict]] = {}
-    for feature in pd.read_parquet(territory_parquet).to_dict("records"):
+    for feature in records:
         geometry = wkb.loads(feature["geometry_wkb"])
         west, south, east, north = geometry.bounds
         for zoom in range(max_zoom + 1):
@@ -46,6 +80,8 @@ def build_pmtiles(territory_parquet: Path, destination: Path, max_zoom: int = 7)
                         "territory_level": feature["level"],
                         "istat_code": feature["istat_code"],
                         "name": feature["name"],
+                        "territory_hierarchy_version": "1",
+                        **hierarchy(feature),
                     },
                 })
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -86,7 +122,7 @@ def build_pmtiles(territory_parquet: Path, destination: Path, max_zoom: int = 7)
                 "format": "pbf",
                 "type": "overlay",
                 "version": "2024-01-01",
-                "vector_layers": [{"id": "territories", "fields": {"territory_id": "String", "territory_level": "String", "istat_code": "String", "name": "String"}}],
+                "vector_layers": [{"id": "territories", "fields": {field: "String" for field in sorted(REQUIRED_TERRITORY_FIELDS)}}],
             },
         )
     if wrote == 0:
