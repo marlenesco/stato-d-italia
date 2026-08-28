@@ -1,0 +1,74 @@
+source_id: copernicus-hrl-forests
+publisher: European Union / Copernicus Land Monitoring Service
+landing_url: https://land.copernicus.eu/en/products/high-resolution-layer-forests-and-tree-cover
+catalog_api_url: https://catalogue.dataspace.copernicus.eu/odata/v1/Products
+token_url: https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token
+statistical_api_url: https://sh.dataspace.copernicus.eu/api/v1/statistics
+process_api_url: https://sh.dataspace.copernicus.eu/api/v1/process
+license: Copernicus full, free and open access; attribution and explicit derived-product notice required
+geographical_granularity: raster; Stato d'Italia derives ISTAT municipality, province, region and country values
+temporal_granularity: yearly and 3-yearly depending on product
+methodology_url: https://land.copernicus.eu/en/products/high-resolution-layer-forests-and-tree-cover?tab=technical_summary
+client_id_environment: CDSE_CLIENT_ID
+client_secret_environment: CDSE_CLIENT_SECRET
+processing_mode_environment: FOREST_PROCESSING_MODE
+processing_modes: [statistical-api, raster]
+development_slice:
+  territory_reference_year: 2023
+  region_istat_codes: ['03', '09', '12', '19']
+raw_retention_environment: FORESTS_RAW_RETENTION
+raw_retention_default: retain
+known_limitations:
+  - HRL Tree Cover Density measures tree-crown projection, not necessarily FAO forest area.
+  - Tree Cover Presence Change describes gain/loss of tree cover, not permanent land-use change or deforestation.
+  - CDSE OAuth access tokens are short lived and must never be persisted or logged.
+  - Statistical API values are development-slice zonal calculations, not Copernicus-published municipality values.
+  - Raster development slices are extracted through the CDSE Processing API at 100 m; they are retained local processing inputs, not original CLMS tile downloads.
+assets:
+  - id: hrl_tree_cover_density_100m
+    kind: tree_cover_density
+    format: GeoTIFF
+    resolution_m: 100
+    process_resolution_m: 100
+    process_max_pixels: 2048
+    process_no_data: -9999
+    years: [2018, 2021, 2023]
+    byoc_collection_id: edd3c5f5-da8e-463f-8c9a-712aa451d37e
+    band: TCD
+    catalog_tag: TCD
+  - id: hrl_forest_type
+    kind: forest_type
+    format: GeoTIFF
+    resolution_m: 100
+    process_resolution_m: 100
+    process_max_pixels: 2048
+    process_no_data: -9999
+    years: [2018, 2021]
+    byoc_collection_id: d267ca76-6afb-4992-99d6-67c67df4820c
+    band: FTY
+    catalog_tag: FTY
+    class_codes: {non_forest: 0, broadleaved: 1, coniferous: 2, mixed: 3}
+  - id: hrl_dominant_leaf_type
+    kind: dominant_leaf_type
+    format: GeoTIFF
+    resolution_m: 10
+    statistical_resolution_m: 100
+    years: [2018, 2021, 2023]
+    byoc_collection_id: 42b2ef44-5983-4bd1-9e2f-52c093c08b3d
+    band: DLT
+    catalog_tag: DLT
+    class_codes: {non_tree: 0, broadleaved: 1, coniferous: 2}
+    statistical_api_enabled: false
+  - id: hrl_tree_cover_presence_change
+    kind: tree_cover_change
+    format: GeoTIFF
+    resolution_m: 20
+    statistical_resolution_m: 100
+    process_resolution_m: 100
+    process_max_pixels: 2048
+    process_no_data: -9999
+    periods: [[2018, 2021]]
+    byoc_collection_id: c1e547c2-47ec-4ce7-b87c-3057faba5ecc
+    band: TCPC
+    catalog_tag: TCPC
+    class_codes: {new_tree_cover: 1, loss_tree_cover: 2}
