@@ -40,9 +40,9 @@ type Ranking = {
   rows: Array<{ territoryId: string; name: string; istatCode: string; value: number; percentile: number | null; rank: number | null }>;
 };
 
-type SoilIndex = { maps: string[]; rankings: string[]; geometry: string[]; provenance: string; profileShards: string[] };
+type SoilIndex = { maps: string[]; rankings: string[]; geometry: string[]; mapGeometry?: Record<string, string>; provenance: string; profileShards: string[] };
 
-export type SoilData = { releaseId: string; provenance: Record<string, unknown>; maps: MapOption[]; rankings: Record<string, string>; geometry: Record<string, string> };
+export type SoilData = { releaseId: string; provenance: Record<string, unknown>; maps: MapOption[]; rankings: Record<string, string>; geometry: Record<string, string>; mapGeometry?: Record<string, string> };
 
 export type WaterObservation = { metricId: string; periodEnd: string; value: number; unit: string };
 export type WaterProfile = {
@@ -53,15 +53,19 @@ export type WaterProfile = {
 export type WaterData = SoilData & { profileUrls: Record<string, string> };
 export type WaterOverview = { releaseId: string; countryProfile: WaterProfile };
 export type DissestoData = SoilData;
+export type ForestData = SoilData;
 export type EmissionsOverview = {
   releaseId: string;
   greenhouseGases: { label: string; coverage: string; unit: string; seriesLabel: string; series: Array<[number, number]>; metrics: string[] };
   airPollutantsNfr: { label: string; coverage: string; metrics: number; sourceDimensions: string[] };
   provincialDisaggregation: { label: string; coverage: string; metrics: number; sourceDimensions: string[] };
-  map?: { label: string; detail: string; coverage: string };
+  map?: { metricId: string; snapCode: string; label: string; detail: string; coverage: string; periods: number[]; territoryLevel: "province" };
   provenanceRef: string;
 };
-export type EmissionsData = { overview: EmissionsOverview; maps: MapOption[]; geometryByPeriod: Record<string, string> };
+export type EmissionsNationalSeries = { id: string; metricId: string; metricLabel: string; dimensionCode: string; dimensionLabel: string; sourceUnit: string; unit: string; values: Array<[number, number]> };
+export type EmissionsNationalDataset = { kind: "official_national_series"; series: EmissionsNationalSeries[] };
+export type EmissionsProvincialCombination = { id: string; metricId: string; pollutantCode: string; pollutantLabel: string; snapCode: string; snapLabel: string; unit: string; mapPaths: Record<string, string> };
+export type EmissionsData = { overview: EmissionsOverview; nationalUrls: { greenhouseGases: string; airPollutantsNfr: string }; provincial: EmissionsProvincialCombination[]; geometryByPeriod: Record<string, string> };
 
 export type HomeOverview = {
   releaseId: string;
@@ -72,6 +76,19 @@ export type HomeOverview = {
   watchRegions: Ranking["rows"];
   lowerChangeRegions: Ranking["rows"];
   periodKey: string;
+};
+
+export type HomeDomainSignal = {
+  id: "soil" | "water" | "forests" | "emissions" | "risk";
+  title: string;
+  label: string;
+  displayValue: string;
+  unit: string;
+  period: string;
+  note: string;
+  href: string;
+  status: "available" | "unavailable";
+  kind: "official" | "modelled" | "derived";
 };
 
 function root() {
@@ -123,9 +140,15 @@ async function dissestoRelease() {
   return { base, release, index };
 }
 
+async function forestsRelease() {
+  const { base, release } = await activeRelease();
+  const index = await fetchJson<SoilIndex>(asset(base, release, "delivery/foreste/index.json"), 300);
+  return { base, release, index };
+}
+
 async function emissionsRelease() {
   const { base, release } = await activeRelease();
-  const index = await fetchJson<{ overview: string; provenance: string; maps?: string[]; geometry?: string[] }>(asset(base, release, "delivery/emissions/index.json"), 300);
+  const index = await fetchJson<{ overview: string; provenance: string; national: { greenhouseGases: string; airPollutantsNfr: string }; provincialCatalog: string; geometry?: string[] }>(asset(base, release, "delivery/emissions/index.json"), 300);
   return { base, release, index };
 }
 
@@ -164,11 +187,26 @@ export async function loadDissestoData(): Promise<DissestoData> {
   };
 }
 
+export async function loadForestData(): Promise<ForestData> {
+  const { base, release, index } = await forestsRelease();
+  const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
+  return {
+    releaseId: release.releaseId,
+    provenance,
+    maps: index.maps.map((path) => parseMap(path, asset(base, release, path))),
+    rankings: Object.fromEntries(index.rankings.map((path) => [path, asset(base, release, path)])),
+    geometry: geometryUrls(base, release, index.geometry),
+    mapGeometry: Object.fromEntries(Object.entries(index.mapGeometry ?? {}).map(([mapPath, geometryPath]) => [mapPath, `${asset(base, release, geometryPath)}?release=${release.releaseId}`])),
+  };
+}
+
 export async function loadEmissionsData(): Promise<EmissionsData> {
   const { base, release, index } = await emissionsRelease();
+  const provincialCatalog = await fetchJson<{ combinations: Array<Omit<EmissionsProvincialCombination, "mapPaths"> & { mapPaths: Record<string, string> }> }>(asset(base, release, index.provincialCatalog), 300);
   return {
     overview: await fetchJson<EmissionsOverview>(asset(base, release, index.overview), 300),
-    maps: (index.maps ?? []).map((path) => parseMap(path, asset(base, release, path))),
+    nationalUrls: { greenhouseGases: asset(base, release, index.national.greenhouseGases), airPollutantsNfr: asset(base, release, index.national.airPollutantsNfr) },
+    provincial: provincialCatalog.combinations.map((item) => ({ ...item, mapPaths: Object.fromEntries(Object.entries(item.mapPaths).map(([year, path]) => [year, asset(base, release, path)])) })),
     geometryByPeriod: Object.fromEntries((index.geometry ?? []).map((path) => [path.match(/istat-province-(\d{4})/)?.[1] ?? "unknown", `${asset(base, release, path)}?release=${release.releaseId}`])),
   };
 }
@@ -205,6 +243,44 @@ export async function loadHomeOverview(): Promise<HomeOverview> {
   if (!rankingPath) throw new Error("Home overview ranking unavailable in active release");
   const ranking = await fetchJson<Ranking>(asset(base, release, rankingPath), 300);
   return { releaseId: release.releaseId, algorithmVersion: ranking.algorithmVersion, latestNet, previousChange: netAnalytics?.changes?.previous, netSeries, watchRegions: ranking.rows.slice(0, 5), lowerChangeRegions: [...ranking.rows].reverse().slice(0, 5), periodKey: `${ranking.periodStart.slice(0, 4)}–${ranking.periodEnd.slice(0, 4)}` };
+}
+
+type HomeMapDataset = { values: Array<[string, number]>; unit: string; periodStart: string; periodEnd: string };
+
+function unavailableSignal(id: HomeDomainSignal["id"], title: string, href: string): HomeDomainSignal {
+  return { id, title, label: "Release non disponibile", displayValue: "—", unit: "", period: "—", note: "Dati non presenti nella release attiva.", href, status: "unavailable", kind: "official" };
+}
+
+export async function loadHomeDomainSignals(): Promise<HomeDomainSignal[]> {
+  const tasks: Array<Promise<HomeDomainSignal>> = [
+    loadHomeOverview().then((overview) => ({ id: "soil", title: "Suolo", label: "Incremento netto nazionale", displayValue: overview.latestNet.value.toLocaleString("it-IT", { maximumFractionDigits: 0 }), unit: overview.latestNet.unit, period: overview.periodKey, note: "Osservazione ufficiale ISPRA/SNPA.", href: `/suolo?metric=soil_net_consumption_hectares&level=region&period=${overview.periodKey.replace("–", "-")}#mappa`, status: "available", kind: "official" })),
+    loadWaterOverview().then((overview) => {
+      const observation = overview.countryProfile.latestObservations.find((item) => item.metricId === "water_total_precipitation_mm");
+      if (!observation) throw new Error("Home water signal unavailable");
+      return { id: "water", title: "Acqua", label: "Precipitazione totale Italia", displayValue: observation.value.toLocaleString("it-IT", { maximumFractionDigits: 1 }), unit: observation.unit, period: observation.periodEnd.slice(0, 4), note: "Stima modellistica ufficiale BIGBANG 10.0.", href: `/acqua?metric=${observation.metricId}&period=${observation.periodEnd.slice(0, 4)}#atlante`, status: "available", kind: "modelled" };
+    }),
+    loadForestData().then(async (data) => {
+      const option = data.maps.find((item) => item.metricId === "tree_cover_mean" && item.periodKey === "2023-2023" && item.level === "region");
+      if (!option) throw new Error("Home forest signal unavailable");
+      const dataset = await fetchJson<HomeMapDataset>(option.url, 300);
+      return { id: "forests", title: "Foreste", label: "Regioni nel campione pubblicato", displayValue: dataset.values.length.toLocaleString("it-IT"), unit: "regioni", period: dataset.periodEnd.slice(0, 4), note: "Elaborazione zonale su Copernicus; non dato nazionale.", href: "/foreste?metric=tree_cover_mean&level=region&period=2023-2023#mappa", status: "available", kind: "derived" };
+    }),
+    emissionsRelease().then(async ({ base, release, index }) => {
+      const overview = await fetchJson<EmissionsOverview>(asset(base, release, index.overview), 300);
+      const latest = overview.greenhouseGases.series.at(-1);
+      if (!latest) throw new Error("Home emissions signal unavailable");
+      return { id: "emissions", title: "Emissioni", label: "Emissioni nette nazionali", displayValue: latest[1].toLocaleString("it-IT", { maximumFractionDigits: 0 }), unit: overview.greenhouseGases.unit, period: String(latest[0]), note: "Totale ufficiale ISPRA, incluse categorie indicate dalla fonte.", href: "/emissioni", status: "available", kind: "official" };
+    }),
+    loadDissestoData().then(async (data) => {
+      const option = data.maps.find((item) => item.metricId === "hydrogeological_flood_high_hazard_area_km2" && item.level === "municipality");
+      if (!option) throw new Error("Home risk signal unavailable");
+      const dataset = await fetchJson<HomeMapDataset>(option.url, 300);
+      return { id: "risk", title: "Dissesto", label: "Comuni con valore pubblicato", displayValue: dataset.values.length.toLocaleString("it-IT"), unit: "comuni", period: dataset.periodEnd.slice(0, 4), note: "Snapshot ufficiale ISPRA IdroGEO; non ranking.", href: "/dissesto?metric=hydrogeological_flood_high_hazard_area_km2&level=municipality#mappa", status: "available", kind: "official" };
+    }),
+  ];
+  const fallbacks = [unavailableSignal("soil", "Suolo", "/suolo"), unavailableSignal("water", "Acqua", "/acqua"), unavailableSignal("forests", "Foreste", "/foreste"), unavailableSignal("emissions", "Emissioni", "/emissioni"), unavailableSignal("risk", "Dissesto", "/dissesto")];
+  const results = await Promise.allSettled(tasks);
+  return results.map((result, index) => result.status === "fulfilled" ? result.value : fallbacks[index]);
 }
 
 export async function loadTerritoryProfile(level: "municipality" | "province" | "region" | "country", istatCode: string) {

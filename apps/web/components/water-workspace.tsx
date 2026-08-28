@@ -1,13 +1,12 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { WaterData, WaterOverview as WaterOverviewData } from "../lib/data";
-import { ExposedMenu, MapSidebar } from "./map-sidebar";
+import { ExplorerToolbar } from "./explorer-toolbar";
 import { WaterMap } from "./water-map";
 import { WaterOverview } from "./water-overview";
 import { TimelineControl } from "./timeline-control";
-import { TerritoryMapSeries } from "./territory-map-series";
 
 const labels: Record<string, string> = {
   water_total_precipitation_mm: "Precipitazione totale",
@@ -29,32 +28,37 @@ export function WaterWorkspace({ data, overview }: { data: WaterData; overview: 
   const requestedYear = searchParams.get("period");
   const yearIndex = Math.max(0, years.indexOf(requestedYear ?? years.at(-1) ?? ""));
   const selected = available[yearIndex] ?? available.at(-1);
-  const [territory, setTerritory] = useState<{ id: string; name?: string } | undefined>();
-  const selectTerritory = useCallback((id: string, name?: string) => setTerritory({ id, name }), []);
+  const requestedTerritory = searchParams.get("territory") ?? undefined;
+  const [territory, setTerritory] = useState<{ id: string; name?: string } | undefined>(() => requestedTerritory ? { id: requestedTerritory } : undefined);
 
-  function update(nextMetric: string, nextPeriod: string) {
+  useEffect(() => {
+    setTerritory((current) => requestedTerritory ? current?.id === requestedTerritory ? current : { id: requestedTerritory } : undefined);
+  }, [requestedTerritory]);
+
+  function update(nextMetric: string, nextPeriod: string, nextTerritory = territory?.id ?? requestedTerritory) {
     const query = new URLSearchParams({ metric: nextMetric, period: nextPeriod });
+    if (nextTerritory) query.set("territory", nextTerritory);
     router.replace(`${pathname}?${query.toString()}`, { scroll: false });
   }
+
+  const selectTerritory = useCallback((id: string, name?: string) => {
+    setTerritory({ id, name });
+    update(metric, selected?.periodKey ?? years.at(-1) ?? "", id);
+  }, [metric, pathname, router, searchParams, selected?.periodKey, years]);
 
   function changeMetric(nextMetric: string) {
     const latest = data.maps.filter((item) => item.metricId === nextMetric).map((item) => item.periodKey).sort().at(-1) ?? "2025";
     update(nextMetric, latest);
   }
 
-  return <section className="water-site-layout" aria-label="Atlante idrico">
-    <MapSidebar title="Atlante acqua">
-      <a className="sidebar-link sidebar-atlas-link" href="#atlante">Vai alla mappa ↓</a>
-      <ExposedMenu label="Metrica" value={metric} onChange={changeMetric} items={metrics.map((id) => ({ id, label: labels[id] ?? id, meta: "mm" }))} />
-      <TerritoryMapSeries options={available} territoryId={territory?.id} territoryName={territory?.name} selectedPeriod={selected?.periodKey} />
-      <section className="sidebar-section"><h3>Copertura</h3><p className="sidebar-context"><strong>Regioni · 1951–2025</strong>Stime ufficiali modellistiche BIGBANG 10.0.</p></section>
-      <section className="sidebar-section"><p className="sidebar-context">Release corrente non pubblica ranking o “migliore/peggiore”.</p></section>
-    </MapSidebar>
+  return <section className="water-site-layout explorer-layout" aria-label="Atlante idrico">
     <div className="water-site-content">
       <WaterOverview overview={overview} />
-      <section id="atlante" className="water-workspace" tabIndex={-1} aria-label="Mappa regionale">
+      <ExplorerToolbar label="Misura" value={metric} onChange={changeMetric} items={metrics.map((id) => ({ id, label: labels[id] ?? id, meta: "mm" }))} context={`${selected?.periodKey ?? "—"} · Regioni italiane`} />
+      <section id="atlante" className="water-workspace map-workspace-v2" tabIndex={-1} aria-label="Mappa regionale">
         {selected && <TimelineControl periods={years} value={selected.periodKey} onChange={(period) => update(metric, period)} />}
-        {selected ? <WaterMap option={selected} metricLabel={labels[metric] ?? metric} geometryUrl={data.geometry.region} onTerritorySelect={selectTerritory} /> : <p role="alert">Metrica o anno non presenti nella release attiva.</p>}
+        {selected ? <WaterMap option={selected} metricLabel={labels[metric] ?? metric} geometryUrl={data.geometry.region} selectedTerritoryId={territory?.id} seriesOptions={available} onTerritorySelect={selectTerritory} /> : <p role="alert">Metrica o anno non presenti nella release attiva.</p>}
+        <div className="map-reading-panel"><p>Stime ufficiali modellistiche BIGBANG 10.0. Nessun ranking “migliore/peggiore”.</p></div>
         <section className="water-limit"><p className="eyebrow">Come leggere</p><p>Valori BIGBANG 10.0: stime modellistiche annuali. Scala colori relativa a metrica e anno selezionati.</p></section>
         <details className="provenance"><summary>Fonte e metodo · release {data.releaseId}</summary><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
       </section>
