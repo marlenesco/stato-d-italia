@@ -1,9 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { MapOption } from "../lib/data";
 import { configureItalyMapControls, italyMapCamera } from "../lib/italy-map-bounds";
 import { territoryIstatCode, territoryLabel } from "../lib/territory-labels";
+import { focusMapForInspector } from "./map-inspector-focus";
+import { hierarchyFromProperties, TerritoryContext, type TerritoryHierarchy } from "./territory-context";
 import { TerritoryMapSeries } from "./territory-map-series";
 
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
@@ -45,11 +48,13 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
   const currentDataset = useRef<MapDataset | null>(null);
   const selectedFeatureId = useRef<string | null>(null);
   const onTerritorySelectRef = useRef(onTerritorySelect);
+  const inspector = useRef<HTMLElement>(null);
   const [dataset, setDataset] = useState<MapDataset | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<{ id: string; name?: string } | null>(selectedTerritoryId ? { id: selectedTerritoryId } : null);
+  const [selectedHierarchy, setSelectedHierarchy] = useState<TerritoryHierarchy | null | undefined>();
 
   useEffect(() => { onTerritorySelectRef.current = onTerritorySelect; }, [onTerritorySelect]);
 
@@ -91,7 +96,7 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
           requestAnimationFrame(() => activeMap.resize());
           activeMap.on("moveend", () => saveWaterCamera(activeMap));
           setMapReady(true);
-          activeMap.on("click", "water-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) { const id = String(feature.id); if (!Number.isFinite(activeMap.getFeatureState({ source: "territories", sourceLayer: "territories", id }).value)) return; const next = { id, name: typeof feature.properties?.name === "string" ? feature.properties.name : undefined }; setSelected(next); onTerritorySelectRef.current?.(next.id, next.name); } });
+          activeMap.on("click", "water-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) { const id = String(feature.id); if (!Number.isFinite(activeMap.getFeatureState({ source: "territories", sourceLayer: "territories", id }).value)) return; const next = { id, name: typeof feature.properties?.name === "string" ? feature.properties.name : undefined }; setSelected(next); setSelectedHierarchy(hierarchyFromProperties(feature.properties) ?? null); focusMapForInspector(activeMap, event.lngLat, inspector); onTerritorySelectRef.current?.(next.id, next.name); } });
           const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
           activeMap.on("mousemove", "water-fill", (event) => {
             const feature = event.features?.[0];
@@ -138,11 +143,12 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
 
   useEffect(() => {
     setSelected((current) => selectedTerritoryId ? current?.id === selectedTerritoryId ? current : { id: selectedTerritoryId } : null);
+    setSelectedHierarchy(undefined);
   }, [selectedTerritoryId]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!mapReady || !map || !selected || selected.name) return;
+    if (!mapReady || !map || !selected || (selected.name && selectedHierarchy !== undefined)) return;
     const resolveName = () => {
       const features = [
         ...map.queryRenderedFeatures(undefined, { layers: ["water-fill"] }),
@@ -151,11 +157,12 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
       const feature = features.find((candidate) => String(candidate.id ?? candidate.properties?.territory_id) === selected.id);
       const name = typeof feature?.properties?.name === "string" ? feature.properties.name : undefined;
       if (name) setSelected((current) => current?.id === selected.id ? { ...current, name } : current);
+      setSelectedHierarchy(hierarchyFromProperties(feature?.properties) ?? null);
     };
     resolveName();
     map.on("idle", resolveName);
     return () => { map.off("idle", resolveName); };
-  }, [mapReady, selected]);
+  }, [mapReady, selected, selectedHierarchy]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -172,5 +179,5 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
   const selectedValue = selected && dataset?.values.find(([id]) => id === selected.id)?.[1];
   const selectedLabel = selected ? territoryLabel(selected.id, selected.name) : null;
 
-  return <section className="water-map-stage" aria-labelledby="water-map-title"><header className="map-heading"><div><p className="eyebrow">Atlante regionale</p><h2 id="water-map-title">{metricLabel}</h2><p>{dataset ? dataset.periodEnd.slice(0, 4) : option.periodKey} · valori annui</p></div><p className="map-status" aria-live="polite">{loading ? "Carico valori…" : error ? "Valori non disponibili" : selectedLabel ? selectedValue == null ? `Regione selezionata: dato non pubblicato` : `Regione selezionata: ${selectedLabel}` : "Seleziona regione"}</p></header><div className="map-wrap"><div ref={container} className="map water-map" role="img" aria-label="Mappa regionale interattiva. I colori mostrano valori ufficiali modellistici." />{min !== null && middle !== null && max !== null && <aside className="water-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore annuale stimato</strong><div className="water-legend-scale" aria-hidden="true" /><div className="legend-values"><span>{display(min, dataset?.unit ?? "mm")}</span><span>{display(middle, dataset?.unit ?? "mm")}</span><span>{display(max, dataset?.unit ?? "mm")}</span></div><p>Scala relativa a metrica e anno selezionati.</p></aside>}{selected && <aside className="water-selection map-selection-drawer" aria-live="polite"><p className="eyebrow">Regione selezionata</p><h3>{selectedLabel}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selected.id)}</p><strong>{selectedValue == null ? "Dato non pubblicato per anno e metrica selezionati" : display(selectedValue, dataset?.unit ?? "mm")}</strong><p>Anno {dataset?.periodEnd.slice(0, 4) ?? option.periodKey} · stima ufficiale modellistica</p><TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selected.id} territoryName={selected.name} selectedPeriod={option.periodKey} statusNote="Stima ufficiale modellistica; nessuna interpolazione." /></aside>}</div>{error && <p className="map-message" role="alert">{error}</p>}</section>;
+  return <section className="water-map-stage" aria-labelledby="water-map-title"><header className="map-heading"><div><p className="eyebrow">Atlante regionale</p><h2 id="water-map-title">{metricLabel}</h2><p>{dataset ? dataset.periodEnd.slice(0, 4) : option.periodKey} · valori annui</p></div><p className="map-status" aria-live="polite">{loading ? "Carico valori…" : error ? "Valori non disponibili" : selectedLabel ? selectedValue == null ? `Regione selezionata: dato non pubblicato` : `Regione selezionata: ${selectedLabel}` : "Seleziona regione"}</p></header><div className="map-wrap"><div ref={container} className="map water-map" role="img" aria-label="Mappa regionale interattiva. I colori mostrano valori ufficiali modellistici." />{min !== null && middle !== null && max !== null && <aside className="water-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore annuale stimato</strong><div className="water-legend-scale" aria-hidden="true" /><div className="legend-values"><span>{display(min, dataset?.unit ?? "mm")}</span><span>{display(middle, dataset?.unit ?? "mm")}</span><span>{display(max, dataset?.unit ?? "mm")}</span></div><p>Scala relativa a metrica e anno selezionati.</p></aside>}{selected && <aside ref={inspector} className="water-selection map-selection-drawer" aria-live="polite"><p className="eyebrow">Regione selezionata</p><h3>{selectedLabel}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selected.id)}</p><TerritoryContext level="region" hierarchy={selectedHierarchy ?? undefined} /><strong>{selectedValue == null ? "Dato non pubblicato per anno e metrica selezionati" : display(selectedValue, dataset?.unit ?? "mm")}</strong><p>Anno {dataset?.periodEnd.slice(0, 4) ?? option.periodKey} · stima ufficiale modellistica</p><Link href={`/territori/regioni/${territoryIstatCode(selected.id)}`}>Apri profilo regione</Link><TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selected.id} territoryName={selected.name} selectedPeriod={option.periodKey} statusNote="Stima ufficiale modellistica; nessuna interpolazione." /></aside>}</div>{error && <p className="map-message" role="alert">{error}</p>}</section>;
 }
