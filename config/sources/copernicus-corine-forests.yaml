@@ -1,0 +1,50 @@
+source_id: copernicus-corine-forests
+publisher: European Union / Copernicus Land Monitoring Service
+landing_url: https://land.copernicus.eu/en/products/corine-land-cover
+catalog_api_url: https://land.copernicus.eu/api/@get-download-file-urls
+license: Copernicus full, free and open access; attribution and explicit derived-product notice required
+geographical_granularity: raster; Stato d'Italia derives ISTAT municipality, province, region and country values
+temporal_granularity: six-yearly status layers
+methodology_url: https://land.copernicus.eu/en/products/corine-land-cover/clc2018?tag=2018
+bearer_token_environment: CLMS_API_TOKEN
+raw_retention_environment: FORESTS_RAW_RETENTION
+raw_retention_default: retain
+known_limitations:
+  - CORINE is a distinct 100 m land-cover inventory. It is not continuous with HRL Tree Cover & Forests.
+  - Forest classes use CLC codes 311, 312 and 313; Minimum Mapping Unit is 25 ha.
+assets:
+  - id: corine_1990
+    dataset_uid: 8b393c8e474642d5acb4ed70fc2dc024
+    download_information_id: fecff4c7-a5e5-428d-817d-a8ee5f23d99d
+    kind: corine_forest
+    format: GeoTIFF
+    resolution_m: 100
+    year: 1990
+  - id: corine_2000
+    dataset_uid: 6704f90ca82e4f228a46111519f8978e
+    download_information_id: 19d7fbd8-53ee-4d09-89b6-fe5231247763
+    kind: corine_forest
+    format: GeoTIFF
+    resolution_m: 100
+    year: 2000
+  - id: corine_2006
+    dataset_uid: d443c86fec2f49e08ff12c7decdbf2af
+    download_information_id: 4841f8cb-6e7c-4227-bb35-cd787609c546
+    kind: corine_forest
+    format: GeoTIFF
+    resolution_m: 100
+    year: 2006
+  - id: corine_2012
+    dataset_uid: a5ee71470be04d66bcff498f94ceb5dc
+    download_information_id: b1027c88-6256-435b-98a3-62f019cbb381
+    kind: corine_forest
+    format: GeoTIFF
+    resolution_m: 100
+    year: 2012
+  - id: corine_2018
+    dataset_uid: 0407d497d3c44bcd93ce8fd5bf78596a
+    download_information_id: 7bcdf9d1-6ba0-4d4e-afa8-01451c7316cb
+    kind: corine_forest
+    format: GeoTIFF
+    resolution_m: 100
+    year: 2018

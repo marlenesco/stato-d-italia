@@ -92,7 +92,7 @@ def _local_metadata(
 
 
 def download(
-    url: str, destination: Path, source_id: str, *, offline: bool = False, source_context: dict | None = None,
+    url: str, destination: Path, source_id: str, *, offline: bool = False, source_context: dict | None = None, user_agent: str = "stato-italia-data/0.1",
 ) -> dict:
     """Download once, keep source HTTP facts alongside immutable raw bytes."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +113,7 @@ def download(
         metadata = _local_metadata(url, destination, source_id, prior, source_context)
         json_dump(metadata_path, metadata)
         return metadata
-    headers = {"User-Agent": "stato-italia-data/0.1"}
+    headers = {"User-Agent": user_agent}
     # A path can retain its filename while its official URL changes. Never use
     # validators from the old URL: a 304 would keep stale or redirected bytes.
     conditional_prior = prior if prior and prior.get("requested_url") == url else None

@@ -5,10 +5,30 @@ from pathlib import Path
 import mapbox_vector_tile
 import mercantile
 import pandas as pd
-from pmtiles.tile import Compression, TileType, zxy_to_tileid
+from pmtiles.reader import MmapSource, Reader
+from pmtiles.tile import Compression, MagicNumberNotFound, TileType, zxy_to_tileid
 from pmtiles.writer import Writer
 from shapely import wkb
 from shapely.geometry import box
+
+REQUIRED_TERRITORY_FIELDS = frozenset({"territory_id", "territory_level", "istat_code", "name"})
+
+
+def is_readable_pmtiles(path: Path) -> bool:
+    """Return false unless a local PMTiles has the fields needed by the map explorer."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        with path.open("rb") as handle:
+            reader = Reader(MmapSource(handle))
+            reader.header()
+            layers = reader.metadata().get("vector_layers", [])
+    except (MagicNumberNotFound, OSError, ValueError):
+        return False
+    return any(
+        layer.get("id") == "territories" and REQUIRED_TERRITORY_FIELDS <= set(layer.get("fields", {}))
+        for layer in layers
+    )
 
 
 def build_pmtiles(territory_parquet: Path, destination: Path, max_zoom: int = 7) -> dict:
@@ -25,6 +45,7 @@ def build_pmtiles(territory_parquet: Path, destination: Path, max_zoom: int = 7)
                         "territory_id": feature["territory_id"],
                         "territory_level": feature["level"],
                         "istat_code": feature["istat_code"],
+                        "name": feature["name"],
                     },
                 })
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -65,7 +86,7 @@ def build_pmtiles(territory_parquet: Path, destination: Path, max_zoom: int = 7)
                 "format": "pbf",
                 "type": "overlay",
                 "version": "2024-01-01",
-                "vector_layers": [{"id": "territories", "fields": {"territory_id": "String", "territory_level": "String", "istat_code": "String"}}],
+                "vector_layers": [{"id": "territories", "fields": {"territory_id": "String", "territory_level": "String", "istat_code": "String", "name": "String"}}],
             },
         )
     if wrote == 0:

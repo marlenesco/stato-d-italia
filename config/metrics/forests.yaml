@@ -1,0 +1,133 @@
+metrics:
+  - id: forest_cover_hrl
+    label_it: Copertura forestale HRL
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: forest_cover_corine
+    label_it: Copertura forestale CORINE
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: forest_area_ha
+    label_it: Superficie forestale
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: forest_share_pct
+    label_it: Quota di superficie forestale
+    unit_ucum: '%'
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: tree_cover_mean
+    label_it: Copertura arborea media
+    unit_ucum: '%'
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: tree_cover_p25
+    label_it: Copertura arborea, 25° percentile
+    unit_ucum: '%'
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: tree_cover_p50
+    label_it: Copertura arborea, mediana
+    unit_ucum: '%'
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: tree_cover_p75
+    label_it: Copertura arborea, 75° percentile
+    unit_ucum: '%'
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: broadleaved_area_hrl_ha
+    label_it: Superficie di latifoglie HRL
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: coniferous_area_hrl_ha
+    label_it: Superficie di conifere HRL
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: mixed_forest_area_hrl_ha
+    label_it: Superficie forestale mista HRL
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: broadleaved_area_dlt_ha
+    label_it: Copertura arborea di latifoglie DLT
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: coniferous_area_dlt_ha
+    label_it: Copertura arborea di conifere DLT
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: broadleaved_area_corine_ha
+    label_it: Superficie di latifoglie CORINE
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: coniferous_area_corine_ha
+    label_it: Superficie di conifere CORINE
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: mixed_forest_area_corine_ha
+    label_it: Superficie forestale mista CORINE
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: tree_cover_gain_ha
+    label_it: Nuova copertura arborea
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: period_change
+    higher_is: context_dependent
+  - id: tree_cover_loss_ha
+    label_it: Perdita di copertura arborea
+    unit_ucum: ha
+    source_kind: derived_metric
+    temporal_kind: period_change
+    higher_is: context_dependent
+  - id: forest_biomass_infc
+    label_it: Fitomassa arborea epigea
+    unit_ucum: Mg
+    source_kind: official_observation
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: forest_volume_infc
+    label_it: Volume del bosco
+    unit_ucum: m3
+    source_kind: official_observation
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: forest_volume_increment_infc
+    label_it: Incremento annuo di volume
+    unit_ucum: m3/year
+    source_kind: official_observation
+    temporal_kind: point_in_time
+    higher_is: context_dependent
+  - id: forest_carbon_infc
+    label_it: Carbonio nella fitomassa arborea epigea
+    unit_ucum: Mg
+    source_kind: official_observation
+    temporal_kind: point_in_time
+    higher_is: context_dependent

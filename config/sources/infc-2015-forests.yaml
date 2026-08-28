@@ -1,0 +1,28 @@
+source_id: infc-2015-forests
+publisher: Arma dei Carabinieri CUFAA / CREA Foreste e Legno
+landing_url: https://www.inventarioforestale.org/it/statistiche_INFC/
+license: Source citation required by INFC statistics page; retain source tables and metadata
+geographical_granularity: [country, region]
+temporal_granularity: inventory snapshot INFC2015
+methodology_url: https://link.springer.com/book/10.1007/978-3-030-98678-0
+official_status: published_official_statistics
+download_user_agent: StatoItaliaData/1.0 (+https://github.com)
+region_aliases:
+  Valle d'Aosta: Valle d'Aosta/Vallée d'Aoste
+  Friuli V.G.: Friuli-Venezia Giulia
+known_limitations:
+  - Published INFC tables support Italy and Regions, not municipalities or provinces; Trento and Bolzano are separate source rows and are not silently aggregated to Trentino-Alto Adige/Südtirol.
+  - No microdata processing is permitted by this adapter.
+assets:
+  - id: volume
+    metric_id: forest_volume_infc
+    url: https://www.inventarioforestale.org/wp-content/uploads/2022/10/Q1.3.1-2-3.zip
+  - id: volume_increment
+    metric_id: forest_volume_increment_infc
+    url: https://www.inventarioforestale.org/wp-content/uploads/2022/10/Q1.4.1-2-3.zip
+  - id: biomass
+    metric_id: forest_biomass_infc
+    url: https://www.inventarioforestale.org/wp-content/uploads/2022/10/Q1.8.1-2-3.zip
+  - id: carbon
+    metric_id: forest_carbon_infc
+    url: https://www.inventarioforestale.org/wp-content/uploads/2022/10/Q1.13.1-2-3.zip

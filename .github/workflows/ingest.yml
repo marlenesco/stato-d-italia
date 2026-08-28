@@ -17,23 +17,38 @@ permissions:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     env:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
+      CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
+      FOREST_PROCESSING_MODE: statistical-api
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate R2 configuration
         run: |
           test -n "$R2_ACCESS_KEY_ID" || { echo "::error::Missing R2_ACCESS_KEY_ID secret"; exit 1; }
           test -n "$R2_SECRET_ACCESS_KEY" || { echo "::error::Missing R2_SECRET_ACCESS_KEY secret"; exit 1; }
           test -n "$R2_ENDPOINT" || { echo "::error::Missing R2_ENDPOINT secret"; exit 1; }
           test -n "$R2_BUCKET" || { echo "::error::Missing R2_BUCKET secret"; exit 1; }
-      - uses: astral-sh/setup-uv@v6
+          test -n "$CDSE_CLIENT_ID" || { echo "::error::Missing CDSE_CLIENT_ID secret"; exit 1; }
+          test -n "$CDSE_CLIENT_SECRET" || { echo "::error::Missing CDSE_CLIENT_SECRET secret"; exit 1; }
+      - uses: astral-sh/setup-uv@v9.0.0
       - run: uv sync --all-groups --frozen
       - run: uv run pytest -q
+      - name: Restore forest slice state
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            data/raw/copernicus-hrl-forests/catalog.json
+            data/canonical/forests
+            data/delivery/foreste
+          key: forests-cdse-statistical-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            forests-cdse-statistical-v1-${{ runner.os }}-
       - run: >-
           uv run stato-data run --publish r2
           ${{ inputs.force && '--force' || '' }}
