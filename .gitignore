@@ -11,3 +11,5 @@ __pycache__/
 /apps/web/tsconfig.tsbuildinfo
 /.playwright-cli/
 /apps/web/.playwright-cli/
+output/
+apps/web/output/
