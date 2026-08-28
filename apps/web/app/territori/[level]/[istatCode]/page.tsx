@@ -13,8 +13,8 @@ export default async function TerritoryPage({ params }: { params: Promise<{ leve
   if (!level) notFound();
 
   try {
-    const { profile, provenance, releaseId } = await loadTerritoryProfile(level, istatCode);
-    return <main className="shell territory-shell"><SiteNav section="territory" /><TerritoryProfile profile={profile} /><details className="provenance territory-provenance"><summary>Fonte e provenance · release {releaseId}</summary><pre>{JSON.stringify(provenance, null, 2)}</pre></details></main>;
+    const { profile, provenance, releaseId, insights } = await loadTerritoryProfile(level, istatCode);
+    return <main className="shell territory-shell"><SiteNav section="territory" /><TerritoryProfile profile={profile} insights={insights} /><details className="provenance territory-provenance"><summary>Fonte e provenance · release {releaseId}</summary><pre>{JSON.stringify(provenance, null, 2)}</pre></details></main>;
   } catch {
     notFound();
   }

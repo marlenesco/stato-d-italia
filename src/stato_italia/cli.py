@@ -23,6 +23,7 @@ from .territories import SOURCE_YEARS, ingest_boundaries
 from .water import ingest_water
 from .water_delivery import generate_water_delivery
 from .tiles import build_pmtiles, is_readable_pmtiles
+from .territory_insights_delivery import generate_territory_insights_delivery
 
 
 def load_local_env(path: Path = Path(".env")) -> None:
@@ -180,12 +181,22 @@ def run(args: argparse.Namespace) -> int:
             {level: Path(info["path"]) for level, info in forests_pmtiles.items()},
             force=args.force or forests["infc"]["changed"] or bool(forests.get("zonal", {}).get("changed")) or forests_geometry_changed,
         )
+    territory_insights_delivery = generate_territory_insights_delivery(
+        canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
+        (canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet") if "zonal" in forests else None,
+        canonical / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet",
+        canonical / "dissesto" / "dataset_version=idrogeo-risk-2024" / "observations.parquet",
+        canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
+        canonical, delivery, release_id,
+        force=args.force or soil["changed"] or water["changed"] or dissesto["changed"] or emissions["changed"] or bool(forests.get("zonal", {}).get("changed")),
+    )
     changed = changed or soil_geometry_changed or dissesto_geometry_changed or emissions_geometry_changed or forests_geometry_changed
     changed = changed or water_delivery["changed"]
     changed = changed or dissesto_delivery["changed"]
     changed = changed or emissions_delivery["changed"]
     changed = changed or delivery_report["changed"]
     changed = changed or forests_delivery["changed"]
+    changed = changed or territory_insights_delivery["changed"]
     raw_suffixes = {".zip", ".xlsx", ".json", ".pdf"} | ({".tif", ".tiff"} if os.getenv("FORESTS_RAW_RETENTION", "retain") == "retain" else set())
     artifacts = [
         *[ReleaseArtifact(path, str(path.relative_to(root))) for path in (root / "raw").rglob("*") if path.is_file() and path.suffix in raw_suffixes],
@@ -231,6 +242,7 @@ def run(args: argparse.Namespace) -> int:
         "dissesto_delivery": {key: value for key, value in dissesto_delivery.items() if key != "files"},
         "emissions_delivery": {key: value for key, value in emissions_delivery.items() if key != "files"},
         "forests_delivery": {key: value for key, value in forests_delivery.items() if key != "files"},
+        "territory_insights_delivery": {key: value for key, value in territory_insights_delivery.items() if key != "files"},
         "storage": {
             "raw_all_bytes": raw_all_bytes,
             "raw_soil_bytes": raw_soil_bytes,

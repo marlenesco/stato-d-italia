@@ -91,6 +91,29 @@ export type HomeDomainSignal = {
   kind: "official" | "modelled" | "derived";
 };
 
+export type TerritoryInsightPoint = { periodStart: string; periodEnd: string; value: number; unit: string };
+type TerritoryInsightDomainId = "soil" | "water" | "forests" | "risk" | "emissions";
+
+type TerritoryDomainInsightBase = {
+  id: TerritoryInsightDomainId;
+  title: string;
+};
+
+export type TerritoryDomainInsight = TerritoryDomainInsightBase & ({
+  availability: "unavailable";
+  reason: "source_not_published_at_this_level" | "not_in_published_coverage";
+} | {
+  availability: "available";
+  id: "soil" | "water" | "forests" | "risk" | "emissions";
+  label: string;
+  source: string;
+  kind: "official_observation" | "official_model" | "derived_metric";
+  latest: TerritoryInsightPoint;
+  series: TerritoryInsightPoint[];
+  comparison: { status: "available" | "unavailable"; direction?: "improving" | "worsening" | "changed" | "stable"; delta?: number; percent?: number; from?: string; to?: string; reason?: "single_snapshot" | "incomparable_period" };
+  href: string;
+});
+
 function root() {
   const value = process.env.NEXT_PUBLIC_DATA_BASE_URL?.replace(/\/$/, "");
   if (!value) throw new Error("NEXT_PUBLIC_DATA_BASE_URL mancante");
@@ -161,6 +184,23 @@ async function profileFromShard(base: string, release: Release, logicalPath: str
   const profile = territoryId ? shard.profiles.find((candidate) => candidate.territory.territoryId === territoryId) : shard.profiles[0];
   if (!profile) throw new Error(`Territory profile absent from shard: ${logicalPath}`);
   return profile;
+}
+
+async function profileFromShards(base: string, release: Release, logicalPaths: string[], territoryId: string) {
+  const shards = await Promise.all(logicalPaths.map((logicalPath) => fetchJson<{ profiles: TerritoryProfileData[] }>(asset(base, release, logicalPath), 300)));
+  const profile = shards.flatMap((shard) => shard.profiles).find((candidate) => candidate.territory.territoryId === territoryId);
+  if (!profile) throw new Error(`Territory profile absent from shards: ${territoryId}`);
+  return profile;
+}
+
+type TerritoryInsightsShard = { profiles: Array<{ territoryId: string; domains: TerritoryDomainInsight[] }> };
+
+async function loadTerritoryInsights(level: "municipality" | "province" | "region", istatCode: string, territoryId: string) {
+  const { base, release } = await activeRelease();
+  const shard = level === "municipality" ? istatCode.slice(0, 3) : "all";
+  const logicalPath = `delivery/territory-insights/${level}/${shard}.json`;
+  const payload = await fetchJson<TerritoryInsightsShard>(asset(base, release, logicalPath), 300);
+  return payload.profiles.find((profile) => profile.territoryId === territoryId)?.domains ?? [];
 }
 
 export async function loadSoilData(): Promise<SoilData> {
@@ -286,13 +326,13 @@ export async function loadHomeDomainSignals(): Promise<HomeDomainSignal[]> {
 export async function loadTerritoryProfile(level: "municipality" | "province" | "region" | "country", istatCode: string) {
   if (!/^[0-9A-Z]{2,6}$/.test(istatCode)) throw new Error("Codice ISTAT non valido");
   const { base, release, index } = await soilRelease();
-  const shard = level === "municipality" ? istatCode.slice(0, 3) : level === "province" ? istatCode.slice(0, 2) : "all";
-  const logicalPath = `delivery/soil/profiles/${level}/${shard}.json`;
-  if (!index.profileShards.includes(logicalPath)) throw new Error(`Profile shard unavailable: ${logicalPath}`);
   const territoryId = level === "country" ? `it:country:${istatCode}` : `it:${level}:${istatCode}`;
-  const profile = await profileFromShard(base, release, logicalPath, territoryId);
+  const profile = level === "province"
+    ? await profileFromShards(base, release, index.profileShards.filter((path) => path.startsWith("delivery/soil/profiles/province/")), territoryId)
+    : await profileFromShard(base, release, `delivery/soil/profiles/${level}/${level === "municipality" ? istatCode.slice(0, 3) : "all"}.json`, territoryId);
   const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
-  return { releaseId: release.releaseId, profile, provenance };
+  const insights = level === "country" ? [] : await loadTerritoryInsights(level, istatCode, territoryId);
+  return { releaseId: release.releaseId, profile, provenance, insights };
 }
 
 export async function loadRomeProfile() {
