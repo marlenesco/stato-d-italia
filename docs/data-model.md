@@ -112,6 +112,24 @@ coverage
 quality_status
 ```
 
+### TerritoryProfileInsight
+
+Delivery derivata, rigenerabile, per rendere leggibile il profilo di un singolo
+territorio senza confondere fonti o scale.
+
+```text
+territory_id
+domain
+latest observation (period, value, unit)
+published series[]
+comparison (algorithm_version, status, delta, percent)
+source and scale
+```
+
+Un insight non è un'osservazione ufficiale: richiama una sola metrica e le sue
+dimensioni di fonte. `unavailable` dichiara esplicitamente una scala non
+pubblicata oppure l'assenza dalla copertura consegnata; non equivale a zero.
+
 ### Release
 
 Insieme immutabile e coerente di oggetti pubblicati.
