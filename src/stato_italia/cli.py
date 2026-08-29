@@ -17,7 +17,8 @@ from .forests import ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ing
 from .forests_delivery import generate_forests_delivery
 from .dissesto import fetch_dissesto, ingest_dissesto
 from .dissesto_delivery import generate_dissesto_delivery
-from .release import LocalObjectStore, R2ObjectStore, ReleaseArtifact, publish_release, rollback
+from .release import LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, publish_release, rollback
+from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state, changed_source_entries, check_persisted_sources, declared_raw_paths, source_state_changed, source_state_counts
 from .soil import ingest_soil
 from .territories import SOURCE_YEARS, ingest_boundaries
 from .water import ingest_water
@@ -57,6 +58,60 @@ def _bytes_under(root: Path, suffixes: tuple[str, ...] | None = None) -> int:
     )
 
 
+def _existing_artifacts(paths: list[Path], root: Path) -> list[ReleaseArtifact]:
+    """Keep release membership explicit; silently missing declared output is a contract error."""
+    artifacts: list[ReleaseArtifact] = []
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"Declared release artifact missing: {path}")
+        artifacts.append(ReleaseArtifact(path, str(path.relative_to(root))))
+    return artifacts
+
+
+def _release_artifacts(
+    root: Path,
+    canonical: Path,
+    derived: Path,
+    reports: list[dict],
+    pmtiles: list[dict],
+    source_state_path: Path,
+) -> list[ReleaseArtifact]:
+    """Build release from pipeline declarations, never a broad data/raw scan."""
+    territory_paths = [
+        canonical / "territories" / f"reference_year={year}" / f"{level}.parquet"
+        for year in SOURCE_YEARS for level in ("municipality", "province", "region")
+    ]
+    canonical_paths = territory_paths + [
+        canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
+        canonical / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet",
+        canonical / "dissesto" / "dataset_version=idrogeo-risk-2024" / "observations.parquet",
+        canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
+        canonical / "emissions" / "national" / "greenhouse-gases" / "dataset_version=2026-1990-2024" / "observations.parquet",
+        canonical / "emissions" / "national" / "air-pollutants-nfr" / "dataset_version=2026-1990-2024" / "observations.parquet",
+    ]
+    optional_canonical = [
+        canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
+        canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
+    ]
+    canonical_paths.extend(path for path in optional_canonical if path.exists())
+    derived_paths = [derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet"]
+    delivery_paths = [path for report in reports for path in report.get("files", [])]
+    pmtiles_paths = [Path(info["path"]) for info in pmtiles]
+    raw = list(declared_raw_paths(root / "raw"))
+    artifacts = [
+        *_existing_artifacts(raw, root),
+        *_existing_artifacts(canonical_paths, root),
+        *_existing_artifacts(derived_paths, root),
+        *_existing_artifacts(delivery_paths, root),
+        *_existing_artifacts(pmtiles_paths, root),
+        ReleaseArtifact(source_state_path, SOURCE_STATE_LOGICAL_PATH),
+    ]
+    logical_paths = [artifact.logical_path for artifact in artifacts]
+    if len(logical_paths) != len(set(logical_paths)):
+        raise ValueError("Pipeline declared duplicate release artifact paths")
+    return sorted(artifacts, key=lambda artifact: artifact.logical_path)
+
+
 def run(args: argparse.Namespace) -> int:
     started = time.monotonic()
     started_at = now_iso()
@@ -66,6 +121,8 @@ def run(args: argparse.Namespace) -> int:
     derived = root / "derived"
     delivery = root / "delivery"
     release_id = args.release_id or _release_id()
+    store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
+    previous_source_state = active_source_state(store, SOURCE_STATE_LOGICAL_PATH)
     boundaries = ingest_boundaries(root, canonical, SOURCE_YEARS, force=args.force, offline=args.offline)
     soil = ingest_soil(root, canonical, force=args.force, offline=args.offline)
     water = ingest_water(root, canonical, force=args.force, offline=args.offline)
@@ -84,7 +141,7 @@ def run(args: argparse.Namespace) -> int:
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
         force=args.force or soil["changed"],
     )
-    forest_fetch = fetch_forests(root, offline=args.offline)
+    forest_fetch = fetch_forests(root, offline=args.offline, check_geospatial=args.scope != "data")
     forests: dict = {"fetch": forest_fetch}
     infc_raw = root / "raw" / "infc-2015-forests" / "volume.zip"
     if infc_raw.exists():
@@ -92,7 +149,12 @@ def run(args: argparse.Namespace) -> int:
         mode = os.getenv("FOREST_PROCESSING_MODE", "raster")
         zonal_raw = any(path for source in ("copernicus-hrl-forests", "copernicus-corine-forests") for path in (root / "raw" / source).glob("**/*.tif"))
         catalog_changed = bool(forest_fetch.get("catalog", {}).get("changed"))
-        if mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
+        if args.scope == "data":
+            zonal_path = canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
+            if not zonal_path.exists():
+                raise RuntimeError("Data scope requires cached geospatial forest canonical; run ingest-geospatial first")
+            forests["zonal"] = {"changed": False, "canonical_bytes": zonal_path.stat().st_size, "mode": "carried_forward"}
+        elif mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
             forests["zonal"] = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=mode)
         elif zonal_raw:
             forests["zonal"] = ingest_forests(root, canonical, force=args.force, mode="raster")
@@ -197,21 +259,25 @@ def run(args: argparse.Namespace) -> int:
     changed = changed or delivery_report["changed"]
     changed = changed or forests_delivery["changed"]
     changed = changed or territory_insights_delivery["changed"]
-    raw_suffixes = {".zip", ".xlsx", ".json", ".pdf"} | ({".tif", ".tiff"} if os.getenv("FORESTS_RAW_RETENTION", "retain") == "retain" else set())
-    artifacts = [
-        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in (root / "raw").rglob("*") if path.is_file() and path.suffix in raw_suffixes],
-        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in canonical.rglob("*.parquet")],
-        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in derived.rglob("*.parquet")],
-        *[ReleaseArtifact(path, str(path.relative_to(root))) for path in delivery.rglob("*.json")],
-        *[ReleaseArtifact(Path(info["path"]), str(Path(info["path"]).relative_to(root))) for info in [*pmtiles.values(), *dissesto_pmtiles.values(), *emissions_pmtiles.values(), *forests_pmtiles.values()]],
-    ]
-    artifacts.sort(key=lambda artifact: artifact.logical_path)
-    store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
+    source_state = build_source_state(root / "raw")
+    source_counts = source_state_counts(previous_source_state, source_state)
+    changed_sources = changed_source_entries(previous_source_state, source_state)
+    state_changed = source_state_changed(previous_source_state, source_state)
+    changed = changed or state_changed
+    source_state_path = output / "release-metadata" / f"{release_id}-source-state.json"
+    json_dump(source_state_path, source_state)
+    reports_with_files = [delivery_report, water_delivery, dissesto_delivery, emissions_delivery, forests_delivery, territory_insights_delivery]
+    artifacts = _release_artifacts(
+        root, canonical, derived, reports_with_files,
+        [*pmtiles.values(), *dissesto_pmtiles.values(), *emissions_pmtiles.values(), *forests_pmtiles.values()],
+        source_state_path,
+    )
     manifest = publish_release(store, release_id, artifacts) if changed else store.read_json("manifest.json")
+    active_release_bytes = sum(item["bytes"] for item in (active_release(store) or {}).get("objects", []))
     raw_soil_bytes = soil["source"]["bytes"]
     soil_parquet_bytes = soil["canonical_bytes"]
     territory_parquet_bytes = _bytes_under(canonical / "territories", (".parquet",))
-    raw_all_bytes = _bytes_under(root / "raw", (".zip", ".xlsx", ".json", ".pdf"))
+    raw_all_bytes = sum(entry["bytes"] for entry in source_state["sources"])
     shared_bytes = raw_all_bytes - raw_soil_bytes + territory_parquet_bytes + sum(info["bytes"] for info in pmtiles.values())
     estimate = {
         "assumption": "Each analogous domain has ISPRA-soil-sized raw and canonical table; historical ISTAT and PMTiles are shared once.",
@@ -251,6 +317,20 @@ def run(args: argparse.Namespace) -> int:
             "pmtiles_bytes": sum(info["bytes"] for info in [*pmtiles.values(), *dissesto_pmtiles.values()]),
             "analogue_domain_estimate": estimate,
         },
+        "operationalMetrics": {
+            "sourceChecks": source_counts["checked"],
+            "sourcesChanged": source_counts["changed"],
+            "sourcesUnchanged": source_counts["unchanged"],
+            "rawBytesAcquired": sum(entry["bytes"] for entry in changed_sources),
+            "canonicalBytesGenerated": sum(info.get("canonical_bytes", 0) for info in [soil, water, national_emissions, provincial_emissions, dissesto, forests.get("infc", {}), forests.get("zonal", {})] if info.get("changed")),
+            "derivedBytesGenerated": analytics.get("bytes", 0) if analytics.get("changed") else 0,
+            "deliveryBytesGenerated": sum(report.get("bytes", 0) for report in reports_with_files if report.get("changed")),
+            "objectsUploaded": manifest.get("publishMetrics", {}).get("objectsUploaded", 0),
+            "objectsReused": manifest.get("publishMetrics", {}).get("objectsReused", 0),
+            "bytesUploadedToR2": manifest.get("publishMetrics", {}).get("bytesUploaded", 0),
+            "releaseReferencedBytes": manifest.get("publishMetrics", {}).get("releaseReferencedBytes", active_release_bytes),
+            "pipelineDurationSeconds": round(time.monotonic() - started, 3),
+        },
         "manifest": manifest,
     }
     json_dump(Path(args.report), report)
@@ -270,9 +350,17 @@ def main() -> int:
     run_parser.add_argument("--publish", choices=("local", "r2"), default="local")
     run_parser.add_argument("--force", action="store_true", help="reprocess unchanged source assets; manual recovery only")
     run_parser.add_argument("--offline", action="store_true", help="use only pre-existing official raw assets; never make HTTP requests")
+    run_parser.add_argument("--scope", choices=("all", "data", "geospatial"), default="all", help="workflow ownership; data reuses validated geospatial canonical")
     fetch_parser = sub.add_parser("fetch", help="acquire official raw assets for one domain")
     fetch_parser.add_argument("domain", choices=("dissesto", "emissions", "foreste"))
     fetch_parser.add_argument("--workdir", default="data")
+    state_parser = sub.add_parser("check-sources", help="GET-check persisted source state before a scoped workflow")
+    state_parser.add_argument("--scope", choices=("data", "geospatial"), required=True)
+    state_parser.add_argument("--output", default="artifacts")
+    state_parser.add_argument("--workdir", default="data")
+    state_parser.add_argument("--publish", choices=("local", "r2"), default="local")
+    state_parser.add_argument("--report")
+    state_parser.add_argument("--force", action="store_true")
     rollback_parser = sub.add_parser("rollback", help="atomically repoint local or R2 manifest")
     rollback_parser.add_argument("release_id")
     rollback_parser.add_argument("--output", default="artifacts")
@@ -292,6 +380,34 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         print(json.dumps(fetch_dissesto(Path(args.workdir)), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "check-sources":
+        store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(Path(args.output) / "object-store")
+        persisted = active_source_state(store, SOURCE_STATE_LOGICAL_PATH)
+        result = check_persisted_sources(persisted, scope=args.scope)
+        if args.scope == "geospatial":
+            from .forests import HRL, _cdse_token, _check_catalog
+
+            previous_catalog = next((entry for entry in (persisted or {}).get("sources", []) if entry.get("kind") == "catalog" and entry.get("source_id", entry.get("sourceId")) == HRL["source_id"]), None)
+            try:
+                catalog = _check_catalog(Path(args.workdir), HRL, _cdse_token(HRL))
+                catalog_changed = previous_catalog is None or previous_catalog.get("sha256") != catalog["signature"]
+                result["catalog"] = {"checked": True, "changed": catalog_changed, "products": catalog["products"]}
+                result["changed"] = bool(result["changed"] or catalog_changed)
+                if catalog_changed:
+                    result["sourcesChanged"] += 1
+                else:
+                    result["sourcesUnchanged"] += 1
+            except Exception as exc:
+                result["catalog"] = {"checked": False, "changed": True, "reason": type(exc).__name__}
+                result["changed"] = True
+                result["sourcesChanged"] += 1
+        if args.force:
+            result["changed"] = True
+            result["reason"] = "force"
+        if args.report:
+            json_dump(Path(args.report), result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(Path(args.output) / "object-store")
     print(json.dumps(rollback(store, args.release_id), ensure_ascii=False, indent=2))

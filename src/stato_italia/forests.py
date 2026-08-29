@@ -222,7 +222,7 @@ def _fetch_process_raster_slices(root: Path, canonical_root: Path, token: str) -
     return {"changed": changed, "requests": requests_made, "files": files, "raw_bytes": sum(item["bytes"] for item in files)}
 
 
-def fetch_forests(root: Path, offline: bool = False) -> dict:
+def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool = True) -> dict:
     """Acquire INFC, check CDSE, and optionally retain bounded local raster slices."""
     infc = []
     for asset in INFC["assets"]:
@@ -230,6 +230,8 @@ def fetch_forests(root: Path, offline: bool = False) -> dict:
         infc.append(download(asset["url"], target, INFC["source_id"], offline=offline, user_agent=INFC["download_user_agent"], source_context={"asset_id": asset["id"], "metric_id": asset["metric_id"]}))
     if offline:
         return {"infc": infc, "catalog": {"status": "offline"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
+    if not check_geospatial:
+        return {"infc": infc, "catalog": {"status": "deferred"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     if not os.getenv(HRL["client_id_environment"]) or not os.getenv(HRL["client_secret_environment"]):
         return {"infc": infc, "catalog": {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     token = _cdse_token(HRL)

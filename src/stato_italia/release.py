@@ -11,10 +11,28 @@ from .common import json_dump, now_iso, sha256_file
 
 
 class ObjectStore:
-    def put_file(self, key: str, source: Path, immutable: bool) -> None: ...
+    def put_file(self, key: str, source: Path, immutable: bool) -> bool: ...
     def put_json(self, key: str, payload: dict, immutable: bool) -> None: ...
     def read_json(self, key: str) -> dict: ...
     def exists(self, key: str) -> bool: ...
+
+
+def active_release(store: ObjectStore) -> dict | None:
+    """Read immutable active release through sole mutable manifest pointer."""
+    if not store.exists("manifest.json"):
+        return None
+    manifest = store.read_json("manifest.json")
+    return store.read_json(str(manifest["releaseKey"]))
+
+
+def active_source_state(store: ObjectStore, logical_path: str) -> dict | None:
+    release = active_release(store)
+    if release is None:
+        return None
+    matches = [item for item in release.get("objects", []) if item.get("logicalPath") == logical_path]
+    if len(matches) > 1:
+        raise ValueError(f"Active release has duplicate source-state artifact: {logical_path}")
+    return store.read_json(matches[0]["key"]) if matches else None
 
 
 @dataclass
@@ -24,16 +42,17 @@ class LocalObjectStore(ObjectStore):
     def _path(self, key: str) -> Path:
         return self.root / key
 
-    def put_file(self, key: str, source: Path, immutable: bool) -> None:
+    def put_file(self, key: str, source: Path, immutable: bool) -> bool:
         target = self._path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             if sha256_file(target) != sha256_file(source):
                 raise ValueError(f"Immutable object collision at {key}")
-            return
+            return False
         shutil.copy2(source, target)
         if sha256_file(target) != sha256_file(source):
             raise ValueError(f"Checksum verification failed for {key}")
+        return True
 
     def put_json(self, key: str, payload: dict, immutable: bool) -> None:
         target = self._path(key)
@@ -70,14 +89,14 @@ class R2ObjectStore(ObjectStore):
             region_name="auto",
         )
 
-    def put_file(self, key: str, source: Path, immutable: bool) -> None:
+    def put_file(self, key: str, source: Path, immutable: bool) -> bool:
         checksum = sha256_file(source)
         if immutable:
             try:
                 existing = self.client.head_object(Bucket=self.bucket, Key=key)
                 if existing["Metadata"].get("sha256") != checksum:
                     raise ValueError(f"Immutable object collision at {key}")
-                return
+                return False
             except self.client.exceptions.ClientError as error:
                 if error.response.get("Error", {}).get("Code") not in {"404", "NoSuchKey", "NotFound"}:
                     raise
@@ -88,6 +107,7 @@ class R2ObjectStore(ObjectStore):
         response = self.client.head_object(Bucket=self.bucket, Key=key)
         if response["Metadata"].get("sha256") != checksum:
             raise ValueError(f"R2 checksum verification failed for {key}")
+        return True
 
     def put_json(self, key: str, payload: dict, immutable: bool) -> None:
         import json
@@ -112,11 +132,19 @@ class R2ObjectStore(ObjectStore):
 def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | ReleaseArtifact]) -> dict:
     """Upload immutable content first, then atomically advance sole mutable pointer."""
     objects = []
+    uploaded_objects = 0
+    reused_objects = 0
+    bytes_uploaded = 0
     for artifact in artifacts:
         record = artifact if isinstance(artifact, ReleaseArtifact) else ReleaseArtifact(artifact, artifact.name)
         checksum = sha256_file(record.path)
         key = f"objects/sha256/{checksum}/{record.path.name}"
-        store.put_file(key, record.path, immutable=True)
+        uploaded = store.put_file(key, record.path, immutable=True)
+        if uploaded:
+            uploaded_objects += 1
+            bytes_uploaded += record.path.stat().st_size
+        else:
+            reused_objects += 1
         objects.append({"key": key, "sha256": checksum, "bytes": record.path.stat().st_size, "name": record.path.name, "logicalPath": record.logical_path})
     logical_paths = [item["logicalPath"] for item in objects]
     if len(logical_paths) != len(set(logical_paths)):
@@ -128,7 +156,12 @@ def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | 
         raise ValueError("Release verification failed")
     manifest = {"schemaVersion": 1, "releaseId": release_id, "generatedAt": now_iso(), "releaseKey": release_key}
     store.put_json("manifest.json", manifest, immutable=False)
-    return manifest
+    return manifest | {"publishMetrics": {
+        "objectsUploaded": uploaded_objects,
+        "objectsReused": reused_objects,
+        "bytesUploaded": bytes_uploaded,
+        "releaseReferencedBytes": sum(item["bytes"] for item in objects),
+    }}
 
 
 def rollback(store: ObjectStore, release_id: str) -> dict:
