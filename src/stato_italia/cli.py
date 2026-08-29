@@ -17,8 +17,8 @@ from .forests import ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ing
 from .forests_delivery import generate_forests_delivery
 from .dissesto import fetch_dissesto, ingest_dissesto
 from .dissesto_delivery import generate_dissesto_delivery
-from .release import LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, publish_release, rollback
-from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state, changed_source_entries, check_persisted_sources, declared_raw_paths, source_state_changed, source_state_counts
+from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, carry_forward_active_artifacts, hydrate_active_artifact, publish_release, rollback
+from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, merge_source_states, source_state_changed, source_state_counts
 from .soil import ingest_soil
 from .territories import SOURCE_YEARS, ingest_boundaries
 from .water import ingest_water
@@ -68,48 +68,121 @@ def _existing_artifacts(paths: list[Path], root: Path) -> list[ReleaseArtifact]:
     return artifacts
 
 
-def _release_artifacts(
-    root: Path,
-    canonical: Path,
-    derived: Path,
-    reports: list[dict],
-    pmtiles: list[dict],
-    source_state_path: Path,
-) -> list[ReleaseArtifact]:
-    """Build release from pipeline declarations, never a broad data/raw scan."""
-    territory_paths = [
-        canonical / "territories" / f"reference_year={year}" / f"{level}.parquet"
-        for year in SOURCE_YEARS for level in ("municipality", "province", "region")
-    ]
-    canonical_paths = territory_paths + [
-        canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
-        canonical / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet",
-        canonical / "dissesto" / "dataset_version=idrogeo-risk-2024" / "observations.parquet",
-        canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
-        canonical / "emissions" / "national" / "greenhouse-gases" / "dataset_version=2026-1990-2024" / "observations.parquet",
-        canonical / "emissions" / "national" / "air-pollutants-nfr" / "dataset_version=2026-1990-2024" / "observations.parquet",
-    ]
-    optional_canonical = [
-        canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
-        canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
-    ]
-    canonical_paths.extend(path for path in optional_canonical if path.exists())
-    derived_paths = [derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet"]
-    delivery_paths = [path for report in reports for path in report.get("files", [])]
-    pmtiles_paths = [Path(info["path"]) for info in pmtiles]
-    raw = list(declared_raw_paths(root / "raw"))
-    artifacts = [
-        *_existing_artifacts(raw, root),
-        *_existing_artifacts(canonical_paths, root),
-        *_existing_artifacts(derived_paths, root),
-        *_existing_artifacts(delivery_paths, root),
-        *_existing_artifacts(pmtiles_paths, root),
-        ReleaseArtifact(source_state_path, SOURCE_STATE_LOGICAL_PATH),
-    ]
+def _declared_raw_paths(value: object) -> list[Path]:
+    """Collect only adapter-returned raw and metadata paths, not raw directory contents."""
+    paths: set[Path] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"local_path", "metadata_path"} and isinstance(item, str):
+                paths.add(Path(item))
+            elif key == "raw_files" and isinstance(item, list):
+                paths.update(Path(path) for path in item if isinstance(path, str))
+            else:
+                paths.update(_declared_raw_paths(item))
+    elif isinstance(value, list):
+        for item in value:
+            paths.update(_declared_raw_paths(item))
+    return sorted(paths)
+
+
+def _release_artifacts(root: Path, declared_paths: list[Path], source_state_path: Path) -> list[ReleaseArtifact]:
+    """Release membership comes only from phase declarations."""
+    artifacts = [*_existing_artifacts(declared_paths, root), ReleaseArtifact(source_state_path, SOURCE_STATE_LOGICAL_PATH)]
     logical_paths = [artifact.logical_path for artifact in artifacts]
     if len(logical_paths) != len(set(logical_paths)):
         raise ValueError("Pipeline declared duplicate release artifact paths")
     return sorted(artifacts, key=lambda artifact: artifact.logical_path)
+
+
+def _territory_paths(canonical: Path) -> list[Path]:
+    return [canonical / "territories" / f"reference_year={year}" / f"{level}.parquet" for year in SOURCE_YEARS for level in ("municipality", "province", "region")]
+
+
+def _hydrate(store: LocalObjectStore | R2ObjectStore, root: Path, logical_paths: list[str]) -> None:
+    for logical_path in logical_paths:
+        hydrate_active_artifact(store, logical_path, root / logical_path)
+
+
+def _publish_scoped(
+    *, store: LocalObjectStore | R2ObjectStore, root: Path, output: Path, release_id: str,
+    scope: str, previous_state: dict | None, current_state: dict, declared_paths: list[Path], changed: bool,
+) -> tuple[dict, dict, dict]:
+    source_state = merge_source_states(previous_state, current_state, scope=scope)
+    state_changed = source_state_changed(previous_state, source_state)
+    source_counts = source_state_counts(previous_state, source_state)
+    changed_sources = changed_source_entries(previous_state, source_state)
+    changed = changed or state_changed
+    state_path = output / "release-metadata" / f"{release_id}-source-state.json"
+    json_dump(state_path, source_state)
+    fresh = _release_artifacts(root, declared_paths, state_path)
+    carried: list[CarriedArtifact] = carry_forward_active_artifacts(store, {item.logical_path for item in fresh})
+    manifest = publish_release(store, release_id, [*fresh, *carried]) if changed else store.read_json("manifest.json")
+    metrics = {
+        "sourceChecks": source_counts["checked"], "sourcesChanged": source_counts["changed"],
+        "sourcesUnchanged": source_counts["unchanged"], "rawBytesAcquired": sum(entry["bytes"] for entry in changed_sources),
+        "objectsUploaded": manifest.get("publishMetrics", {}).get("objectsUploaded", 0),
+        "objectsReused": manifest.get("publishMetrics", {}).get("objectsReused", 0),
+        "bytesUploadedToR2": manifest.get("publishMetrics", {}).get("bytesUploaded", 0),
+        "releaseReferencedBytes": manifest.get("publishMetrics", {}).get("releaseReferencedBytes", sum(item["bytes"] for item in (active_release(store) or {}).get("objects", []))),
+    }
+    return manifest, metrics, {"changed": changed, "source_state": source_state, "carried": len(carried)}
+
+
+def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canonical: Path, delivery: Path, store: LocalObjectStore | R2ObjectStore, previous_state: dict | None, release_id: str, started: float, started_at: str) -> int:
+    required = [
+        *_territory_paths(canonical),
+        "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet",
+        "canonical/soil/dataset_version=2025-2024-observations/observations.parquet",
+        "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
+        "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
+        "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
+    ]
+    _hydrate(store, root, [str(path.relative_to(root)) if isinstance(path, Path) else path for path in required])
+    forest_fetch = fetch_forests(root, offline=args.offline, include_infc=False)
+    catalog_changed = bool(forest_fetch.get("catalog", {}).get("changed"))
+    zonal = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=os.getenv("FOREST_PROCESSING_MODE", "raster"))
+    forests_pmtiles: dict[str, dict] = {}
+    for level in ("municipality", "province", "region"):
+        path = delivery / "foreste" / "geometry" / f"istat-{level}-2023.pmtiles"
+        if zonal["changed"] or not is_readable_pmtiles(path):
+            forests_pmtiles[level] = build_pmtiles(canonical / "territories" / "reference_year=2023" / f"{level}.parquet", path)
+        else:
+            forests_pmtiles[level] = {"path": str(path), "bytes": path.stat().st_size, "skipped": True}
+    old_region = delivery / "foreste" / "geometry" / "istat-region-2015.pmtiles"
+    if not is_readable_pmtiles(old_region):
+        forests_pmtiles["region_2015"] = build_pmtiles(canonical / "territories" / "reference_year=2015" / "region.parquet", old_region)
+    else:
+        forests_pmtiles["region_2015"] = {"path": str(old_region), "bytes": old_region.stat().st_size, "skipped": True}
+    forest_delivery = generate_forests_delivery(
+        canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
+        canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet", canonical, delivery, release_id,
+        {level: Path(info["path"]) for level, info in forests_pmtiles.items()},
+        force=args.force or zonal["changed"] or any(not item.get("skipped", False) for item in forests_pmtiles.values()),
+    )
+    insights = generate_territory_insights_delivery(
+        canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
+        canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
+        canonical / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet",
+        canonical / "dissesto" / "dataset_version=idrogeo-risk-2024" / "observations.parquet",
+        canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
+        canonical, delivery, release_id, force=args.force or zonal["changed"],
+    )
+    metadata_paths = [path for path in _declared_raw_paths(forest_fetch) if path.name.endswith(".metadata.json")]
+    current_state = build_source_state_from_metadata_paths(root / "raw", metadata_paths, include_catalog=Path(forest_fetch["catalog"]["path"]) if forest_fetch.get("catalog", {}).get("path") else None)
+    declared = [
+        canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
+        *[Path(item["path"]) for item in forests_pmtiles.values()],
+        *forest_delivery.get("files", []), *insights.get("files", []),
+        *[path for path in _declared_raw_paths(forest_fetch) if not path.name.endswith(".metadata.json")], *metadata_paths,
+    ]
+    manifest, metrics, publication = _publish_scoped(
+        store=store, root=root, output=output, release_id=release_id, scope="geospatial", previous_state=previous_state,
+        current_state=current_state, declared_paths=declared, changed=zonal["changed"] or forest_delivery["changed"] or insights["changed"],
+    )
+    report = {"run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop", "changed": publication["changed"], "scope": "geospatial", "forests": {"fetch": forest_fetch, "zonal": zonal}, "operationalMetrics": metrics | {"canonicalBytesGenerated": zonal.get("canonical_bytes", 0) if zonal["changed"] else 0, "derivedBytesGenerated": 0, "deliveryBytesGenerated": sum(item.get("bytes", 0) for item in (forest_delivery, insights) if item.get("changed")), "pipelineDurationSeconds": round(time.monotonic() - started, 3)}, "manifest": manifest, "carriedArtifacts": publication["carried"], "startedAt": started_at, "completedAt": now_iso()}
+    json_dump(Path(args.report), report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
 
 
 def run(args: argparse.Namespace) -> int:
@@ -123,6 +196,13 @@ def run(args: argparse.Namespace) -> int:
     release_id = args.release_id or _release_id()
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
     previous_source_state = active_source_state(store, SOURCE_STATE_LOGICAL_PATH)
+    if args.scope == "geospatial":
+        return _run_geospatial(
+            args, root=root, output=output, canonical=canonical, delivery=delivery, store=store,
+            previous_state=previous_source_state, release_id=release_id, started=started, started_at=started_at,
+        )
+    if args.scope == "data":
+        _hydrate(store, root, [f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"])
     boundaries = ingest_boundaries(root, canonical, SOURCE_YEARS, force=args.force, offline=args.offline)
     soil = ingest_soil(root, canonical, force=args.force, offline=args.offline)
     water = ingest_water(root, canonical, force=args.force, offline=args.offline)
@@ -187,7 +267,7 @@ def run(args: argparse.Namespace) -> int:
             emissions_pmtiles[year] = {"path": str(emissions_pmtiles_path), "bytes": emissions_pmtiles_path.stat().st_size, "skipped": True}
     emissions_geometry_changed = any(not info.get("skipped", False) for info in emissions_pmtiles.values())
     forests_pmtiles: dict[str, dict] = {}
-    if "zonal" in forests:
+    if args.scope != "data" and "zonal" in forests:
         reference_year = 2023
         for level in ("municipality", "province", "region"):
             path = delivery / "foreste" / "geometry" / f"istat-{level}-{reference_year}.pmtiles"
@@ -203,7 +283,7 @@ def run(args: argparse.Namespace) -> int:
             forests_pmtiles["region_2015"] = build_pmtiles(canonical / "territories" / "reference_year=2015" / "region.parquet", path)
         else:
             forests_pmtiles["region_2015"] = {"path": str(path), "bytes": path.stat().st_size, "skipped": True}
-    elif "infc" in forests:
+    elif args.scope != "data" and "infc" in forests:
         path = delivery / "foreste" / "geometry" / "istat-region-2015.pmtiles"
         if boundaries["changed"] or not is_readable_pmtiles(path):
             forests_pmtiles["region"] = build_pmtiles(canonical / "territories" / "reference_year=2015" / "region.parquet", path)
@@ -236,7 +316,7 @@ def run(args: argparse.Namespace) -> int:
         delivery, release_id, force=args.force or emissions["changed"] or emissions_geometry_changed,
     )
     forests_delivery = {"changed": False, "files": []}
-    if "infc" in forests:
+    if args.scope != "data" and "infc" in forests:
         forests_delivery = generate_forests_delivery(
             (canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet") if "zonal" in forests else None,
             canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet", canonical, delivery, release_id,
@@ -259,21 +339,38 @@ def run(args: argparse.Namespace) -> int:
     changed = changed or delivery_report["changed"]
     changed = changed or forests_delivery["changed"]
     changed = changed or territory_insights_delivery["changed"]
-    source_state = build_source_state(root / "raw")
-    source_counts = source_state_counts(previous_source_state, source_state)
-    changed_sources = changed_source_entries(previous_source_state, source_state)
-    state_changed = source_state_changed(previous_source_state, source_state)
-    changed = changed or state_changed
-    source_state_path = output / "release-metadata" / f"{release_id}-source-state.json"
-    json_dump(source_state_path, source_state)
     reports_with_files = [delivery_report, water_delivery, dissesto_delivery, emissions_delivery, forests_delivery, territory_insights_delivery]
-    artifacts = _release_artifacts(
-        root, canonical, derived, reports_with_files,
-        [*pmtiles.values(), *dissesto_pmtiles.values(), *emissions_pmtiles.values(), *forests_pmtiles.values()],
-        source_state_path,
+    raw_declarations = _declared_raw_paths({
+        "boundaries": boundaries, "soil": soil, "water": water,
+        "national_emissions": national_emissions, "provincial_emissions": provincial_emissions,
+        "dissesto": dissesto_fetch, "forests": forest_fetch,
+    })
+    metadata_paths = [path for path in raw_declarations if path.name.endswith(".metadata.json")]
+    catalog_path = Path(forest_fetch["catalog"]["path"]) if args.scope == "all" and forest_fetch.get("catalog", {}).get("path") else None
+    current_source_state = build_source_state_from_metadata_paths(root / "raw", metadata_paths, include_catalog=catalog_path)
+    canonical_declarations = [
+        *_territory_paths(canonical),
+        canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
+        canonical / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet",
+        canonical / "dissesto" / "dataset_version=idrogeo-risk-2024" / "observations.parquet",
+        canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
+        canonical / "emissions" / "national" / "greenhouse-gases" / "dataset_version=2026-1990-2024" / "observations.parquet",
+        canonical / "emissions" / "national" / "air-pollutants-nfr" / "dataset_version=2026-1990-2024" / "observations.parquet",
+        canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
+    ]
+    if args.scope == "all":
+        canonical_declarations.append(canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet")
+    declared_paths = [
+        *raw_declarations, *canonical_declarations,
+        derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
+        *[path for report in reports_with_files for path in report.get("files", [])],
+        *[Path(info["path"]) for info in [*pmtiles.values(), *dissesto_pmtiles.values(), *emissions_pmtiles.values(), *forests_pmtiles.values()]],
+    ]
+    manifest, scoped_metrics, publication = _publish_scoped(
+        store=store, root=root, output=output, release_id=release_id, scope=args.scope,
+        previous_state=previous_source_state, current_state=current_source_state, declared_paths=declared_paths, changed=changed,
     )
-    manifest = publish_release(store, release_id, artifacts) if changed else store.read_json("manifest.json")
-    active_release_bytes = sum(item["bytes"] for item in (active_release(store) or {}).get("objects", []))
+    source_state = publication["source_state"]
     raw_soil_bytes = soil["source"]["bytes"]
     soil_parquet_bytes = soil["canonical_bytes"]
     territory_parquet_bytes = _bytes_under(canonical / "territories", (".parquet",))
@@ -289,8 +386,8 @@ def run(args: argparse.Namespace) -> int:
         "startedAt": started_at,
         "completedAt": now_iso(),
         "durationSeconds": round(time.monotonic() - started, 3),
-        "status": "success" if changed else "noop",
-        "changed": changed,
+        "status": "success" if publication["changed"] else "noop",
+        "changed": publication["changed"],
         "boundaries": boundaries,
         "pmtiles": pmtiles,
         "dissesto_pmtiles": dissesto_pmtiles,
@@ -318,20 +415,22 @@ def run(args: argparse.Namespace) -> int:
             "analogue_domain_estimate": estimate,
         },
         "operationalMetrics": {
-            "sourceChecks": source_counts["checked"],
-            "sourcesChanged": source_counts["changed"],
-            "sourcesUnchanged": source_counts["unchanged"],
-            "rawBytesAcquired": sum(entry["bytes"] for entry in changed_sources),
+            "sourceChecks": scoped_metrics["sourceChecks"],
+            "sourcesChanged": scoped_metrics["sourcesChanged"],
+            "sourcesUnchanged": scoped_metrics["sourcesUnchanged"],
+            "rawBytesAcquired": scoped_metrics["rawBytesAcquired"],
             "canonicalBytesGenerated": sum(info.get("canonical_bytes", 0) for info in [soil, water, national_emissions, provincial_emissions, dissesto, forests.get("infc", {}), forests.get("zonal", {})] if info.get("changed")),
             "derivedBytesGenerated": analytics.get("bytes", 0) if analytics.get("changed") else 0,
             "deliveryBytesGenerated": sum(report.get("bytes", 0) for report in reports_with_files if report.get("changed")),
-            "objectsUploaded": manifest.get("publishMetrics", {}).get("objectsUploaded", 0),
-            "objectsReused": manifest.get("publishMetrics", {}).get("objectsReused", 0),
-            "bytesUploadedToR2": manifest.get("publishMetrics", {}).get("bytesUploaded", 0),
-            "releaseReferencedBytes": manifest.get("publishMetrics", {}).get("releaseReferencedBytes", active_release_bytes),
+            "objectsUploaded": scoped_metrics["objectsUploaded"],
+            "objectsReused": scoped_metrics["objectsReused"],
+            "bytesUploadedToR2": scoped_metrics["bytesUploadedToR2"],
+            "releaseReferencedBytes": scoped_metrics["releaseReferencedBytes"],
             "pipelineDurationSeconds": round(time.monotonic() - started, 3),
         },
         "manifest": manifest,
+        "scope": args.scope,
+        "carriedArtifacts": publication["carried"],
     }
     json_dump(Path(args.report), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
