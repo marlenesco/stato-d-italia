@@ -173,6 +173,10 @@ Il prossimo run legge questo snapshot dalla release attiva; `manifest.json`
 resta l'unico puntatore mutabile. Metriche operative distinguono byte logici
 referenziati dalla release e nuovo storage caricato nell'object store.
 
+Ogni scope sostituisce soltanto le proprie entry e porta avanti le altre dallo
+snapshot attivo. Gli artifact fuori scope restano referenziati dagli stessi
+oggetti content-addressed nella nuova release.
+
 ## Relazioni essenziali
 
 ```text

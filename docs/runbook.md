@@ -88,9 +88,9 @@ uv run stato-data check-sources --scope geospatial --publish r2
 Il controllo usa `GET` condizionale quando possibile, mai solo `HEAD`. I due
 workflow sono `ingest-data.yml` (tabellari/delivery) e
 `ingest-geospatial.yml` (catalogo Copernicus, raster e zonal statistics).
-La cache Actions accelera canonical geospaziale ma non decide se una fonte è
-nuova. Se tale canonical manca nel workflow fast, pipeline fallisce prima di
-pubblicare release incompleta.
+Cache Actions accelera ma non decide se fonte è nuova. Uno scope recupera gli
+input fuori scope dalla release attiva e li carry-forward per riferimento
+immutabile: release resta completa anche su runner pulito.
 
 ## CORS R2/CDN per frontend diretto
 
@@ -131,6 +131,11 @@ Se il contenuto della fonte è invariato:
 - non rigenerare dati senza motivo.
 - non caricare oggetti già content-addressed;
 - non creare release e non aggiornare `manifest.json`.
+
+Uno scope `data` sostituisce solo entry source `data` e conserva entry
+`geospatial`; scope geospatial fa opposto. Le fonti con URL scoperto dalla
+landing vengono prima ri-risolte: URL nuovo è cambiamento anche se quello
+precedente risponde ancora.
 
 Una modifica di provenance significativa può comunque produrre una metadata-only
 release secondo ADR 0005.
