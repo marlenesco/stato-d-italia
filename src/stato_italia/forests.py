@@ -177,6 +177,7 @@ def _fetch_process_raster_slices(root: Path, canonical_root: Path, token: str) -
     changed = False
     requests_made = 0
     files: list[dict] = []
+    raw_files: list[str] = []
     assets = [asset for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)]
     for asset in assets:
         for start_year, end_year in _asset_periods(asset):
@@ -212,22 +213,25 @@ def _fetch_process_raster_slices(root: Path, canonical_root: Path, token: str) -
                             changed = True
                             requests_made += 1
                     entries.append({"path": target.name, "sha256": metadata["sha256"], "bytes": metadata["bytes"], "request": expected})
+                    raw_files.extend([str(target), str(sidecar)])
                 signature = sha256(json.dumps({"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "entries": entries}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                 manifest = {"schemaVersion": 1, "source_id": HRL["source_id"], "asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "slice_resolution_m": asset["process_resolution_m"], "source_signature": signature, "entries": entries}
                 prior_manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
                 if prior_manifest != manifest:
                     json_dump(manifest_path, manifest)
                     changed = True
+                raw_files.append(str(manifest_path))
                 files.append({"path": str(manifest_path), "bytes": sum(item["bytes"] for item in entries), "tiles": len(entries), "asset": asset["id"], "period": f"{start_year}-{end_year}", "region": region["istat_code"]})
-    return {"changed": changed, "requests": requests_made, "files": files, "raw_bytes": sum(item["bytes"] for item in files)}
+    return {"changed": changed, "requests": requests_made, "files": files, "raw_files": raw_files, "raw_bytes": sum(item["bytes"] for item in files)}
 
 
-def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool = True) -> dict:
+def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool = True, include_infc: bool = True) -> dict:
     """Acquire INFC, check CDSE, and optionally retain bounded local raster slices."""
     infc = []
-    for asset in INFC["assets"]:
-        target = root / "raw" / INFC["source_id"] / f"{asset['id']}.zip"
-        infc.append(download(asset["url"], target, INFC["source_id"], offline=offline, user_agent=INFC["download_user_agent"], source_context={"asset_id": asset["id"], "metric_id": asset["metric_id"]}))
+    if include_infc:
+        for asset in INFC["assets"]:
+            target = root / "raw" / INFC["source_id"] / f"{asset['id']}.zip"
+            infc.append(download(asset["url"], target, INFC["source_id"], offline=offline, user_agent=INFC["download_user_agent"], source_context={"asset_id": asset["id"], "metric_id": asset["metric_id"]}))
     if offline:
         return {"infc": infc, "catalog": {"status": "offline"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     if not check_geospatial:

@@ -8,6 +8,8 @@ from typing import Any
 
 import requests
 
+from .download import resolve_download_url
+
 SOURCE_STATE_LOGICAL_PATH = "metadata/source-state.json"
 SOURCE_STATE_SCHEMA_VERSION = 1
 _LEGACY_KEYS = {
@@ -47,13 +49,15 @@ def _entry(metadata: dict[str, Any], raw_path: Path, raw_root: Path) -> dict[str
         "dataset_version": metadata.get("dataset_version"),
         "period": metadata.get("period") or metadata.get("temporal_granularity"),
         "checked_at": metadata.get("checked_at") or metadata.get("acquired_at"),
+        "landing_url": metadata.get("landing_url"),
+        "download_link_filename_pattern": metadata.get("download_link_filename_pattern"),
     }
 
 
-def build_source_state(raw_root: Path) -> dict[str, Any]:
-    """Build deterministic source state from declared raw metadata sidecars only."""
+def build_source_state_from_metadata_paths(raw_root: Path, sidecars: Iterable[Path], *, include_catalog: Path | None = None) -> dict[str, Any]:
+    """Build state from phase declarations, never from a global raw scan."""
     entries: list[dict[str, Any]] = []
-    for sidecar in sorted(raw_root.rglob("*.metadata.json")):
+    for sidecar in sorted(set(sidecars)):
         try:
             metadata = json.loads(sidecar.read_text())
         except json.JSONDecodeError as exc:
@@ -65,7 +69,8 @@ def build_source_state(raw_root: Path) -> dict[str, Any]:
         if any(metadata.get(key) is None for key in required):
             raise ValueError(f"Incomplete raw metadata contract: {sidecar}")
         entries.append(_entry(metadata, raw_path, raw_root))
-    for catalog in sorted(raw_root.glob("copernicus-*/catalog.json")):
+    catalogs = [include_catalog] if include_catalog and include_catalog.exists() else []
+    for catalog in catalogs:
         try:
             payload = json.loads(catalog.read_text())
         except json.JSONDecodeError as exc:
@@ -82,6 +87,29 @@ def build_source_state(raw_root: Path) -> dict[str, Any]:
     if not entries:
         raise ValueError("Source state requires at least one declared raw asset")
     return {"schemaVersion": SOURCE_STATE_SCHEMA_VERSION, "sources": entries}
+
+
+def build_source_state(raw_root: Path) -> dict[str, Any]:
+    """Compatibility helper for legacy callers; new pipeline passes declarations."""
+    return build_source_state_from_metadata_paths(raw_root, raw_root.rglob("*.metadata.json"))
+
+
+def merge_source_states(previous: dict[str, Any] | None, current_scope: dict[str, Any], *, scope: str) -> dict[str, Any]:
+    """Replace only one scope; preserve active entries owned by the other scope."""
+    prior = _normalised_state(previous) if previous else {"schemaVersion": SOURCE_STATE_SCHEMA_VERSION, "sources": []}
+    if prior.get("schemaVersion") != SOURCE_STATE_SCHEMA_VERSION:
+        raise ValueError("Unsupported source-state schema")
+    current = _normalised_state(current_scope)
+    if scope != "all" and any(source_scope(str(entry["source_id"])) != scope for entry in current["sources"]):
+        raise ValueError(f"Source-state declaration contains an entry outside {scope} scope")
+    if scope == "all":
+        current_paths = {entry["asset_path"] for entry in current["sources"]}
+        merged = [entry for entry in prior["sources"] if entry["asset_path"] not in current_paths]
+    else:
+        merged = [entry for entry in prior["sources"] if source_scope(str(entry["source_id"])) != scope]
+    merged.extend(current["sources"])
+    merged.sort(key=lambda entry: entry["asset_path"])
+    return {"schemaVersion": SOURCE_STATE_SCHEMA_VERSION, "sources": merged}
 
 
 def comparable_state(state: dict[str, Any]) -> tuple[tuple[tuple[str, Any], ...], ...]:
@@ -152,6 +180,21 @@ def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict
         if entry.get("kind") == "catalog":
             continue
         url = entry.get("resolved_url")
+        if entry.get("landing_url") and entry.get("download_link_filename_pattern"):
+            try:
+                resolved = resolve_download_url({
+                    "landing_url": entry["landing_url"],
+                    "download_link_filename_pattern": entry["download_link_filename_pattern"],
+                })
+            except Exception as exc:
+                changed += 1
+                details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": type(exc).__name__})
+                continue
+            if resolved != url:
+                changed += 1
+                details.append({"asset_path": entry["asset_path"], "status": "changed", "reason": "resolved_url_changed"})
+                continue
+            url = resolved
         if not url:
             changed += 1
             details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": "missing_resolved_url"})

@@ -98,7 +98,7 @@ def fetch_dissesto(raw_root: Path) -> dict:
             "unchanged": unchanged,
         }
         json_dump(metadata_path, metadata)
-        return {"changed": not unchanged, "source": metadata, "metadata_assets": metadata_assets}
+        return {"changed": not unchanged, "source": metadata | {"local_path": str(archive), "metadata_path": str(metadata_path)}, "metadata_assets": metadata_assets}
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
