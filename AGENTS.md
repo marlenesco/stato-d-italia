@@ -2,12 +2,12 @@
 
 ## Scope
 
-This repository currently implements the data foundation (milestones 1–4):
-data contracts, R2 release infrastructure, historical ISTAT territories/maps,
-and real ISPRA/SNPA soil-consumption ingestion.
+This repository implements an operational data product: official-data pipeline,
+immutable R2 releases, Next.js explorer, multiple environmental domains and
+territorial profiles. Preserve the boundary between pipeline and frontend.
 
-Do not add the Next.js frontend, a database, runtime AI/LLM features, or unrelated
-domains unless an approved milestone or ADR explicitly requires them.
+Do not add a database, runtime AI/LLM features, sources or domains unless an
+approved milestone or ADR explicitly requires them.
 
 ## Non-negotiable data rules
 

@@ -74,6 +74,24 @@ uv run stato-data run --publish r2
 Prima del publish verificare che le credenziali siano fornite dall'ambiente e non
 da file versionati.
 
+## Source state e workflow
+
+Ogni release contiene `metadata/source-state.json` content-addressed. È letto
+attraverso release attiva e `manifest.json`; non esiste un secondo puntatore
+mutabile. Per controllare una scope senza dipendere dalla cache GitHub:
+
+```sh
+uv run stato-data check-sources --scope data --publish r2
+uv run stato-data check-sources --scope geospatial --publish r2
+```
+
+Il controllo usa `GET` condizionale quando possibile, mai solo `HEAD`. I due
+workflow sono `ingest-data.yml` (tabellari/delivery) e
+`ingest-geospatial.yml` (catalogo Copernicus, raster e zonal statistics).
+La cache Actions accelera canonical geospaziale ma non decide se una fonte è
+nuova. Se tale canonical manca nel workflow fast, pipeline fallisce prima di
+pubblicare release incompleta.
+
 ## CORS R2/CDN per frontend diretto
 
 MapLibre, PMTiles e JSON vengono letti dal browser direttamente da R2/CDN,
@@ -111,6 +129,8 @@ Se il contenuto della fonte è invariato:
 
 - non duplicare il raw;
 - non rigenerare dati senza motivo.
+- non caricare oggetti già content-addressed;
+- non creare release e non aggiornare `manifest.json`.
 
 Una modifica di provenance significativa può comunque produrre una metadata-only
 release secondo ADR 0005.
@@ -141,8 +161,12 @@ Registrare almeno:
 
 ```text
 raw bytes
+source checks / changed / unchanged
 canonical bytes
 delivery bytes
+objects uploaded / reused
+bytes uploaded to R2
+release referenced bytes (dimensione logica)
 record count
 accepted/rejected count
 territory coverage by level

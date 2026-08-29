@@ -18,21 +18,15 @@ grafici o portali esistenti.
 - Dati ufficiali e metriche derivate sempre distinguibili.
 - Storico e confronto territoriale sono più importanti del realtime.
 - Comuni, Province/equivalenti, Regioni e Italia sono entità di prima classe.
-- Aggiornamento dei dati indipendente dal deploy del futuro frontend.
+- Aggiornamento dei dati indipendente dal deploy del frontend operativo.
 - Il progetto deve fallire esplicitamente quando una fonte cambia contratto.
 
 ## Fase corrente
 
-Sono implementate le milestone dati **1–4**:
-
-1. contratti, registry, schemi e ADR;
-2. infrastruttura di release R2;
-3. territori storici ISTAT e geometrie/PMTiles;
-4. ingestione reale ISPRA/SNPA del consumo di suolo.
-
-È inoltre autorizzata la vertical slice Next.js data-first descritta da ADR 0010.
-La UI legge gli artifact delivery pubblicati senza introdurre database, proxy dati
-ordinario o calcoli che inventino granularità non presenti nelle fonti.
+Sono operativi: registry e contratti, release R2, territori storici/PMTiles,
+Suolo, Acqua, Emissioni, Dissesto e Foreste, frontend Next.js e profili
+territoriali. La UI legge artifact delivery senza database, proxy dati ordinario
+o calcoli che inventino granularità.
 
 ## Architettura accettata
 
@@ -51,7 +45,7 @@ derived + delivery artifacts
       ↓
 Cloudflare R2 / CDN
       ↓
-futuro Next.js su Vercel
+Next.js su Vercel
 ```
 
 Decisioni già accettate:
@@ -59,7 +53,7 @@ Decisioni già accettate:
 - R2 è lo storage primario; nessun Neon nell'MVP.
 - Gli oggetti dati e `release.json` sono immutabili/content-addressed.
 - Solo `manifest.json` attiva una release completa ed è mutabile.
-- Il futuro frontend non deve fare da proxy ordinario per i payload dati.
+- Il frontend non deve fare da proxy ordinario per i payload dati.
 - La pubblicazione di nuovi dati non deve richiedere una build Vercel.
 - Le geometrie amministrative sono versionate e distribuite come PMTiles.
 - MapLibre sarà il renderer previsto per la futura UI.
@@ -88,15 +82,15 @@ La fonte contiene:
 - righe Italia, Regione, Provincia/equivalente e Comune.
 
 Gli identificativi comunali presenti nella fonte sono coerenti con il riferimento
-territoriale ISTAT 2025-01-01. Questa relazione temporale deve restare esplicita
-nella provenance e, in futuro, nella UI.
+territoriale ISTAT 2025-01-01. Questa relazione temporale resta esplicita in
+provenance e UI.
 
 I buchi temporali della fonte non devono essere interpolati.
 
 ## Storage e ambienti
 
 Durante lo sviluppo può essere usato l'endpoint pubblico R2 di sviluppo. Il
-frontend futuro deve comunque leggere la base URL dei dati da configurazione, in
+frontend deve comunque leggere la base URL dei dati da configurazione, in
 modo da poter passare a un custom domain/CDN senza cambiare i contratti dati.
 
 Raw tabellari/vettoriali, canonical e delivery non sono contenuto Git. I raster
@@ -127,11 +121,13 @@ sono mai contenute nel repository.
 - `docs/adr/0009-temporal-ui-comparisons.md`
 - `docs/adr/0010-responsive-data-explorer.md`
 - `docs/adr/0011-persistent-map-selection.md`
+- `docs/adr/0012-territory-profile-insights.md`
+- `docs/adr/0013-persistent-source-state-and-scoped-workflows.md`
 
 ## Documenti operativi
 
 - `docs/data-model.md`
 - `docs/runbook.md`
 
-La metodologia statistica completa di trend, anomalie, percentile e confronti
-verrà definita in un ADR dedicato prima della milestone analytics/frontend.
+La metodologia di trend, percentile e confronti è definita da ADR 0007; UI e
+delivery applicano solo risultati derivati documentati e verificabili.

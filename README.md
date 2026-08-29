@@ -1,8 +1,8 @@
-# Stato d'Italia — data foundation
+# Stato d'Italia
 
-Pipeline riproducibile per dati ambientali e territoriali ufficiali. Acquisisce
-raw, valida contratti, normalizza in Parquet e pubblica release immutabili su
-Cloudflare R2. Dati raw e artefatti non entrano in Git.
+Prodotto civico con esploratori Next.js e profili territoriali, alimentati da
+pipeline riproducibile per dati ambientali e territoriali ufficiali. Acquisisce
+raw, valida contratti, normalizza in Parquet e pubblica release immutabili su R2.
 
 Consultare prima [contesto progetto](project-context.md), [regole di lavoro](AGENTS.md)
 e [ADR](docs/adr/).
@@ -74,14 +74,20 @@ Comando equivalente al job:
 uv run stato-data run --publish r2
 ```
 
-Workflow [Ingest official data](.github/workflows/ingest.yml) esegue test e
-publish ogni lunedì alle 02:17 UTC. Può essere avviato manualmente da GitHub
-Actions; input `force=true` rigenera anche fonti con checksum invariato.
+Workflow [fast data](.github/workflows/ingest-data.yml) e
+[geospatial](.github/workflows/ingest-geospatial.yml) verificano prima lo state
+persistente R2 con GET condizionale, non `HEAD`. Se nessuna fonte cambia, non
+eseguono pipeline, non pubblicano release e non toccano `manifest.json`.
+`force=true` bypassa il no-op.
 
 Non esiste staging. Oggetti raw, canonical e delivery sono content-addressed e
 immutabili; `release.json` è immutabile; solo `manifest.json` attiva release
 completa. Se acquisizione, validazione, upload o verifica falliscono,
 `manifest.json` non cambia e release R2 attiva resta invariata.
+
+Ogni release include `metadata/source-state.json`: asset, URL risolto,
+validator HTTP, checksum, bytes, versione/periodo e controllo. La dimensione
+logica release e i byte realmente aggiunti su R2 sono entrambi nel report.
 
 Rollback:
 

@@ -159,6 +159,20 @@ status
 error
 ```
 
+### SourceState
+
+Snapshot immutable, incluso nella release come `metadata/source-state.json`.
+
+```text
+schemaVersion
+sources[]: source_id, asset_path, resolved_url, etag, last_modified,
+           sha256, bytes, dataset_version, period, checked_at
+```
+
+Il prossimo run legge questo snapshot dalla release attiva; `manifest.json`
+resta l'unico puntatore mutabile. Metriche operative distinguono byte logici
+referenziati dalla release e nuovo storage caricato nell'object store.
+
 ## Relazioni essenziali
 
 ```text
