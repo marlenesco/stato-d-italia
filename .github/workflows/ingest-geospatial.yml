@@ -1,0 +1,60 @@
+name: Ingest geospatial official data
+
+on:
+  schedule:
+    - cron: '17 2 * * 3'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Reprocess unchanged geospatial assets
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-geospatial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
+      CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
+      FOREST_PROCESSING_MODE: statistical-api
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate R2 and CDSE configuration
+        run: |
+          test -n "$R2_ACCESS_KEY_ID" || { echo "::error::Missing R2_ACCESS_KEY_ID secret"; exit 1; }
+          test -n "$R2_SECRET_ACCESS_KEY" || { echo "::error::Missing R2_SECRET_ACCESS_KEY secret"; exit 1; }
+          test -n "$R2_ENDPOINT" || { echo "::error::Missing R2_ENDPOINT secret"; exit 1; }
+          test -n "$R2_BUCKET" || { echo "::error::Missing R2_BUCKET secret"; exit 1; }
+          test -n "$CDSE_CLIENT_ID" || { echo "::error::Missing CDSE_CLIENT_ID secret"; exit 1; }
+          test -n "$CDSE_CLIENT_SECRET" || { echo "::error::Missing CDSE_CLIENT_SECRET secret"; exit 1; }
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uv sync --all-groups --frozen
+      - run: uv run pytest -q
+      - name: Restore geospatial processing cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            data/raw/copernicus-hrl-forests/catalog.json
+            data/canonical/forests
+            data/delivery/foreste
+          key: forests-cdse-statistical-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: forests-cdse-statistical-v1-${{ runner.os }}-
+      - id: preflight
+        name: GET-check persisted geospatial source state
+        run: |
+          uv run stato-data check-sources --scope geospatial --publish r2 --report reports/geospatial-source-check.json
+          echo "changed=$(jq -r .changed reports/geospatial-source-check.json)" >> "$GITHUB_OUTPUT"
+      - name: Ingest changed geospatial sources atomically
+        if: steps.preflight.outputs.changed == 'true' || inputs.force
+        run: >-
+          uv run stato-data run --publish r2 --scope geospatial
+          ${{ inputs.force && '--force' || '' }}
