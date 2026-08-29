@@ -66,6 +66,7 @@ def _source_context(source: dict) -> dict:
         "methodology_url": source.get("methodology_url"),
         "geographical_granularity": source.get("geographical_granularity"),
         "temporal_granularity": source.get("temporal_granularity"),
+        "download_link_filename_pattern": source.get("download_link_filename_pattern"),
     }
 
 
@@ -112,7 +113,7 @@ def download(
             )
         metadata = _local_metadata(url, destination, source_id, prior, source_context)
         json_dump(metadata_path, metadata)
-        return metadata
+        return metadata | {"local_path": str(destination), "metadata_path": str(metadata_path)}
     headers = {"User-Agent": user_agent}
     # A path can retain its filename while its official URL changes. Never use
     # validators from the old URL: a 304 would keep stale or redirected bytes.
@@ -129,7 +130,7 @@ def download(
             conditional_prior["unchanged"] = True
             conditional_prior.update(source_context or {})
             json_dump(metadata_path, conditional_prior)
-            return conditional_prior
+            return conditional_prior | {"local_path": str(destination), "metadata_path": str(metadata_path)}
         response.raise_for_status()
         with temporary.open("wb") as target:
             shutil.copyfileobj(response.raw, target)
@@ -150,7 +151,7 @@ def download(
         "unchanged": bool(prior and prior.get("sha256") == checksum),
     } | (source_context or {})
     json_dump(metadata_path, metadata)
-    return metadata
+    return metadata | {"local_path": str(destination), "metadata_path": str(metadata_path)}
 
 
 def download_registered_source(source: dict, destination: Path, *, offline: bool = False) -> dict:

@@ -15,6 +15,7 @@ class ObjectStore:
     def put_json(self, key: str, payload: dict, immutable: bool) -> None: ...
     def read_json(self, key: str) -> dict: ...
     def exists(self, key: str) -> bool: ...
+    def get_file(self, key: str, destination: Path) -> None: ...
 
 
 def active_release(store: ObjectStore) -> dict | None:
@@ -67,10 +68,24 @@ class LocalObjectStore(ObjectStore):
     def exists(self, key: str) -> bool:
         return self._path(key).exists()
 
+    def get_file(self, key: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self._path(key), destination)
+
 
 @dataclass(frozen=True)
 class ReleaseArtifact:
     path: Path
+    logical_path: str
+
+
+@dataclass(frozen=True)
+class CarriedArtifact:
+    """Immutable object already referenced by active release."""
+    key: str
+    sha256: str
+    bytes: int
+    name: str
     logical_path: str
 
 
@@ -112,6 +127,15 @@ class R2ObjectStore(ObjectStore):
     def put_json(self, key: str, payload: dict, immutable: bool) -> None:
         import json
         body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode() + b"\n"
+        if immutable:
+            try:
+                existing = self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+                if existing != body:
+                    raise ValueError(f"Immutable object collision at {key}")
+                return
+            except self.client.exceptions.ClientError as error:
+                if error.response.get("Error", {}).get("Code") not in {"404", "NoSuchKey", "NotFound"}:
+                    raise
         self.client.put_object(
             Bucket=self.bucket, Key=key, Body=body, ContentType="application/json",
             CacheControl="public, max-age=31536000, immutable" if immutable else "public, max-age=300",
@@ -128,14 +152,22 @@ class R2ObjectStore(ObjectStore):
         except self.client.exceptions.ClientError:
             return False
 
+    def get_file(self, key: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self.client.download_file(self.bucket, key, str(destination))
 
-def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | ReleaseArtifact]) -> dict:
+
+def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | ReleaseArtifact | CarriedArtifact]) -> dict:
     """Upload immutable content first, then atomically advance sole mutable pointer."""
     objects = []
     uploaded_objects = 0
     reused_objects = 0
     bytes_uploaded = 0
     for artifact in artifacts:
+        if isinstance(artifact, CarriedArtifact):
+            reused_objects += 1
+            objects.append({"key": artifact.key, "sha256": artifact.sha256, "bytes": artifact.bytes, "name": artifact.name, "logicalPath": artifact.logical_path})
+            continue
         record = artifact if isinstance(artifact, ReleaseArtifact) else ReleaseArtifact(artifact, artifact.name)
         checksum = sha256_file(record.path)
         key = f"objects/sha256/{checksum}/{record.path.name}"
@@ -162,6 +194,38 @@ def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | 
         "bytesUploaded": bytes_uploaded,
         "releaseReferencedBytes": sum(item["bytes"] for item in objects),
     }}
+
+
+def carry_forward_active_artifacts(store: ObjectStore, replacing_logical_paths: set[str]) -> list[CarriedArtifact]:
+    """Carry inactive scope objects by immutable reference, no download/upload."""
+    release = active_release(store)
+    if release is None:
+        return []
+    carried = []
+    for item in release.get("objects", []):
+        logical_path = str(item["logicalPath"])
+        if logical_path in replacing_logical_paths or logical_path == "metadata/source-state.json":
+            continue
+        carried.append(CarriedArtifact(
+            key=str(item["key"]), sha256=str(item["sha256"]), bytes=int(item["bytes"]),
+            name=str(item["name"]), logical_path=logical_path,
+        ))
+    return carried
+
+
+def hydrate_active_artifact(store: ObjectStore, logical_path: str, destination: Path) -> None:
+    """Fetch one immutable dependency from active release only when runner lacks it."""
+    if destination.exists():
+        return
+    release = active_release(store)
+    if release is None:
+        raise FileNotFoundError(f"No active release to hydrate required artifact: {logical_path}")
+    matches = [item for item in release.get("objects", []) if item.get("logicalPath") == logical_path]
+    if len(matches) != 1:
+        raise FileNotFoundError(f"Active release lacks required artifact: {logical_path}")
+    store.get_file(str(matches[0]["key"]), destination)
+    if sha256_file(destination) != matches[0]["sha256"]:
+        raise ValueError(f"Hydrated artifact checksum mismatch: {logical_path}")
 
 
 def rollback(store: ObjectStore, release_id: str) -> dict:
