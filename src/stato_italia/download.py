@@ -6,6 +6,7 @@ import mimetypes
 import re
 from html.parser import HTMLParser
 from pathlib import Path
+from time import sleep
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -122,32 +123,42 @@ def download(
         headers["If-None-Match"] = conditional_prior["etag"]
     if conditional_prior and conditional_prior.get("last_modified"):
         headers["If-Modified-Since"] = conditional_prior["last_modified"]
-    with requests.get(url, stream=True, timeout=(15, 180), headers=headers) as response:
-        if response.status_code == 304:
-            if conditional_prior is None:
-                raise ValueError(f"Unexpected 304 without a matching prior URL: {url}")
-            conditional_prior["checked_at"] = now_iso()
-            conditional_prior["unchanged"] = True
-            conditional_prior.update(source_context or {})
-            json_dump(metadata_path, conditional_prior)
-            return conditional_prior | {"local_path": str(destination), "metadata_path": str(metadata_path)}
-        response.raise_for_status()
-        with temporary.open("wb") as target:
-            shutil.copyfileobj(response.raw, target)
-        headers = {key.lower(): value for key, value in response.headers.items()}
+    transport_errors = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError)
+    for attempt in range(4):
+        try:
+            with requests.get(url, stream=True, timeout=(15, 180), headers=headers) as response:
+                if response.status_code == 304:
+                    if conditional_prior is None:
+                        raise ValueError(f"Unexpected 304 without a matching prior URL: {url}")
+                    conditional_prior["checked_at"] = now_iso()
+                    conditional_prior["unchanged"] = True
+                    conditional_prior.update(source_context or {})
+                    json_dump(metadata_path, conditional_prior)
+                    return conditional_prior | {"local_path": str(destination), "metadata_path": str(metadata_path)}
+                response.raise_for_status()
+                with temporary.open("wb") as target:
+                    shutil.copyfileobj(response.raw, target)
+                response_headers = {key.lower(): value for key, value in response.headers.items()}
+                resolved_url = str(response.url)
+            break
+        except transport_errors:
+            temporary.unlink(missing_ok=True)
+            if attempt == 3:
+                raise
+            sleep(2 ** attempt)
     temporary.replace(destination)
     checksum = sha256_file(destination)
     metadata = {
         "source_id": source_id,
         "acquired_at": now_iso(),
-        "resolved_url": str(response.url),
+        "resolved_url": resolved_url,
         "requested_url": url,
         "filename": destination.name,
         "bytes": destination.stat().st_size,
         "sha256": checksum,
-        "content_type": headers.get("content-type"),
-        "etag": headers.get("etag"),
-        "last_modified": headers.get("last-modified"),
+        "content_type": response_headers.get("content-type"),
+        "etag": response_headers.get("etag"),
+        "last_modified": response_headers.get("last-modified"),
         "unchanged": bool(prior and prior.get("sha256") == checksum),
     } | (source_context or {})
     json_dump(metadata_path, metadata)
