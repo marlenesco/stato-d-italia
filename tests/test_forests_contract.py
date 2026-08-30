@@ -95,6 +95,34 @@ def test_statistical_response_is_closed_after_each_territory_request(monkeypatch
     assert [record["metric_id"] for record in records] == ["tree_cover_mean", "tree_cover_p25", "tree_cover_p50", "tree_cover_p75"]
 
 
+def test_statistical_api_refreshes_expired_token_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            self.headers: dict[str, str] = {}
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    issued = iter(["expired", "fresh"])
+    monkeypatch.setattr(forests, "_cdse_token", lambda _source: next(issued))
+    tokens = forests._CdseTokenProvider(HRL)
+    responses = [Response(401), Response(200)]
+    authorizations: list[str] = []
+
+    def post(*_args: object, **kwargs: object) -> Response:
+        authorizations.append(kwargs["headers"]["Authorization"])  # type: ignore[index]
+        return responses.pop(0)
+
+    monkeypatch.setattr(forests.requests, "post", post)
+
+    response = forests._post_statistics({"request": "payload"}, tokens)
+
+    assert response.status_code == 200
+    assert authorizations == ["Bearer expired", "Bearer fresh"]
+
+
 def test_statistical_checkpoint_reuses_only_complete_matching_records(tmp_path: Path) -> None:
     asset = next(item for item in HRL["assets"] if item["kind"] == "tree_cover_density") | {"years": [2023]}
     territory = {"territory_id": "it:municipality:000001", "territory_version_id": "it:municipality:000001@2023-01-01"}

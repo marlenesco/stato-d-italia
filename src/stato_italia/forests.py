@@ -9,6 +9,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from hashlib import sha256
 from datetime import date
 from pathlib import Path
+from threading import Lock
 from time import sleep
 from urllib.parse import urlparse
 
@@ -51,6 +52,26 @@ def _cdse_token(source: dict) -> str:
     if not isinstance(token, str) or not token:
         raise ValueError("Unexpected CDSE OAuth response: access_token missing")
     return token
+
+
+class _CdseTokenProvider:
+    """Keep a short-lived CDSE token fresh across long concurrent runs."""
+
+    def __init__(self, source: dict) -> None:
+        self._source = source
+        self._token = _cdse_token(source)
+        self._lock = Lock()
+
+    def get(self) -> str:
+        with self._lock:
+            return self._token
+
+    def refresh(self, stale_token: str) -> str:
+        """Refresh once per expired token even when several workers see 401."""
+        with self._lock:
+            if self._token == stale_token:
+                self._token = _cdse_token(self._source)
+            return self._token
 
 
 def _catalog_products(source: dict, token: str) -> list[dict]:
@@ -595,31 +616,40 @@ def _statistical_response(response: requests.Response, asset: dict) -> list[dict
     return parsed
 
 
-def _post_statistics(payload: dict, token: str) -> requests.Response:
+def _post_statistics(payload: dict, tokens: _CdseTokenProvider) -> requests.Response:
     """Retry only transient CDSE failures; a persistent contract/API error stops release activation."""
     last_error: Exception | None = None
-    for attempt in range(6):
+    transient_attempt = 0
+    auth_refreshed = False
+    while transient_attempt < 6:
+        token = tokens.get()
         try:
             response = requests.post(HRL["statistical_api_url"], json=payload, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}, timeout=(15, 180))
+            if response.status_code == 401 and not auth_refreshed:
+                response.close()
+                tokens.refresh(token)
+                auth_refreshed = True
+                continue
             if response.status_code not in {429, 500, 502, 503, 504}:
                 return response
             last_error = requests.HTTPError(f"CDSE Statistical API transient status {response.status_code}")
             response.close()
             retry_after = response.headers.get("Retry-After")
-            delay = min(float(retry_after), 120) if retry_after and retry_after.replace(".", "", 1).isdigit() else min(2 ** attempt, 60)
+            delay = min(float(retry_after), 120) if retry_after and retry_after.replace(".", "", 1).isdigit() else min(2 ** transient_attempt, 60)
         except requests.RequestException as exc:
             last_error = exc
-            delay = min(2 ** attempt, 8)
-        if attempt < 5:
+            delay = min(2 ** transient_attempt, 8)
+        transient_attempt += 1
+        if transient_attempt < 6:
             sleep(delay)
     raise RuntimeError("CDSE Statistical API failed after transient retries") from last_error
 
 
-def _statistical_records(asset: dict, territory: dict, token: str, source_hash: str) -> list[dict]:
+def _statistical_records(asset: dict, territory: dict, tokens: _CdseTokenProvider, source_hash: str) -> list[dict]:
     periods = [(year, year) for year in asset.get("years", [])] + [tuple(period) for period in asset.get("periods", [])]
     records: list[dict] = []
     for start, end in periods:
-        with _post_statistics(_stats_payload(asset, territory, start, end), token) as response:
+        with _post_statistics(_stats_payload(asset, territory, start, end), tokens) as response:
             stats = _statistical_response(response, asset)
         locator = f"statistical-api:{asset['id']}:{start}-{end}"
         def add(metric: str, value: float) -> None:
@@ -700,7 +730,7 @@ def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path,
     state = _catalog_state(root)
     if not state.exists():
         raise FileNotFoundError("CDSE catalog state missing. Run `stato-data fetch foreste` first.")
-    token = _cdse_token(HRL)
+    tokens = _CdseTokenProvider(HRL)
     metadata = json.loads(state.read_text())
     source_hash = metadata.get("signature")
     if not isinstance(source_hash, str) or len(source_hash) != 64:
@@ -738,7 +768,7 @@ def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path,
                 territory, asset = next(jobs)
             except StopIteration:
                 return False
-            futures[pool.submit(_statistical_records, asset, territory, token, source_hash)] = (territory, asset)
+            futures[pool.submit(_statistical_records, asset, territory, tokens, source_hash)] = (territory, asset)
             return True
 
         for _ in range(min(workers * 2, len(pending))):
