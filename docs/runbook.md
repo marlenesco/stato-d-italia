@@ -162,6 +162,12 @@ coppia raw/sidecar mancante o metadata non valido interrompe il bootstrap; lo
 state ricostruito viene reso persistente solo insieme a una nuova release
 completa e verificata.
 
+Se la release legacy precede anche uno dei due scope e quindi non contiene gli
+input necessari al carry-forward, avviare manualmente `ingest-geospatial.yml`
+con `bootstrap_all=true`. Questo esegue una ricostruzione `scope=all` senza
+carry-forward; completato il bootstrap, lasciare `bootstrap_all=false` per tutte
+le esecuzioni ordinarie scoped.
+
 Una modifica di provenance significativa può comunque produrre una metadata-only
 release secondo ADR 0005.
 

@@ -10,6 +10,11 @@ on:
         required: false
         type: boolean
         default: false
+      bootstrap_all:
+        description: One-time full rebuild when active release predates scoped source state
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,11 +59,13 @@ jobs:
           restore-keys: forests-cdse-statistical-v1-${{ runner.os }}-
       - id: preflight
         name: GET-check persisted geospatial source state
+        if: ${{ !inputs.bootstrap_all }}
         run: |
           uv run stato-data check-sources --scope geospatial --publish r2 --report reports/geospatial-source-check.json
           echo "changed=$(jq -r .changed reports/geospatial-source-check.json)" >> "$GITHUB_OUTPUT"
       - name: Ingest changed geospatial sources atomically
-        if: steps.preflight.outputs.changed == 'true' || inputs.force
+        if: inputs.bootstrap_all || steps.preflight.outputs.changed == 'true' || inputs.force
         run: >-
-          uv run stato-data run --publish r2 --scope geospatial
+          uv run stato-data run --publish r2
+          --scope ${{ inputs.bootstrap_all && 'all' || 'geospatial' }}
           ${{ inputs.force && '--force' || '' }}

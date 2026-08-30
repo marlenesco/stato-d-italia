@@ -10,6 +10,18 @@ from stato_italia.cli import _active_source_state_with_legacy_bootstrap, _publis
 from stato_italia.release import LocalObjectStore, ReleaseArtifact, publish_release
 
 
+def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
+    repository = Path(__file__).parents[1]
+    data_workflow = (repository / ".github/workflows/ingest-data.yml").read_text()
+    geospatial_workflow = (repository / ".github/workflows/ingest-geospatial.yml").read_text()
+    concurrency = "group: stato-d-italia-r2-publish\n  cancel-in-progress: false"
+    assert concurrency in data_workflow
+    assert concurrency in geospatial_workflow
+    assert "bootstrap_all:" in geospatial_workflow
+    assert "if: ${{ !inputs.bootstrap_all }}" in geospatial_workflow
+    assert "--scope ${{ inputs.bootstrap_all && 'all' || 'geospatial' }}" in geospatial_workflow
+
+
 def _entry(source_id: str, asset_path: str, checksum: str, *, kind: str | None = None) -> dict:
     entry = {
         "source_id": source_id, "asset_path": asset_path, "resolved_url": "https://official.example/asset",
