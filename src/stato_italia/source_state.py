@@ -37,10 +37,10 @@ def _raw_path_for_sidecar(sidecar: Path) -> Path:
     return Path(str(sidecar)[: -len(suffix)])
 
 
-def _entry(metadata: dict[str, Any], raw_path: Path, raw_root: Path) -> dict[str, Any]:
+def source_state_entry(metadata: dict[str, Any], asset_path: str) -> dict[str, Any]:
     return {
         "source_id": metadata["source_id"],
-        "asset_path": str(raw_path.relative_to(raw_root)),
+        "asset_path": asset_path,
         "resolved_url": metadata.get("resolved_url"),
         "etag": metadata.get("etag"),
         "last_modified": metadata.get("last_modified"),
@@ -54,6 +54,10 @@ def _entry(metadata: dict[str, Any], raw_path: Path, raw_root: Path) -> dict[str
         "preflight_method": metadata.get("preflight_method"),
         "source_signature": metadata.get("source_signature"),
     }
+
+
+def _entry(metadata: dict[str, Any], raw_path: Path, raw_root: Path) -> dict[str, Any]:
+    return source_state_entry(metadata, str(raw_path.relative_to(raw_root)))
 
 
 def build_source_state_from_metadata_paths(raw_root: Path, sidecars: Iterable[Path], *, include_catalog: Path | None = None) -> dict[str, Any]:
