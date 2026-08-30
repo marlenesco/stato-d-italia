@@ -92,6 +92,17 @@ Cache Actions accelera ma non decide se fonte è nuova. Uno scope recupera gli
 input fuori scope dalla release attiva e li carry-forward per riferimento
 immutabile: release resta completa anche su runner pulito.
 
+Il preflight Copernicus calcola la signature del catalogo remoto senza scrivere
+`data/raw`, canonical o cache. Solo il vero run geospaziale persiste
+`catalog.json`; una signature nuova forza la rigenerazione delle statistiche
+zonali. Il preflight IdroGEO confronta invece una signature deterministica dei
+quattro export reali (`country`, `regions`, `provinces`, `municipalities`), non
+la risposta dell'URL base dell'API.
+
+L'hydration confronta sempre lo SHA-256 locale con quello referenziato dalla
+release attiva. Un file di cache con SHA diverso viene riscaricato e verificato
+prima della sostituzione atomica: la cache non è mai fonte di verità.
+
 ## CORS R2/CDN per frontend diretto
 
 MapLibre, PMTiles e JSON vengono letti dal browser direttamente da R2/CDN,
@@ -136,6 +147,13 @@ Uno scope `data` sostituisce solo entry source `data` e conserva entry
 `geospatial`; scope geospatial fa opposto. Le fonti con URL scoperto dalla
 landing vengono prima ri-risolte: URL nuovo è cambiamento anche se quello
 precedente risponde ancora.
+
+Anche gli artifact hanno ownership esplicita. `data` porta avanti soltanto gli
+artifact geospatial; `geospatial` porta avanti soltanto gli artifact data;
+`all` non esegue carry-forward. Gli artifact condivisi, incluse canonical dei
+territori e delivery `territory-insights`, devono essere dichiarati o rigenerati
+dal run corrente e non sopravvivono implicitamente. `all` sostituisce inoltre
+l'intero source state: entry e raw obsoleti non restano nella nuova release.
 
 Una modifica di provenance significativa può comunque produrre una metadata-only
 release secondo ADR 0005.

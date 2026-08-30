@@ -7,7 +7,16 @@ from types import SimpleNamespace
 
 from botocore.exceptions import ClientError
 
-from stato_italia.release import LocalObjectStore, R2ObjectStore, ReleaseArtifact, carry_forward_active_artifacts, publish_release, rollback
+from stato_italia.release import (
+    LocalObjectStore,
+    R2ObjectStore,
+    ReleaseArtifact,
+    artifact_scope,
+    carry_forward_active_artifacts,
+    hydrate_active_artifact,
+    publish_release,
+    rollback,
+)
 
 
 def test_release_and_rollback_are_pointer_only(tmp_path: Path) -> None:
@@ -55,16 +64,105 @@ def test_failure_never_advances_manifest(tmp_path: Path, monkeypatch: pytest.Mon
     assert store.read_json("manifest.json")["releaseId"] == "r1"
 
 
+def test_release_json_upload_failure_never_advances_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = tmp_path / "first.parquet"
+    second = tmp_path / "second.parquet"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    store = LocalObjectStore(tmp_path / "store")
+    publish_release(store, "r1", [first])
+    original = store.put_json
+
+    def fail_release(key: str, payload: dict, immutable: bool) -> None:
+        if key == "releases/r2/release.json":
+            raise RuntimeError("simulated release upload failure")
+        original(key, payload, immutable)
+
+    monkeypatch.setattr(store, "put_json", fail_release)
+    with pytest.raises(RuntimeError, match="simulated release upload failure"):
+        publish_release(store, "r2", [second])
+
+    assert store.read_json("manifest.json")["releaseId"] == "r1"
+
+
 def test_carry_forward_references_unchanged_active_artifact(tmp_path: Path) -> None:
     artifact = tmp_path / "forest.parquet"
     artifact.write_bytes(b"forest")
     store = LocalObjectStore(tmp_path / "store")
-    publish_release(store, "r1", [ReleaseArtifact(artifact, "canonical/forests/observations.parquet")])
-    carried = carry_forward_active_artifacts(store, set())
+    publish_release(store, "r1", [ReleaseArtifact(artifact, "canonical/forests/algorithm_version=v1/observations.parquet")])
+    carried = carry_forward_active_artifacts(store, set(), scope="data")
     assert len(carried) == 1
     second = publish_release(store, "r2", carried)
     assert second["publishMetrics"]["objectsUploaded"] == 0
     assert second["publishMetrics"]["objectsReused"] == 1
+
+
+def test_artifact_ownership_is_explicit() -> None:
+    assert artifact_scope("raw/copernicus-hrl-forests/catalog.json") == "geospatial"
+    assert artifact_scope("canonical/forests/algorithm_version=v2/zonal_statistics.parquet") == "geospatial"
+    assert artifact_scope("delivery/foreste/index.json") == "geospatial"
+    assert artifact_scope("raw/ispra-soil-2025/new.xlsx") == "data"
+    assert artifact_scope("canonical/forests/dataset_version=infc2015/observations.parquet") == "data"
+    assert artifact_scope("canonical/territories/reference_year=2025/region.parquet") == "shared"
+    assert artifact_scope("delivery/territory-insights/index.json") == "shared"
+    with pytest.raises(ValueError, match="no explicit scope ownership"):
+        artifact_scope("canonical/unknown/data.parquet")
+
+
+def test_carry_forward_replaces_whole_scope_and_never_carries_all(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    artifacts = []
+    for logical_path, body in (
+        ("raw/ispra-soil-2025/old.xlsx", b"old-data"),
+        ("raw/copernicus-hrl-forests/catalog.json", b"geo"),
+        ("canonical/territories/reference_year=2025/region.parquet", b"shared"),
+    ):
+        path = tmp_path / logical_path.replace("/", "-")
+        path.write_bytes(body)
+        artifacts.append(ReleaseArtifact(path, logical_path))
+    publish_release(store, "r1", artifacts)
+
+    data_run = carry_forward_active_artifacts(store, set(), scope="data")
+    geo_run = carry_forward_active_artifacts(store, set(), scope="geospatial")
+    all_run = carry_forward_active_artifacts(store, set(), scope="all")
+
+    assert {item.logical_path for item in data_run} == {"raw/copernicus-hrl-forests/catalog.json"}
+    assert {item.logical_path for item in geo_run} == {"raw/ispra-soil-2025/old.xlsx"}
+    assert all_run == []
+
+
+def test_hydration_replaces_stale_cache_with_active_release(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    active = tmp_path / "active.parquet"
+    active.write_bytes(b"V2")
+    publish_release(store, "r2", [ReleaseArtifact(active, "canonical/soil/observations.parquet")])
+    destination = tmp_path / "cache" / "observations.parquet"
+    destination.parent.mkdir()
+    destination.write_bytes(b"V1")
+
+    hydrate_active_artifact(store, "canonical/soil/observations.parquet", destination)
+
+    assert destination.read_bytes() == b"V2"
+
+
+def test_failed_hydration_keeps_cache_and_manifest_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    active = tmp_path / "active.parquet"
+    active.write_bytes(b"V2")
+    publish_release(store, "r2", [ReleaseArtifact(active, "canonical/soil/observations.parquet")])
+    destination = tmp_path / "cache.parquet"
+    destination.write_bytes(b"V1")
+    before = store.read_json("manifest.json")
+
+    def corrupt(_key: str, target: Path) -> None:
+        target.write_bytes(b"corrupt")
+
+    monkeypatch.setattr(store, "get_file", corrupt)
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        hydrate_active_artifact(store, "canonical/soil/observations.parquet", destination)
+
+    assert destination.read_bytes() == b"V1"
+    assert store.read_json("manifest.json") == before
 
 
 def test_r2_immutable_json_collision_fails() -> None:

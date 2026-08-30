@@ -177,6 +177,12 @@ Ogni scope sostituisce soltanto le proprie entry e porta avanti le altre dallo
 snapshot attivo. Gli artifact fuori scope restano referenziati dagli stessi
 oggetti content-addressed nella nuova release.
 
+Per gli artifact, ownership è esplicita e distinta in `data`, `geospatial` e
+`shared`. Un run scoped porta avanti per riferimento soltanto ownership opposta;
+gli artifact `shared` devono essere dichiarati dal run. `scope=all` ricostruisce
+source state e membership artifact soltanto dagli output correnti, senza
+carry-forward implicito.
+
 ## Relazioni essenziali
 
 ```text

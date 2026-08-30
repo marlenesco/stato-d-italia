@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import boto3
 
@@ -87,6 +89,41 @@ class CarriedArtifact:
     bytes: int
     name: str
     logical_path: str
+
+
+ArtifactScope = Literal["data", "geospatial", "shared"]
+
+
+def artifact_scope(logical_path: str) -> ArtifactScope:
+    """Return explicit release ownership; unknown paths fail closed."""
+    if logical_path == "metadata/source-state.json":
+        return "shared"
+    if logical_path.startswith("raw/copernicus-"):
+        return "geospatial"
+    if logical_path.startswith("raw/"):
+        return "data"
+    if logical_path.startswith("canonical/territories/"):
+        return "shared"
+    if logical_path.startswith("canonical/forests/algorithm_version="):
+        return "geospatial"
+    if logical_path.startswith("canonical/forests/dataset_version=infc"):
+        return "data"
+    if logical_path.startswith((
+        "canonical/soil/", "canonical/water/", "canonical/dissesto/", "canonical/emissions/",
+        "derived/soil/",
+    )):
+        return "data"
+    if logical_path.startswith("delivery/territory-insights/"):
+        return "shared"
+    if logical_path.startswith("delivery/foreste/"):
+        return "geospatial"
+    if logical_path.startswith((
+        "delivery/soil/", "delivery/water/", "delivery/dissesto/", "delivery/emissions/",
+        # Explicit legacy ownership: a data run removes these old duplicated paths.
+        "delivery/delivery/",
+    )):
+        return "data"
+    raise ValueError(f"Release artifact has no explicit scope ownership: {logical_path}")
 
 
 class R2ObjectStore(ObjectStore):
@@ -196,15 +233,23 @@ def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | 
     }}
 
 
-def carry_forward_active_artifacts(store: ObjectStore, replacing_logical_paths: set[str]) -> list[CarriedArtifact]:
-    """Carry inactive scope objects by immutable reference, no download/upload."""
+def carry_forward_active_artifacts(
+    store: ObjectStore, replacing_logical_paths: set[str], *, scope: str,
+) -> list[CarriedArtifact]:
+    """Carry only opposite-scope objects; shared outputs must be declared fresh."""
+    if scope == "all":
+        return []
+    if scope not in {"data", "geospatial"}:
+        raise ValueError(f"Unsupported artifact carry-forward scope: {scope}")
+    carried_scope = "geospatial" if scope == "data" else "data"
     release = active_release(store)
     if release is None:
         return []
     carried = []
     for item in release.get("objects", []):
         logical_path = str(item["logicalPath"])
-        if logical_path in replacing_logical_paths or logical_path == "metadata/source-state.json":
+        owner = artifact_scope(logical_path)
+        if logical_path in replacing_logical_paths or owner != carried_scope:
             continue
         carried.append(CarriedArtifact(
             key=str(item["key"]), sha256=str(item["sha256"]), bytes=int(item["bytes"]),
@@ -214,18 +259,29 @@ def carry_forward_active_artifacts(store: ObjectStore, replacing_logical_paths: 
 
 
 def hydrate_active_artifact(store: ObjectStore, logical_path: str, destination: Path) -> None:
-    """Fetch one immutable dependency from active release only when runner lacks it."""
-    if destination.exists():
-        return
+    """Make local accelerator match active release bytes before reuse."""
     release = active_release(store)
     if release is None:
         raise FileNotFoundError(f"No active release to hydrate required artifact: {logical_path}")
     matches = [item for item in release.get("objects", []) if item.get("logicalPath") == logical_path]
     if len(matches) != 1:
         raise FileNotFoundError(f"Active release lacks required artifact: {logical_path}")
-    store.get_file(str(matches[0]["key"]), destination)
-    if sha256_file(destination) != matches[0]["sha256"]:
-        raise ValueError(f"Hydrated artifact checksum mismatch: {logical_path}")
+    expected = str(matches[0]["sha256"])
+    if destination.is_file() and sha256_file(destination) == expected:
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".hydrate", dir=destination.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        store.get_file(str(matches[0]["key"]), temporary)
+        if sha256_file(temporary) != expected:
+            raise ValueError(f"Hydrated artifact checksum mismatch: {logical_path}")
+        temporary.replace(destination)
+        if sha256_file(destination) != expected:
+            raise ValueError(f"Hydrated artifact checksum mismatch after replace: {logical_path}")
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def rollback(store: ObjectStore, release_id: str) -> dict:
