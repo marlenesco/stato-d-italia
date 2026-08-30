@@ -155,6 +155,13 @@ territori e delivery `territory-insights`, devono essere dichiarati o rigenerati
 dal run corrente e non sopravvivono implicitamente. `all` sostituisce inoltre
 l'intero source state: entry e raw obsoleti non restano nella nuova release.
 
+Per la sola migrazione da una release legacy priva di
+`metadata/source-state.json`, il runner ricostruisce lo snapshot dagli artifact
+raw e dai relativi sidecar immutabili già presenti nella release attiva. Una
+coppia raw/sidecar mancante o metadata non valido interrompe il bootstrap; lo
+state ricostruito viene reso persistente solo insieme a una nuova release
+completa e verificata.
+
 Una modifica di provenance significativa può comunque produrre una metadata-only
 release secondo ADR 0005.
 
