@@ -1,12 +1,14 @@
 from pathlib import Path
+import json
 import os
 
+import pandas as pd
 import pytest
 from shapely.geometry import Polygon
 
 from stato_italia.cli import load_local_env
 import stato_italia.forests as forests
-from stato_italia.forests import CORINE, HRL, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _write_statistical_checkpoint
+from stato_italia.forests import CORINE, HRL, _check_catalog, _persist_catalog, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _write_statistical_checkpoint
 
 
 def test_corine_and_hrl_keep_separate_forest_cover_metrics() -> None:
@@ -104,3 +106,54 @@ def test_statistical_checkpoint_reuses_only_complete_matching_records(tmp_path: 
     assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, source_hash, force=False) == records
     assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, "b" * 64, force=False) is None
     assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, source_hash, force=True) is None
+
+
+def test_catalog_preflight_is_read_only_and_run_regenerates_canonical_from_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog_path = tmp_path / "raw" / HRL["source_id"] / "catalog.json"
+    catalog_path.parent.mkdir(parents=True)
+    catalog_path.write_text(json.dumps({
+        "source_id": HRL["source_id"], "signature": "1" * 64,
+        "products": [{"Id": "v1", "Name": "V1"}], "checked_at": "2026-01-01T00:00:00Z",
+    }))
+    cached = tmp_path / "canonical" / "forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
+    cached.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "derived_metric_id": ["v1"], "territory_level": ["region"], "reference_year": [2023],
+        "source_asset_sha256": ["1" * 64],
+    }).to_parquet(cached)
+    products_v2 = [{
+        "Id": "v2", "Name": "V2", "ContentDate": None, "Checksum": None,
+        "S3Path": None, "OriginDate": None,
+    }]
+    monkeypatch.setattr(forests, "_catalog_products", lambda _source, _token: products_v2)
+
+    remote = _check_catalog(HRL, "token")
+
+    assert json.loads(catalog_path.read_text())["signature"] == "1" * 64
+    persisted = _persist_catalog(tmp_path, remote)
+    assert persisted["changed"] is True
+    monkeypatch.setattr(forests, "_cdse_token", lambda _source: "token")
+    monkeypatch.setattr(forests, "_slice_territories", lambda *_: pd.DataFrame([{
+        "territory_id": "it:region:01", "territory_version_id": "it:region:01@2023-01-01",
+        "level": "region",
+    }]))
+    monkeypatch.setattr(forests, "_read_statistical_checkpoint", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(forests, "_write_statistical_checkpoint", lambda *_args, **_kwargs: None)
+
+    def records(asset: dict, territory: dict, _token: str, source_hash: str) -> list[dict]:
+        return [{
+            "derived_metric_id": asset["id"], "territory_id": territory["territory_id"],
+            "territory_version_id": territory["territory_version_id"], "territory_level": territory["level"],
+            "reference_year": 2023, "source_asset_sha256": source_hash,
+        }]
+
+    monkeypatch.setattr(forests, "_statistical_records", records)
+    result = forests.ingest_forests(
+        tmp_path, tmp_path / "canonical", force=False, mode="statistical-api",
+    )
+
+    regenerated = pd.read_parquet(cached)
+    assert result["changed"] is True
+    assert set(regenerated["source_asset_sha256"]) == {remote["signature"]}

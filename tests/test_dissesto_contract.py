@@ -3,7 +3,7 @@ import zipfile
 from pathlib import Path
 
 from stato_italia import dissesto
-from stato_italia.dissesto import _record, fetch_dissesto
+from stato_italia.dissesto import _exports_signature, _record, check_dissesto_source, fetch_dissesto
 
 
 def _territory() -> dict:
@@ -57,3 +57,24 @@ def test_idrogeo_fetch_archives_official_api_responses(tmp_path: Path, monkeypat
     with zipfile.ZipFile(archive) as bundle:
         assert bundle.namelist() == ["country/export.json", "region/export.json", "province/export.json", "municipality/export.json"]
     assert result["source"]["response_count"] == 4
+    assert result["source"]["preflight_method"] == "idrogeo_exports_v1"
+    assert len(result["source"]["source_signature"]) == 64
+
+
+def test_idrogeo_signature_is_deterministic_and_detects_one_export_change(monkeypatch) -> None:
+    first = {
+        "country": b'[{"value":1,"name":"Italia"}]',
+        "region": b'[{"cod_reg":1}]',
+        "province": b'[{"cod_prov":1}]',
+        "municipality": b'[{"pro_com":1}]',
+    }
+    same_semantics = first | {"country": b'[ { "name": "Italia", "value": 1 } ]'}
+    changed = first | {"province": b'[{"cod_prov":2}]'}
+    signature = _exports_signature(first)
+    assert _exports_signature(same_semantics) == signature
+    assert _exports_signature(changed) != signature
+
+    monkeypatch.setattr(dissesto, "_export_payloads", lambda: first)
+    assert check_dissesto_source(signature)["changed"] is False
+    monkeypatch.setattr(dissesto, "_export_payloads", lambda: changed)
+    assert check_dissesto_source(signature)["changed"] is True

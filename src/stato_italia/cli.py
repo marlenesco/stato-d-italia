@@ -7,6 +7,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pandas as pd
+
 from .analytics import build_soil_analytics
 from .common import json_dump, now_iso
 from .delivery import generate_soil_delivery
@@ -17,8 +19,8 @@ from .forests import ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ing
 from .forests_delivery import generate_forests_delivery
 from .dissesto import fetch_dissesto, ingest_dissesto
 from .dissesto_delivery import generate_dissesto_delivery
-from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, carry_forward_active_artifacts, hydrate_active_artifact, publish_release, rollback
-from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, merge_source_states, source_state_changed, source_state_counts
+from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, artifact_scope, carry_forward_active_artifacts, hydrate_active_artifact, publish_release, rollback
+from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, merge_source_states, scoped_source_state, source_state_changed, source_state_counts
 from .soil import ingest_soil
 from .territories import SOURCE_YEARS, ingest_boundaries
 from .water import ingest_water
@@ -103,20 +105,93 @@ def _hydrate(store: LocalObjectStore | R2ObjectStore, root: Path, logical_paths:
         hydrate_active_artifact(store, logical_path, root / logical_path)
 
 
+def _catalog_changed_from_active(previous_state: dict | None, forest_fetch: dict) -> bool:
+    signature = forest_fetch.get("catalog", {}).get("signature")
+    if not isinstance(signature, str):
+        return False
+    previous = next((
+        entry for entry in (previous_state or {}).get("sources", [])
+        if entry.get("kind") == "catalog" and entry.get("source_id", entry.get("sourceId")) == "copernicus-hrl-forests"
+    ), None)
+    return previous is None or previous.get("sha256") != signature
+
+
+def _validate_release_coherence(
+    root: Path, source_state: dict, artifacts: list[ReleaseArtifact | CarriedArtifact], *, scope: str,
+) -> None:
+    """Fail before upload when provenance, scope ownership, or Copernicus canonical diverge."""
+    logical_paths = {item.logical_path for item in artifacts}
+    for item in artifacts:
+        artifact_scope(item.logical_path)
+    for entry in source_state["sources"]:
+        raw_path = f"raw/{entry['asset_path']}"
+        if raw_path not in logical_paths:
+            raise ValueError(f"Release source-state lacks declared raw artifact: {raw_path}")
+        if entry.get("kind") != "catalog" and f"{raw_path}.metadata.json" not in logical_paths:
+            raise ValueError(f"Release source-state lacks raw provenance sidecar: {raw_path}.metadata.json")
+    required_shared = {
+        str(path.relative_to(root))
+        for path in _territory_paths(root / "canonical")
+    }
+    missing_shared = required_shared - logical_paths
+    if missing_shared:
+        raise ValueError(f"Release lacks shared territory canonical artifacts: {sorted(missing_shared)}")
+    if scope in {"data", "all"}:
+        provenance_contracts = (
+            ("canonical/soil/dataset_version=2025-2024-observations/observations.parquet", "ispra-soil-2025", None),
+            ("canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet", "ispra-bigbang-10", None),
+            ("canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet", "ispra-idrogeo-risk-2024", "idrogeo-risk-api-responses.zip"),
+            ("canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet", "ispra-emissions-provincial-2026", None),
+            ("canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-ghg-2026", None),
+            ("canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-nfr-2026", None),
+            ("canonical/forests/dataset_version=infc2015-published-tables/observations.parquet", "infc-2015-forests", None),
+        )
+        for logical_path, source_id, asset_name in provenance_contracts:
+            if logical_path not in logical_paths:
+                raise ValueError(f"Data release lacks canonical artifact: {logical_path}")
+            expected_hashes = {
+                str(entry["sha256"]) for entry in source_state["sources"]
+                if entry.get("source_id") == source_id
+                and (asset_name is None or str(entry.get("asset_path", "")).endswith(f"/{asset_name}"))
+            }
+            table = pd.read_parquet(root / logical_path, columns=["source_asset_sha256"])
+            canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
+            if not expected_hashes or canonical_hashes != expected_hashes:
+                raise ValueError(f"Source-state and canonical provenance differ: {logical_path}")
+    if scope == "data":
+        return
+    catalog = next((entry for entry in source_state["sources"] if entry.get("kind") == "catalog"), None)
+    if catalog is None:
+        raise ValueError("Geospatial release lacks Copernicus catalog source-state")
+    zonal_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
+    if zonal_logical not in logical_paths:
+        raise ValueError("Geospatial release lacks forest zonal canonical")
+    if os.getenv("FOREST_PROCESSING_MODE", "raster") == "statistical-api":
+        table = pd.read_parquet(root / zonal_logical, columns=["source_asset_sha256"])
+        hashes = set(table["source_asset_sha256"].dropna().astype(str))
+        if hashes != {catalog["sha256"]}:
+            raise ValueError("Copernicus source-state and forest canonical signatures differ")
+
+
 def _publish_scoped(
     *, store: LocalObjectStore | R2ObjectStore, root: Path, output: Path, release_id: str,
     scope: str, previous_state: dict | None, current_state: dict, declared_paths: list[Path], changed: bool,
 ) -> tuple[dict, dict, dict]:
     source_state = merge_source_states(previous_state, current_state, scope=scope)
     state_changed = source_state_changed(previous_state, source_state)
-    source_counts = source_state_counts(previous_state, source_state)
-    changed_sources = changed_source_entries(previous_state, source_state)
+    previous_scope = scoped_source_state(previous_state, scope)
+    source_counts = source_state_counts(previous_scope, current_state)
+    changed_sources = changed_source_entries(previous_scope, current_state)
     changed = changed or state_changed
     state_path = output / "release-metadata" / f"{release_id}-source-state.json"
     json_dump(state_path, source_state)
     fresh = _release_artifacts(root, declared_paths, state_path)
-    carried: list[CarriedArtifact] = carry_forward_active_artifacts(store, {item.logical_path for item in fresh})
+    carried: list[CarriedArtifact] = carry_forward_active_artifacts(
+        store, {item.logical_path for item in fresh}, scope=scope,
+    )
+    _validate_release_coherence(root, source_state, [*fresh, *carried], scope=scope)
     manifest = publish_release(store, release_id, [*fresh, *carried]) if changed else store.read_json("manifest.json")
+    carried_sources = len(source_state["sources"]) - len(current_state["sources"])
     metrics = {
         "sourceChecks": source_counts["checked"], "sourcesChanged": source_counts["changed"],
         "sourcesUnchanged": source_counts["unchanged"], "rawBytesAcquired": sum(entry["bytes"] for entry in changed_sources),
@@ -124,6 +199,8 @@ def _publish_scoped(
         "objectsReused": manifest.get("publishMetrics", {}).get("objectsReused", 0),
         "bytesUploadedToR2": manifest.get("publishMetrics", {}).get("bytesUploaded", 0),
         "releaseReferencedBytes": manifest.get("publishMetrics", {}).get("releaseReferencedBytes", sum(item["bytes"] for item in (active_release(store) or {}).get("objects", []))),
+        "totalSourcesInRelease": len(source_state["sources"]), "carriedSources": carried_sources,
+        "carriedArtifacts": len(carried),
     }
     return manifest, metrics, {"changed": changed, "source_state": source_state, "carried": len(carried)}
 
@@ -139,7 +216,7 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
     ]
     _hydrate(store, root, [str(path.relative_to(root)) if isinstance(path, Path) else path for path in required])
     forest_fetch = fetch_forests(root, offline=args.offline, include_infc=False)
-    catalog_changed = bool(forest_fetch.get("catalog", {}).get("changed"))
+    catalog_changed = _catalog_changed_from_active(previous_state, forest_fetch)
     zonal = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=os.getenv("FOREST_PROCESSING_MODE", "raster"))
     forests_pmtiles: dict[str, dict] = {}
     for level in ("municipality", "province", "region"):
@@ -170,9 +247,11 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
     metadata_paths = [path for path in _declared_raw_paths(forest_fetch) if path.name.endswith(".metadata.json")]
     current_state = build_source_state_from_metadata_paths(root / "raw", metadata_paths, include_catalog=Path(forest_fetch["catalog"]["path"]) if forest_fetch.get("catalog", {}).get("path") else None)
     declared = [
+        *_territory_paths(canonical),
         canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
         *[Path(item["path"]) for item in forests_pmtiles.values()],
         *forest_delivery.get("files", []), *insights.get("files", []),
+        Path(forest_fetch["catalog"]["path"]),
         *[path for path in _declared_raw_paths(forest_fetch) if not path.name.endswith(".metadata.json")], *metadata_paths,
     ]
     manifest, metrics, publication = _publish_scoped(
@@ -228,7 +307,7 @@ def run(args: argparse.Namespace) -> int:
         forests["infc"] = ingest_infc_forests(root, canonical, force=args.force)
         mode = os.getenv("FOREST_PROCESSING_MODE", "raster")
         zonal_raw = any(path for source in ("copernicus-hrl-forests", "copernicus-corine-forests") for path in (root / "raw" / source).glob("**/*.tif"))
-        catalog_changed = bool(forest_fetch.get("catalog", {}).get("changed"))
+        catalog_changed = _catalog_changed_from_active(previous_source_state, forest_fetch)
         if args.scope == "data":
             zonal_path = canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
             if not zonal_path.exists():
@@ -366,6 +445,8 @@ def run(args: argparse.Namespace) -> int:
         *[path for report in reports_with_files for path in report.get("files", [])],
         *[Path(info["path"]) for info in [*pmtiles.values(), *dissesto_pmtiles.values(), *emissions_pmtiles.values(), *forests_pmtiles.values()]],
     ]
+    if catalog_path is not None:
+        declared_paths.append(catalog_path)
     manifest, scoped_metrics, publication = _publish_scoped(
         store=store, root=root, output=output, release_id=release_id, scope=args.scope,
         previous_state=previous_source_state, current_state=current_source_state, declared_paths=declared_paths, changed=changed,
@@ -426,6 +507,9 @@ def run(args: argparse.Namespace) -> int:
             "objectsReused": scoped_metrics["objectsReused"],
             "bytesUploadedToR2": scoped_metrics["bytesUploadedToR2"],
             "releaseReferencedBytes": scoped_metrics["releaseReferencedBytes"],
+            "totalSourcesInRelease": scoped_metrics["totalSourcesInRelease"],
+            "carriedSources": scoped_metrics["carriedSources"],
+            "carriedArtifacts": scoped_metrics["carriedArtifacts"],
             "pipelineDurationSeconds": round(time.monotonic() - started, 3),
         },
         "manifest": manifest,
@@ -488,8 +572,10 @@ def main() -> int:
             from .forests import HRL, _cdse_token, _check_catalog
 
             previous_catalog = next((entry for entry in (persisted or {}).get("sources", []) if entry.get("kind") == "catalog" and entry.get("source_id", entry.get("sourceId")) == HRL["source_id"]), None)
+            if previous_catalog is None:
+                result["sourceChecks"] += 1
             try:
-                catalog = _check_catalog(Path(args.workdir), HRL, _cdse_token(HRL))
+                catalog = _check_catalog(HRL, _cdse_token(HRL))
                 catalog_changed = previous_catalog is None or previous_catalog.get("sha256") != catalog["signature"]
                 result["catalog"] = {"checked": True, "changed": catalog_changed, "products": catalog["products"]}
                 result["changed"] = bool(result["changed"] or catalog_changed)

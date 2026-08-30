@@ -83,16 +83,31 @@ def _catalog_state(root: Path) -> Path:
     return root / "raw" / HRL["source_id"] / "catalog.json"
 
 
-def _check_catalog(root: Path, source: dict, token: str) -> dict:
+def _check_catalog(source: dict, token: str) -> dict:
+    """Read remote catalog and compute signature without changing local state."""
     products = _catalog_products(source, token)
     signature = sha256(json.dumps(products, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {
+        "source_id": source["source_id"], "signature": signature, "products_payload": products,
+        "products": len(products), "checked_at": now_iso(),
+    }
+
+
+def _persist_catalog(root: Path, catalog: dict) -> dict:
+    """Advance local catalog state only inside the real geospatial run."""
     destination = _catalog_state(root)
     previous = json.loads(destination.read_text()) if destination.exists() else None
-    changed = previous is None or previous.get("signature") != signature
+    changed = previous is None or previous.get("signature") != catalog["signature"]
     if changed:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps({"source_id": source["source_id"], "signature": signature, "products": products, "checked_at": now_iso()}, ensure_ascii=False, separators=(",", ":")) + "\n")
-    return {"changed": changed, "signature": signature, "products": len(products), "path": str(destination)}
+        destination.write_text(json.dumps({
+            "source_id": catalog["source_id"], "signature": catalog["signature"],
+            "products": catalog["products_payload"], "checked_at": catalog["checked_at"],
+        }, ensure_ascii=False, separators=(",", ":")) + "\n")
+    return {
+        "changed": changed, "signature": catalog["signature"],
+        "products": catalog["products"], "path": str(destination),
+    }
 
 
 def _asset_periods(asset: dict) -> list[tuple[int, int]]:
@@ -239,7 +254,7 @@ def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool =
     if not os.getenv(HRL["client_id_environment"]) or not os.getenv(HRL["client_secret_environment"]):
         return {"infc": infc, "catalog": {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     token = _cdse_token(HRL)
-    catalog = _check_catalog(root, HRL, token)
+    catalog = _persist_catalog(root, _check_catalog(HRL, token))
     raster = None
     if os.getenv(HRL["processing_mode_environment"], "raster") == "raster":
         raster = _fetch_process_raster_slices(root, root / "canonical", token)
@@ -682,9 +697,6 @@ def _write_statistical_checkpoint(destination: Path, asset: dict, territory: dic
 
 
 def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path, force: bool) -> dict:
-    if destination.exists() and not force:
-        table = pd.read_parquet(destination)
-        return {"changed": False, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "mode": "statistical-api", "requests": 0}
     state = _catalog_state(root)
     if not state.exists():
         raise FileNotFoundError("CDSE catalog state missing. Run `stato-data fetch foreste` first.")
@@ -693,6 +705,11 @@ def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path,
     source_hash = metadata.get("signature")
     if not isinstance(source_hash, str) or len(source_hash) != 64:
         raise ValueError("Invalid CDSE catalog state signature")
+    if destination.exists() and not force:
+        table = pd.read_parquet(destination)
+        canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
+        if canonical_hashes == {source_hash}:
+            return {"changed": False, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "mode": "statistical-api", "requests": 0}
     reference_year = int(HRL["development_slice"]["territory_reference_year"])
     territories = _slice_territories(canonical_root, reference_year)
     records: list[dict] = []

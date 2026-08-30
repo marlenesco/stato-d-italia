@@ -95,6 +95,21 @@ def test_scope_state_carry_forward_data_geospatial_data() -> None:
     assert next(item for item in after_second_data["sources"] if item["source_id"] == "copernicus-forests")["sha256"] == "2" * 64
 
 
+def test_scope_all_replaces_state_and_drops_obsolete_entries() -> None:
+    old = {"schemaVersion": 1, "sources": [{
+        "source_id": "ispra-old", "asset_path": "ispra/old.xlsx", "resolved_url": "https://example/old",
+        "etag": None, "last_modified": None, "sha256": "1" * 64, "bytes": 1,
+        "dataset_version": None, "period": None, "checked_at": "2024-01-01T00:00:00Z",
+    }]}
+    current = {"schemaVersion": 1, "sources": [{
+        "source_id": "ispra-new", "asset_path": "ispra/new.xlsx", "resolved_url": "https://example/new",
+        "etag": None, "last_modified": None, "sha256": "2" * 64, "bytes": 2,
+        "dataset_version": None, "period": None, "checked_at": "2024-01-02T00:00:00Z",
+    }]}
+
+    assert merge_source_states(old, current, scope="all") == current
+
+
 def test_dynamic_landing_url_change_is_changed(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"schemaVersion": 1, "sources": [{
         "source_id": "ispra", "asset_path": "asset.xlsx", "resolved_url": "https://official.example/old.xlsx",
@@ -106,6 +121,54 @@ def test_dynamic_landing_url_change_is_changed(monkeypatch: pytest.MonkeyPatch) 
     result = check_persisted_sources(state, scope="data")
     assert result["changed"] is True
     assert result["sources"][0]["reason"] == "resolved_url_changed"
+
+
+def test_idrogeo_preflight_checks_composite_exports_not_api_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = {"schemaVersion": 1, "sources": [{
+        "source_id": "ispra-idrogeo-risk-2024",
+        "asset_path": "ispra-idrogeo-risk-2024/idrogeo-risk-api-responses.zip",
+        "resolved_url": "https://idrogeo.example/api/pir", "etag": None, "last_modified": None,
+        "sha256": "a" * 64, "bytes": 100, "dataset_version": None, "period": None,
+        "checked_at": "2024-01-01T00:00:00Z", "preflight_method": "idrogeo_exports_v1",
+        "source_signature": "b" * 64,
+    }]}
+    monkeypatch.setattr(
+        "stato_italia.dissesto.check_dissesto_source",
+        lambda expected: {"changed": expected != "b" * 64, "signature": "b" * 64, "exports": 4},
+    )
+    monkeypatch.setattr(
+        "stato_italia.source_state.requests.get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("generic GET must not run")),
+    )
+
+    result = check_persisted_sources(state, scope="data")
+
+    assert result["changed"] is False
+    assert result["sources"] == [{
+        "asset_path": "ispra-idrogeo-risk-2024/idrogeo-risk-api-responses.zip",
+        "status": "unchanged", "method": "idrogeo_exports_v1", "exports": 4,
+    }]
+
+
+def test_idrogeo_preflight_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = {"schemaVersion": 1, "sources": [{
+        "source_id": "ispra-idrogeo-risk-2024",
+        "asset_path": "ispra-idrogeo-risk-2024/idrogeo-risk-api-responses.zip",
+        "resolved_url": "https://idrogeo.example/api/pir", "etag": None, "last_modified": None,
+        "sha256": "a" * 64, "bytes": 100, "dataset_version": None, "period": None,
+        "checked_at": "2024-01-01T00:00:00Z", "preflight_method": "idrogeo_exports_v1",
+        "source_signature": "b" * 64,
+    }]}
+    monkeypatch.setattr(
+        "stato_italia.dissesto.check_dissesto_source",
+        lambda _expected: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    result = check_persisted_sources(state, scope="data")
+
+    assert result["changed"] is True
+    assert result["sourcesChanged"] == 1
+    assert result["sources"][0]["status"] == "unverifiable"
 
 
 def test_release_membership_excludes_old_raw_even_with_valid_sidecar(tmp_path: Path) -> None:

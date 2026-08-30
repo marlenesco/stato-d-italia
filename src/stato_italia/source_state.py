@@ -51,6 +51,8 @@ def _entry(metadata: dict[str, Any], raw_path: Path, raw_root: Path) -> dict[str
         "checked_at": metadata.get("checked_at") or metadata.get("acquired_at"),
         "landing_url": metadata.get("landing_url"),
         "download_link_filename_pattern": metadata.get("download_link_filename_pattern"),
+        "preflight_method": metadata.get("preflight_method"),
+        "source_signature": metadata.get("source_signature"),
     }
 
 
@@ -103,8 +105,7 @@ def merge_source_states(previous: dict[str, Any] | None, current_scope: dict[str
     if scope != "all" and any(source_scope(str(entry["source_id"])) != scope for entry in current["sources"]):
         raise ValueError(f"Source-state declaration contains an entry outside {scope} scope")
     if scope == "all":
-        current_paths = {entry["asset_path"] for entry in current["sources"]}
-        merged = [entry for entry in prior["sources"] if entry["asset_path"] not in current_paths]
+        merged = []
     else:
         merged = [entry for entry in prior["sources"] if source_scope(str(entry["source_id"])) != scope]
     merged.extend(current["sources"])
@@ -161,6 +162,18 @@ def source_scope(source_id: str) -> str:
     return "geospatial" if source_id.startswith("copernicus-") else "data"
 
 
+def scoped_source_state(state: dict[str, Any] | None, scope: str) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    state = _normalised_state(state)
+    if scope == "all":
+        return state
+    return {
+        "schemaVersion": SOURCE_STATE_SCHEMA_VERSION,
+        "sources": [entry for entry in state["sources"] if source_scope(str(entry["source_id"])) == scope],
+    }
+
+
 def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict[str, Any]:
     """GET-check active source state without relying on HEAD or local cache.
 
@@ -178,6 +191,26 @@ def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict
     details: list[dict[str, Any]] = []
     for entry in entries:
         if entry.get("kind") == "catalog":
+            continue
+        if entry.get("preflight_method") == "idrogeo_exports_v1" or (
+            entry.get("source_id") == "ispra-idrogeo-risk-2024"
+            and str(entry.get("asset_path", "")).endswith("/idrogeo-risk-api-responses.zip")
+        ):
+            try:
+                from .dissesto import check_dissesto_source
+
+                check = check_dissesto_source(entry.get("source_signature"))
+                is_changed = bool(check["changed"])
+                changed += int(is_changed)
+                unchanged += int(not is_changed)
+                details.append({
+                    "asset_path": entry["asset_path"],
+                    "status": "changed" if is_changed else "unchanged",
+                    "method": "idrogeo_exports_v1", "exports": check["exports"],
+                })
+            except Exception as exc:
+                changed += 1
+                details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": type(exc).__name__})
             continue
         url = entry.get("resolved_url")
         if entry.get("landing_url") and entry.get("download_link_filename_pattern"):

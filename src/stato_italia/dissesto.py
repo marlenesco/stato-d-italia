@@ -5,6 +5,7 @@ import os
 import tempfile
 import zipfile
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 
 import pandas as pd
@@ -39,6 +40,40 @@ def _get_json(url: str) -> bytes:
     if not isinstance(payload, (dict, list)):
         raise ValueError(f"IdroGEO returned unexpected JSON value: {url}")
     return response.content
+
+
+def _export_payloads() -> dict[str, bytes]:
+    """Read every real component of the composite IdroGEO raw asset."""
+    return {level: _get_json(f"{API_BASE_URL}/{endpoint}") for level, endpoint in EXPORTS.items()}
+
+
+def _exports_signature(responses: dict[str, bytes]) -> str:
+    """Hash canonical JSON payloads with level boundaries and stable ordering."""
+    digest = sha256()
+    if set(responses) != set(EXPORTS):
+        raise ValueError("Incomplete IdroGEO composite export set")
+    for level in EXPORTS:
+        try:
+            payload = json.loads(responses[level])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid IdroGEO {level} export JSON") from exc
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        digest.update(level.encode())
+        digest.update(b"\0")
+        digest.update(len(canonical).to_bytes(8, "big"))
+        digest.update(canonical)
+    return digest.hexdigest()
+
+
+def check_dissesto_source(expected_signature: str | None) -> dict:
+    """Read-only remote check for the four payloads composing the bundle."""
+    signature = _exports_signature(_export_payloads())
+    return {"changed": expected_signature != signature, "signature": signature, "exports": len(EXPORTS)}
+
+
+def _archive_exports_signature(archive: Path) -> str:
+    with zipfile.ZipFile(archive) as bundle:
+        return _exports_signature({level: bundle.read(_entry(level)) for level in EXPORTS})
 
 
 def _entry(level: str) -> str:
@@ -81,20 +116,29 @@ def fetch_dissesto(raw_root: Path) -> dict:
     os.close(file_descriptor)
     temporary = Path(temporary_name)
     try:
-        responses = {level: _get_json(url) for level, url in requests_to_fetch}
+        responses = _export_payloads()
+        source_signature = _exports_signature(responses)
         with zipfile.ZipFile(temporary, "w") as bundle:
             for level, _url in requests_to_fetch:
                 _write_entry(bundle, _entry(level), responses[level])
         checksum = sha256_file(temporary)
         prior = json.loads(metadata_path.read_text()) if archive.exists() and metadata_path.exists() else None
-        unchanged = bool(prior and prior.get("sha256") == checksum)
-        temporary.replace(archive)
+        prior_signature = prior.get("source_signature") if prior else None
+        if prior_signature is None and archive.exists():
+            prior_signature = _archive_exports_signature(archive)
+        unchanged = prior_signature == source_signature
+        if unchanged:
+            temporary.unlink()
+            checksum = sha256_file(archive)
+        else:
+            temporary.replace(archive)
         metadata = {
             "source_id": SOURCE_ID, "acquired_at": now_iso(), "acquisition_mode": "official_public_api",
             "requested_url": API_BASE_URL, "resolved_url": API_BASE_URL, "filename": archive.name,
             "bytes": archive.stat().st_size, "sha256": checksum, "content_type": "application/zip",
             "etag": None, "last_modified": None, "response_count": len(requests_to_fetch),
             "exports_by_level": {level: 1 for level in EXPORTS},
+            "preflight_method": "idrogeo_exports_v1", "source_signature": source_signature,
             "unchanged": unchanged,
         }
         json_dump(metadata_path, metadata)
