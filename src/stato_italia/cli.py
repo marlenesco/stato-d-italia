@@ -20,7 +20,7 @@ from .forests_delivery import generate_forests_delivery
 from .dissesto import fetch_dissesto, ingest_dissesto
 from .dissesto_delivery import generate_dissesto_delivery
 from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, artifact_scope, carry_forward_active_artifacts, hydrate_active_artifact, publish_release, rollback
-from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, merge_source_states, scoped_source_state, source_state_changed, source_state_counts
+from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, merge_source_states, scoped_source_state, source_state_changed, source_state_counts, source_state_entry
 from .soil import ingest_soil
 from .territories import SOURCE_YEARS, ingest_boundaries
 from .water import ingest_water
@@ -105,6 +105,44 @@ def _hydrate(store: LocalObjectStore | R2ObjectStore, root: Path, logical_paths:
         hydrate_active_artifact(store, logical_path, root / logical_path)
 
 
+def _active_source_state_with_legacy_bootstrap(store: LocalObjectStore | R2ObjectStore) -> dict | None:
+    """Migrate one legacy active release by reading its immutable raw provenance."""
+    persisted = active_source_state(store, SOURCE_STATE_LOGICAL_PATH)
+    if persisted is not None:
+        return persisted
+    release = active_release(store)
+    if release is None:
+        return None
+    objects = {str(item["logicalPath"]): item for item in release.get("objects", [])}
+    entries = []
+    for logical_path, item in sorted(objects.items()):
+        if not logical_path.startswith("raw/") or not logical_path.endswith(".metadata.json"):
+            continue
+        raw_logical = logical_path.removesuffix(".metadata.json")
+        if raw_logical not in objects:
+            raise ValueError(f"Legacy active release metadata lacks raw artifact: {raw_logical}")
+        metadata = store.read_json(str(item["key"]))
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("source_id"), str):
+            raise ValueError(f"Invalid legacy active raw metadata: {logical_path}")
+        entries.append(source_state_entry(metadata, raw_logical.removeprefix("raw/")))
+    for logical_path, item in sorted(objects.items()):
+        if not logical_path.startswith("raw/copernicus-") or not logical_path.endswith("/catalog.json"):
+            continue
+        payload = store.read_json(str(item["key"]))
+        if not isinstance(payload.get("source_id"), str) or not isinstance(payload.get("signature"), str):
+            raise ValueError(f"Invalid legacy Copernicus catalog: {logical_path}")
+        entries.append({
+            "source_id": payload["source_id"], "asset_path": logical_path.removeprefix("raw/"),
+            "resolved_url": None, "etag": None, "last_modified": None,
+            "sha256": payload["signature"], "bytes": int(item["bytes"]),
+            "dataset_version": None, "period": None, "checked_at": payload.get("checked_at"), "kind": "catalog",
+        })
+    if not entries:
+        return None
+    entries.sort(key=lambda entry: entry["asset_path"])
+    return {"schemaVersion": 1, "sources": entries}
+
+
 def _catalog_changed_from_active(previous_state: dict | None, forest_fetch: dict) -> bool:
     signature = forest_fetch.get("catalog", {}).get("signature")
     if not isinstance(signature, str):
@@ -114,6 +152,30 @@ def _catalog_changed_from_active(previous_state: dict | None, forest_fetch: dict
         if entry.get("kind") == "catalog" and entry.get("source_id", entry.get("sourceId")) == "copernicus-hrl-forests"
     ), None)
     return previous is None or previous.get("sha256") != signature
+
+
+def _validate_data_canonical_provenance(root: Path, source_state: dict, logical_paths: set[str]) -> None:
+    provenance_contracts = (
+        ("canonical/soil/dataset_version=2025-2024-observations/observations.parquet", "ispra-soil-2025", None),
+        ("canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet", "ispra-bigbang-10", None),
+        ("canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet", "ispra-idrogeo-risk-2024", "idrogeo-risk-api-responses.zip"),
+        ("canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet", "ispra-emissions-provincial-2026", None),
+        ("canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-ghg-2026", None),
+        ("canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-nfr-2026", None),
+        ("canonical/forests/dataset_version=infc2015-published-tables/observations.parquet", "infc-2015-forests", None),
+    )
+    for logical_path, source_id, asset_name in provenance_contracts:
+        if logical_path not in logical_paths:
+            raise ValueError(f"Data release lacks canonical artifact: {logical_path}")
+        expected_hashes = {
+            str(entry["sha256"]) for entry in source_state["sources"]
+            if entry.get("source_id") == source_id
+            and (asset_name is None or str(entry.get("asset_path", "")).endswith(f"/{asset_name}"))
+        }
+        table = pd.read_parquet(root / logical_path, columns=["source_asset_sha256"])
+        canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
+        if not expected_hashes or canonical_hashes != expected_hashes:
+            raise ValueError(f"Source-state and canonical provenance differ: {logical_path}")
 
 
 def _validate_release_coherence(
@@ -136,28 +198,7 @@ def _validate_release_coherence(
     missing_shared = required_shared - logical_paths
     if missing_shared:
         raise ValueError(f"Release lacks shared territory canonical artifacts: {sorted(missing_shared)}")
-    if scope in {"data", "all"}:
-        provenance_contracts = (
-            ("canonical/soil/dataset_version=2025-2024-observations/observations.parquet", "ispra-soil-2025", None),
-            ("canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet", "ispra-bigbang-10", None),
-            ("canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet", "ispra-idrogeo-risk-2024", "idrogeo-risk-api-responses.zip"),
-            ("canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet", "ispra-emissions-provincial-2026", None),
-            ("canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-ghg-2026", None),
-            ("canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-nfr-2026", None),
-            ("canonical/forests/dataset_version=infc2015-published-tables/observations.parquet", "infc-2015-forests", None),
-        )
-        for logical_path, source_id, asset_name in provenance_contracts:
-            if logical_path not in logical_paths:
-                raise ValueError(f"Data release lacks canonical artifact: {logical_path}")
-            expected_hashes = {
-                str(entry["sha256"]) for entry in source_state["sources"]
-                if entry.get("source_id") == source_id
-                and (asset_name is None or str(entry.get("asset_path", "")).endswith(f"/{asset_name}"))
-            }
-            table = pd.read_parquet(root / logical_path, columns=["source_asset_sha256"])
-            canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
-            if not expected_hashes or canonical_hashes != expected_hashes:
-                raise ValueError(f"Source-state and canonical provenance differ: {logical_path}")
+    _validate_data_canonical_provenance(root, source_state, logical_paths)
     if scope == "data":
         return
     catalog = next((entry for entry in source_state["sources"] if entry.get("kind") == "catalog"), None)
@@ -213,6 +254,8 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
         "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
         "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
+        "canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet",
+        "canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet",
     ]
     _hydrate(store, root, [str(path.relative_to(root)) if isinstance(path, Path) else path for path in required])
     forest_fetch = fetch_forests(root, offline=args.offline, include_infc=False)
@@ -274,7 +317,7 @@ def run(args: argparse.Namespace) -> int:
     delivery = root / "delivery"
     release_id = args.release_id or _release_id()
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
-    previous_source_state = active_source_state(store, SOURCE_STATE_LOGICAL_PATH)
+    previous_source_state = _active_source_state_with_legacy_bootstrap(store)
     if args.scope == "geospatial":
         return _run_geospatial(
             args, root=root, output=output, canonical=canonical, delivery=delivery, store=store,
@@ -566,7 +609,7 @@ def main() -> int:
         return 0
     if args.command == "check-sources":
         store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(Path(args.output) / "object-store")
-        persisted = active_source_state(store, SOURCE_STATE_LOGICAL_PATH)
+        persisted = _active_source_state_with_legacy_bootstrap(store)
         result = check_persisted_sources(persisted, scope=args.scope)
         if args.scope == "geospatial":
             from .forests import HRL, _cdse_token, _check_catalog

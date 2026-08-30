@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 import stato_italia.cli as cli
-from stato_italia.cli import _publish_scoped, _run_geospatial, _validate_release_coherence
+from stato_italia.cli import _active_source_state_with_legacy_bootstrap, _publish_scoped, _run_geospatial, _validate_release_coherence
 from stato_italia.release import LocalObjectStore, ReleaseArtifact, publish_release
 
 
@@ -28,6 +28,27 @@ def _raw(root: Path, logical_path: str) -> tuple[Path, Path]:
     sidecar = Path(f"{raw}.metadata.json")
     sidecar.write_text(json.dumps({"source_id": "test", "sha256": "a" * 64, "bytes": 8}))
     return raw, sidecar
+
+
+def test_legacy_active_release_bootstraps_source_state_from_raw_sidecars(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    raw = tmp_path / "source.xlsx"
+    raw.write_bytes(b"official")
+    sidecar = tmp_path / "source.xlsx.metadata.json"
+    sidecar.write_text(json.dumps({
+        "source_id": "ispra-source", "resolved_url": "https://official.example/source.xlsx",
+        "sha256": "a" * 64, "bytes": 8, "acquired_at": "2026-08-30T00:00:00Z",
+    }))
+    publish_release(store, "legacy", [
+        ReleaseArtifact(raw, "raw/ispra-source/source.xlsx"),
+        ReleaseArtifact(sidecar, "raw/ispra-source/source.xlsx.metadata.json"),
+    ])
+
+    state = _active_source_state_with_legacy_bootstrap(store)
+
+    assert state is not None
+    assert state["sources"][0]["asset_path"] == "ispra-source/source.xlsx"
+    assert state["sources"][0]["sha256"] == "a" * 64
 
 
 def test_scoped_noops_and_data_geospatial_data_preserve_other_scope(
@@ -111,6 +132,7 @@ def test_copernicus_release_coherence_rejects_new_state_with_old_canonical(
         _entry("copernicus-hrl-forests", "copernicus-hrl-forests/catalog.json", "2" * 64, kind="catalog"),
     ]}
     monkeypatch.setattr(cli, "_territory_paths", lambda _canonical: [])
+    monkeypatch.setattr(cli, "_validate_data_canonical_provenance", lambda *_args: None)
     monkeypatch.setenv("FOREST_PROCESSING_MODE", "statistical-api")
 
     with pytest.raises(ValueError, match="signatures differ"):
