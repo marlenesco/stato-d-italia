@@ -8,7 +8,7 @@ from shapely.geometry import Polygon
 
 from stato_italia.cli import load_local_env
 import stato_italia.forests as forests
-from stato_italia.forests import CORINE, HRL, _check_catalog, _persist_catalog, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _write_statistical_checkpoint
+from stato_italia.forests import CORINE, HRL, _asset_periods, _check_catalog, _persist_catalog, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _write_statistical_checkpoint
 
 
 def test_corine_and_hrl_keep_separate_forest_cover_metrics() -> None:
@@ -61,6 +61,16 @@ def test_process_payload_preserves_source_band_and_explicit_nodata() -> None:
     assert payload["output"]["responses"][0]["format"]["type"] == "image/tiff"
     assert asset["band"] in payload["evalscript"]
     assert str(asset["process_no_data"]) in payload["evalscript"]
+
+
+def test_raster_development_slice_has_bounded_process_api_requests() -> None:
+    # Four configured regions produce four 2048px tiles per period at 100 m.
+    # 3 TCD + 2 FTY + 1 TCPC periods => 96 Process API requests, versus one
+    # Statistical API request per territory and period.
+    requests = 0
+    for asset in (item for item in HRL["assets"] if item.get("statistical_api_enabled", True)):
+        requests += len(_asset_periods(asset)) * 4 * 4
+    assert requests == 96
 
 
 def test_local_env_is_optional_and_never_overrides_shell_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
