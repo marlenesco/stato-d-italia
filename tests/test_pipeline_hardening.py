@@ -21,7 +21,7 @@ def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
     assert "if: ${{ !inputs.bootstrap_all }}" in geospatial_workflow
     assert "--scope ${{ inputs.bootstrap_all && 'all' || 'geospatial' }}" in geospatial_workflow
     assert "timeout-minutes: 360" in geospatial_workflow
-    assert "FOREST_STATISTICAL_API_WORKERS: '6'" in geospatial_workflow
+    assert "FOREST_PROCESSING_MODE: raster" in geospatial_workflow
 
 
 def _entry(source_id: str, asset_path: str, checksum: str, *, kind: str | None = None) -> dict:

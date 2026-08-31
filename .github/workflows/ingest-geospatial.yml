@@ -34,8 +34,7 @@ jobs:
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
       CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
-      FOREST_PROCESSING_MODE: statistical-api
-      FOREST_STATISTICAL_API_WORKERS: '6'
+      FOREST_PROCESSING_MODE: raster
     steps:
       - uses: actions/checkout@v7
       - name: Validate R2 and CDSE configuration
