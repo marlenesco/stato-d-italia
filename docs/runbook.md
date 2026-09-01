@@ -99,6 +99,30 @@ zonali. Il preflight IdroGEO confronta invece una signature deterministica dei
 quattro export reali (`country`, `regions`, `provinces`, `municipalities`), non
 la risposta dell'URL base dell'API.
 
+Le sole richieste HTTPS verso `www.inventarioforestale.org`, eseguite da GitHub
+Actions, possono usare un fallback proxy italiano. Il trasporto prova prima la
+connessione diretta, poi i proxy configurati in `INFC_HTTPS_PROXIES` nell'ordine
+dichiarato. Ogni candidato deve completare una richiesta reale a INFC con
+verifica TLS attiva; errori, certificati non validi e risposte di blocco fanno
+passare al candidato successivo. Nessun altro host usa questi proxy. Fuori da
+GitHub Actions il fallback è disabilitato anche se la variabile viene impostata:
+le esecuzioni locali restano dirette.
+
+Configurare `INFC_HTTPS_PROXIES` come repository secret multilinea, una URL per
+riga. È accettata anche la virgola come separatore; l'ordine viene preservato.
+Per un proxy HTTP che supporta CONNECT verso destinazioni HTTPS usare
+`http://IP:PORT`, non `https://`, salvo che il proxy stesso esponga TLS:
+
+```text
+http://proxy-principale.example:3128
+http://proxy-fallback.example:8080
+```
+
+Gli indirizzi e le credenziali di eventuali proxy devono vivere solo nel secret.
+Non impostare `HTTP_PROXY` o `HTTPS_PROXY` globali: instraderebbero anche R2,
+CDSE e le altre fonti. Il proxy resta trasporto non autorevole; TLS, SHA-256,
+contratti raw e provenance restano invariati.
+
 L'hydration confronta sempre lo SHA-256 locale con quello referenziato dalla
 release attiva. Un file di cache con SHA diverso viene riscaricato e verificato
 prima della sostituzione atomica: la cache non è mai fonte di verità.
