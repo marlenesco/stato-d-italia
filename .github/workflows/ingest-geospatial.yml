@@ -70,4 +70,5 @@ jobs:
         run: >-
           uv run stato-data run --publish r2
           --scope ${{ inputs.bootstrap_all && 'all' || 'geospatial' }}
+          ${{ !inputs.bootstrap_all && '--plan reports/geospatial-source-check.json' || '' }}
           ${{ inputs.force && '--force' || '' }}
