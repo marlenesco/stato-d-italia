@@ -154,6 +154,21 @@ def _catalog_changed_from_active(previous_state: dict | None, forest_fetch: dict
     return previous is None or previous.get("sha256") != signature
 
 
+def _active_infc_logical_paths(previous_state: dict | None) -> list[str]:
+    """Resolve reusable INFC raw objects without changing their source identity."""
+    logical_paths: list[str] = []
+    for entry in (previous_state or {}).get("sources", []):
+        source_id = entry.get("source_id", entry.get("sourceId"))
+        if source_id != "infc-2015-forests":
+            continue
+        asset_path = entry.get("asset_path", entry.get("assetPath"))
+        if not isinstance(asset_path, str):
+            raise ValueError("Persisted INFC source-state lacks asset path")
+        raw_path = f"raw/{asset_path}"
+        logical_paths.extend((raw_path, f"{raw_path}.metadata.json"))
+    return logical_paths
+
+
 def _validate_data_canonical_provenance(root: Path, source_state: dict, logical_paths: set[str]) -> None:
     provenance_contracts = (
         ("canonical/soil/dataset_version=2025-2024-observations/observations.parquet", "ispra-soil-2025", None),
@@ -162,7 +177,6 @@ def _validate_data_canonical_provenance(root: Path, source_state: dict, logical_
         ("canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet", "ispra-emissions-provincial-2026", None),
         ("canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-ghg-2026", None),
         ("canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-nfr-2026", None),
-        ("canonical/forests/dataset_version=infc2015-published-tables/observations.parquet", "infc-2015-forests", None),
     )
     for logical_path, source_id, asset_name in provenance_contracts:
         if logical_path not in logical_paths:
@@ -176,6 +190,21 @@ def _validate_data_canonical_provenance(root: Path, source_state: dict, logical_
         canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
         if not expected_hashes or canonical_hashes != expected_hashes:
             raise ValueError(f"Source-state and canonical provenance differ: {logical_path}")
+
+
+def _validate_infc_canonical_provenance(root: Path, source_state: dict, logical_paths: set[str]) -> None:
+    logical_path = "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"
+    if logical_path not in logical_paths:
+        raise ValueError(f"Geospatial release lacks INFC canonical artifact: {logical_path}")
+    expected_hashes = {
+        str(entry["sha256"])
+        for entry in source_state["sources"]
+        if entry.get("source_id", entry.get("sourceId")) == "infc-2015-forests"
+    }
+    table = pd.read_parquet(root / logical_path, columns=["source_asset_sha256"])
+    canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
+    if not expected_hashes or canonical_hashes != expected_hashes:
+        raise ValueError(f"Source-state and canonical provenance differ: {logical_path}")
 
 
 def _validate_release_coherence(
@@ -201,6 +230,7 @@ def _validate_release_coherence(
     _validate_data_canonical_provenance(root, source_state, logical_paths)
     if scope == "data":
         return
+    _validate_infc_canonical_provenance(root, source_state, logical_paths)
     catalog = next((entry for entry in source_state["sources"] if entry.get("kind") == "catalog"), None)
     if catalog is None:
         raise ValueError("Geospatial release lacks Copernicus catalog source-state")
@@ -256,9 +286,11 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
         "canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet",
         "canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet",
+        *_active_infc_logical_paths(previous_state),
     ]
     _hydrate(store, root, [str(path.relative_to(root)) if isinstance(path, Path) else path for path in required])
-    forest_fetch = fetch_forests(root, offline=args.offline, include_infc=False)
+    forest_fetch = fetch_forests(root, offline=args.offline, include_infc=True)
+    infc = ingest_infc_forests(root, canonical, force=args.force)
     catalog_changed = _catalog_changed_from_active(previous_state, forest_fetch)
     zonal = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=os.getenv("FOREST_PROCESSING_MODE", "raster"))
     forests_pmtiles: dict[str, dict] = {}
@@ -277,7 +309,7 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
         canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet", canonical, delivery, release_id,
         {level: Path(info["path"]) for level, info in forests_pmtiles.items()},
-        force=args.force or zonal["changed"] or any(not item.get("skipped", False) for item in forests_pmtiles.values()),
+        force=args.force or infc["changed"] or zonal["changed"] or any(not item.get("skipped", False) for item in forests_pmtiles.values()),
     )
     insights = generate_territory_insights_delivery(
         canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
@@ -291,6 +323,7 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
     current_state = build_source_state_from_metadata_paths(root / "raw", metadata_paths, include_catalog=Path(forest_fetch["catalog"]["path"]) if forest_fetch.get("catalog", {}).get("path") else None)
     declared = [
         *_territory_paths(canonical),
+        canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
         canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
         *[Path(item["path"]) for item in forests_pmtiles.values()],
         *forest_delivery.get("files", []), *insights.get("files", []),
@@ -299,12 +332,50 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
     ]
     manifest, metrics, publication = _publish_scoped(
         store=store, root=root, output=output, release_id=release_id, scope="geospatial", previous_state=previous_state,
-        current_state=current_state, declared_paths=declared, changed=zonal["changed"] or forest_delivery["changed"] or insights["changed"],
+        current_state=current_state, declared_paths=declared,
+        changed=infc["changed"] or zonal["changed"] or forest_delivery["changed"] or insights["changed"],
     )
-    report = {"run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop", "changed": publication["changed"], "scope": "geospatial", "forests": {"fetch": forest_fetch, "zonal": zonal}, "operationalMetrics": metrics | {"canonicalBytesGenerated": zonal.get("canonical_bytes", 0) if zonal["changed"] else 0, "derivedBytesGenerated": 0, "deliveryBytesGenerated": sum(item.get("bytes", 0) for item in (forest_delivery, insights) if item.get("changed")), "pipelineDurationSeconds": round(time.monotonic() - started, 3)}, "manifest": manifest, "carriedArtifacts": publication["carried"], "startedAt": started_at, "completedAt": now_iso()}
+    report = {"run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop", "changed": publication["changed"], "scope": "geospatial", "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal}, "operationalMetrics": metrics | {"canonicalBytesGenerated": sum(item.get("canonical_bytes", 0) for item in (infc, zonal) if item["changed"]), "derivedBytesGenerated": 0, "deliveryBytesGenerated": sum(item.get("bytes", 0) for item in (forest_delivery, insights) if item.get("changed")), "pipelineDurationSeconds": round(time.monotonic() - started, 3)}, "manifest": manifest, "carriedArtifacts": publication["carried"], "startedAt": started_at, "completedAt": now_iso()}
     json_dump(Path(args.report), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
+
+
+def _data_scope_forests(canonical: Path) -> dict:
+    """Expose carried Copernicus canonical as a read-only shared-delivery input."""
+    zonal_path = canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
+    if not zonal_path.exists():
+        raise RuntimeError("Data scope requires active geospatial forest canonical; run ingest-geospatial first")
+    return {
+        "fetch": {"status": "out_of_scope", "scope": "geospatial"},
+        "zonal": {"changed": False, "canonical_bytes": zonal_path.stat().st_size, "mode": "carried_forward"},
+    }
+
+
+def _run_combined_scope_forests(
+    args: argparse.Namespace, root: Path, canonical: Path, previous_source_state: dict | None,
+) -> dict:
+    """Run Forest only when the combined pipeline owns the geospatial scope."""
+    if args.scope == "data":
+        return _data_scope_forests(canonical)
+    forest_fetch = fetch_forests(root, offline=args.offline)
+    forests: dict = {"fetch": forest_fetch}
+    infc_raw = root / "raw" / "infc-2015-forests" / "volume.zip"
+    if not infc_raw.exists():
+        return forests
+    forests["infc"] = ingest_infc_forests(root, canonical, force=args.force)
+    mode = os.getenv("FOREST_PROCESSING_MODE", "raster")
+    zonal_raw = any(
+        path
+        for source in ("copernicus-hrl-forests", "copernicus-corine-forests")
+        for path in (root / "raw" / source).glob("**/*.tif")
+    )
+    catalog_changed = _catalog_changed_from_active(previous_source_state, forest_fetch)
+    if mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
+        forests["zonal"] = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=mode)
+    elif zonal_raw:
+        forests["zonal"] = ingest_forests(root, canonical, force=args.force, mode="raster")
+    return forests
 
 
 def run(args: argparse.Namespace) -> int:
@@ -343,23 +414,8 @@ def run(args: argparse.Namespace) -> int:
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
         force=args.force or soil["changed"],
     )
-    forest_fetch = fetch_forests(root, offline=args.offline, check_geospatial=args.scope != "data")
-    forests: dict = {"fetch": forest_fetch}
-    infc_raw = root / "raw" / "infc-2015-forests" / "volume.zip"
-    if infc_raw.exists():
-        forests["infc"] = ingest_infc_forests(root, canonical, force=args.force)
-        mode = os.getenv("FOREST_PROCESSING_MODE", "raster")
-        zonal_raw = any(path for source in ("copernicus-hrl-forests", "copernicus-corine-forests") for path in (root / "raw" / source).glob("**/*.tif"))
-        catalog_changed = _catalog_changed_from_active(previous_source_state, forest_fetch)
-        if args.scope == "data":
-            zonal_path = canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
-            if not zonal_path.exists():
-                raise RuntimeError("Data scope requires cached geospatial forest canonical; run ingest-geospatial first")
-            forests["zonal"] = {"changed": False, "canonical_bytes": zonal_path.stat().st_size, "mode": "carried_forward"}
-        elif mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
-            forests["zonal"] = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=mode)
-        elif zonal_raw:
-            forests["zonal"] = ingest_forests(root, canonical, force=args.force, mode="raster")
+    forests = _run_combined_scope_forests(args, root, canonical, previous_source_state)
+    forest_fetch = forests["fetch"]
     changed = boundaries["changed"] or soil["changed"] or water["changed"] or emissions["changed"] or dissesto["changed"] or bool(dissesto_fetch and dissesto_fetch["changed"]) or analytics["changed"] or bool(forests.get("infc", {}).get("changed")) or bool(forests.get("zonal", {}).get("changed"))
     pmtiles: dict[str, dict] = {}
     for level in ("municipality", "province", "region"):
@@ -478,10 +534,12 @@ def run(args: argparse.Namespace) -> int:
         canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
         canonical / "emissions" / "national" / "greenhouse-gases" / "dataset_version=2026-1990-2024" / "observations.parquet",
         canonical / "emissions" / "national" / "air-pollutants-nfr" / "dataset_version=2026-1990-2024" / "observations.parquet",
-        canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
     ]
     if args.scope == "all":
-        canonical_declarations.append(canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet")
+        canonical_declarations.extend((
+            canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
+            canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
+        ))
     declared_paths = [
         *raw_declarations, *canonical_declarations,
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",

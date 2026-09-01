@@ -53,6 +53,7 @@ jobs:
         uses: actions/cache@v6.1.0
         with:
           path: |
+            data/raw/infc-2015-forests
             data/raw/copernicus-hrl-forests/catalog.json
             data/canonical/forests
             data/delivery/foreste
