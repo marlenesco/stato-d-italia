@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from .download import resolve_download_url
+from .infc_transport import get_with_infc_fallback
 
 SOURCE_STATE_LOGICAL_PATH = "metadata/source-state.json"
 SOURCE_STATE_SCHEMA_VERSION = 1
@@ -242,16 +243,25 @@ def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict
         if entry.get("last_modified"):
             headers["If-Modified-Since"] = str(entry["last_modified"])
         try:
-            with requests.get(str(url), stream=True, timeout=(15, 180), headers=headers) as response:
+            response, transport = get_with_infc_fallback(
+                requests.get, str(url), stream=True, timeout=(15, 180), headers=headers,
+            )
+            with response:
                 if response.status_code == 304:
                     unchanged += 1
-                    details.append({"asset_path": entry["asset_path"], "status": "unchanged", "method": "conditional_get"})
+                    details.append({
+                        "asset_path": entry["asset_path"], "status": "unchanged",
+                        "method": "conditional_get", "transport": transport,
+                    })
                     continue
                 response.raise_for_status()
                 response_etag = response.headers.get("ETag")
                 if response_etag and response_etag == entry.get("etag"):
                     unchanged += 1
-                    details.append({"asset_path": entry["asset_path"], "status": "unchanged", "method": "get_etag"})
+                    details.append({
+                        "asset_path": entry["asset_path"], "status": "unchanged",
+                        "method": "get_etag", "transport": transport,
+                    })
                     continue
                 digest = sha256()
                 total = 0
@@ -262,10 +272,16 @@ def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict
                 same = digest.hexdigest() == entry["sha256"] and total == int(entry["bytes"])
                 if same:
                     unchanged += 1
-                    details.append({"asset_path": entry["asset_path"], "status": "unchanged", "method": "get_sha256"})
+                    details.append({
+                        "asset_path": entry["asset_path"], "status": "unchanged",
+                        "method": "get_sha256", "transport": transport,
+                    })
                 else:
                     changed += 1
-                    details.append({"asset_path": entry["asset_path"], "status": "changed", "method": "get_sha256"})
+                    details.append({
+                        "asset_path": entry["asset_path"], "status": "changed",
+                        "method": "get_sha256", "transport": transport,
+                    })
         except requests.RequestException as exc:
             changed += 1
             details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": type(exc).__name__})

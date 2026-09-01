@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+import requests
 
 from stato_italia.source_state import (
     build_source_state,
@@ -74,6 +75,47 @@ def test_persisted_state_uses_conditional_get_not_head(monkeypatch: pytest.Monke
     result = check_persisted_sources(state, scope="data")
     assert result["changed"] is False
     assert calls[0]["headers"]["If-None-Match"] == '"v1"'
+
+
+def test_infc_preflight_falls_back_to_proxy_and_keeps_tls_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    url = "https://www.inventarioforestale.org/asset.zip"
+    state = {"schemaVersion": 1, "sources": [{
+        "source_id": "infc-2015-forests", "asset_path": "infc-2015-forests/asset.zip",
+        "resolved_url": url, "etag": '"v1"', "last_modified": None,
+        "sha256": "a" * 64, "bytes": 1, "dataset_version": None, "period": None,
+        "checked_at": "2024-01-01T00:00:00Z",
+    }]}
+
+    class Response:
+        status_code = 304
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    calls: list[dict] = []
+
+    def get(_url: str, **kwargs: object) -> Response:
+        calls.append(kwargs)
+        if "proxies" not in kwargs:
+            raise requests.exceptions.ConnectTimeout("direct unavailable")
+        return Response()
+
+    import stato_italia.infc_transport as transport
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("INFC_HTTPS_PROXIES", "http://proxy.example:3128")
+    monkeypatch.setattr("stato_italia.source_state.requests.get", get)
+
+    result = check_persisted_sources(state, scope="data")
+
+    assert result["changed"] is False
+    assert result["sources"][0]["transport"] == "proxy"
+    assert calls[0]["verify"] is True
+    assert calls[1]["verify"] is True
+    assert calls[1]["proxies"] == {"https": "http://proxy.example:3128"}
 
 
 def test_scope_state_carry_forward_data_geospatial_data() -> None:

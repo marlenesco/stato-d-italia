@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from .common import json_dump, now_iso, sha256_file
+from .infc_transport import InfcTransportError, infc_proxy_candidates, is_infc_url, is_retryable_infc_status
 
 
 class _LinkCollector(HTMLParser):
@@ -124,14 +125,27 @@ def download(
     if conditional_prior and conditional_prior.get("last_modified"):
         headers["If-Modified-Since"] = conditional_prior["last_modified"]
     transport_errors = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError)
-    for attempt in range(4):
+    last_error: requests.RequestException | None = None
+    direct_error: requests.RequestException | None = None
+    routes: list[tuple[str, str | None]] = [("direct", None)] * 4
+    route_index = 0
+    while route_index < len(routes):
+        transport, proxy = routes[route_index]
+        route_index += 1
+        request_kwargs = {"stream": True, "timeout": (15, 180), "headers": headers, "verify": True}
+        if proxy:
+            request_kwargs["proxies"] = {"https": proxy}
         try:
-            with requests.get(url, stream=True, timeout=(15, 180), headers=headers) as response:
+            with requests.get(url, **request_kwargs) as response:
+                if is_retryable_infc_status(url, response.status_code):
+                    raise requests.ConnectionError(f"INFC route returned HTTP {response.status_code}")
                 if response.status_code == 304:
                     if conditional_prior is None:
                         raise ValueError(f"Unexpected 304 without a matching prior URL: {url}")
                     conditional_prior["checked_at"] = now_iso()
                     conditional_prior["unchanged"] = True
+                    if is_infc_url(url):
+                        conditional_prior["transport"] = transport
                     conditional_prior.update(source_context or {})
                     json_dump(metadata_path, conditional_prior)
                     return conditional_prior | {"local_path": str(destination), "metadata_path": str(metadata_path)}
@@ -141,11 +155,25 @@ def download(
                 response_headers = {key.lower(): value for key, value in response.headers.items()}
                 resolved_url = str(response.url)
             break
-        except transport_errors:
+        except transport_errors as exc:
             temporary.unlink(missing_ok=True)
-            if attempt == 3:
-                raise
-            sleep(2 ** attempt)
+            last_error = exc
+            if transport == "direct":
+                direct_error = exc
+            if transport == "direct" and route_index < 4:
+                sleep(2 ** (route_index - 1))
+            if route_index == 4 and is_infc_url(url):
+                routes.extend(("proxy", proxy_url) for proxy_url in infc_proxy_candidates(url))
+    else:
+        if is_infc_url(url):
+            proxy_count = sum(proxy is not None for _, proxy in routes)
+            error = InfcTransportError(
+                f"INFC direct route and {proxy_count} TLS-verified proxy routes failed; "
+                f"direct={type(direct_error).__name__ if direct_error else 'unknown'}"
+            )
+            raise error from None
+        assert last_error is not None
+        raise last_error
     temporary.replace(destination)
     checksum = sha256_file(destination)
     metadata = {
@@ -161,6 +189,8 @@ def download(
         "last_modified": response_headers.get("last-modified"),
         "unchanged": bool(prior and prior.get("sha256") == checksum),
     } | (source_context or {})
+    if is_infc_url(url):
+        metadata["transport"] = transport
     json_dump(metadata_path, metadata)
     return metadata | {"local_path": str(destination), "metadata_path": str(metadata_path)}
 
