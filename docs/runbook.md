@@ -86,8 +86,9 @@ uv run stato-data check-sources --scope geospatial --publish r2
 ```
 
 Il controllo usa `GET` condizionale quando possibile, mai solo `HEAD`. I due
-workflow sono `ingest-data.yml` (tabellari/delivery) e
-`ingest-geospatial.yml` (catalogo Copernicus, raster e zonal statistics).
+workflow sono `ingest-data.yml` (domini tabellari non forestali e delivery) e
+`ingest-geospatial.yml` (intero dominio Foreste: INFC, catalogo Copernicus,
+raster, canonical, PMTiles, zonal statistics e delivery).
 Cache Actions accelera ma non decide se fonte è nuova. Uno scope recupera gli
 input fuori scope dalla release attiva e li carry-forward per riferimento
 immutabile: release resta completa anche su runner pulito.
@@ -99,11 +100,11 @@ zonali. Il preflight IdroGEO confronta invece una signature deterministica dei
 quattro export reali (`country`, `regions`, `provinces`, `municipalities`), non
 la risposta dell'URL base dell'API.
 
-Le sole richieste HTTPS verso `www.inventarioforestale.org`, eseguite da GitHub
-Actions, possono usare un fallback proxy italiano. Il trasporto prova prima la
-connessione diretta, poi i proxy configurati in `INFC_HTTPS_PROXIES` nell'ordine
-dichiarato. Ogni candidato deve completare una richiesta reale a INFC con
-verifica TLS attiva; errori, certificati non validi e risposte di blocco fanno
+Le sole richieste HTTPS verso `www.inventarioforestale.org`, eseguite dal
+workflow geospatial su GitHub Actions, possono usare un fallback proxy italiano.
+Il trasporto prova prima la connessione diretta, poi i proxy configurati in
+`INFC_HTTPS_PROXIES` nell'ordine dichiarato. Ogni candidato deve completare una
+richiesta reale a INFC con verifica TLS attiva; errori, certificati non validi e risposte di blocco fanno
 passare al candidato successivo. Nessun altro host usa questi proxy. Fuori da
 GitHub Actions il fallback è disabilitato anche se la variabile viene impostata:
 le esecuzioni locali restano dirette.
@@ -178,6 +179,13 @@ artifact geospatial; `geospatial` porta avanti soltanto gli artifact data;
 territori e delivery `territory-insights`, devono essere dichiarati o rigenerati
 dal run corrente e non sopravvivono implicitamente. `all` sostituisce inoltre
 l'intero source state: entry e raw obsoleti non restano nella nuova release.
+
+Foreste non è diviso tra scope: `infc-2015-forests`, `raw/infc-*`,
+`raw/copernicus-*`, entrambi i rami `canonical/forests/` e
+`delivery/foreste/` sono `geospatial`. Un run `data` non contatta né processa
+INFC e porta avanti questi artifact immutabili dalla release attiva. La
+riclassificazione non modifica SHA-256, validator HTTP, provenance o identità
+della sorgente e, da sola, non crea una release.
 
 Per la sola migrazione da una release legacy priva di
 `metadata/source-state.json`, il runner ricostruisce lo snapshot dagli artifact
