@@ -98,11 +98,12 @@ def test_carry_forward_references_unchanged_active_artifact(tmp_path: Path) -> N
 
 
 def test_artifact_ownership_is_explicit() -> None:
+    assert artifact_scope("raw/infc-2015-forests/volume.zip") == "geospatial"
     assert artifact_scope("raw/copernicus-hrl-forests/catalog.json") == "geospatial"
     assert artifact_scope("canonical/forests/algorithm_version=v2/zonal_statistics.parquet") == "geospatial"
     assert artifact_scope("delivery/foreste/index.json") == "geospatial"
     assert artifact_scope("raw/ispra-soil-2025/new.xlsx") == "data"
-    assert artifact_scope("canonical/forests/dataset_version=infc2015/observations.parquet") == "data"
+    assert artifact_scope("canonical/forests/dataset_version=infc2015/observations.parquet") == "geospatial"
     assert artifact_scope("canonical/territories/reference_year=2025/region.parquet") == "shared"
     assert artifact_scope("delivery/territory-insights/index.json") == "shared"
     with pytest.raises(ValueError, match="no explicit scope ownership"):
@@ -114,7 +115,10 @@ def test_carry_forward_replaces_whole_scope_and_never_carries_all(tmp_path: Path
     artifacts = []
     for logical_path, body in (
         ("raw/ispra-soil-2025/old.xlsx", b"old-data"),
+        ("raw/infc-2015-forests/volume.zip", b"infc"),
+        ("canonical/forests/dataset_version=infc2015/observations.parquet", b"infc-canonical"),
         ("raw/copernicus-hrl-forests/catalog.json", b"geo"),
+        ("delivery/foreste/index.json", b"forest-delivery"),
         ("canonical/territories/reference_year=2025/region.parquet", b"shared"),
     ):
         path = tmp_path / logical_path.replace("/", "-")
@@ -126,7 +130,12 @@ def test_carry_forward_replaces_whole_scope_and_never_carries_all(tmp_path: Path
     geo_run = carry_forward_active_artifacts(store, set(), scope="geospatial")
     all_run = carry_forward_active_artifacts(store, set(), scope="all")
 
-    assert {item.logical_path for item in data_run} == {"raw/copernicus-hrl-forests/catalog.json"}
+    assert {item.logical_path for item in data_run} == {
+        "raw/infc-2015-forests/volume.zip",
+        "canonical/forests/dataset_version=infc2015/observations.parquet",
+        "raw/copernicus-hrl-forests/catalog.json",
+        "delivery/foreste/index.json",
+    }
     assert {item.logical_path for item in geo_run} == {"raw/ispra-soil-2025/old.xlsx"}
     assert all_run == []
 
