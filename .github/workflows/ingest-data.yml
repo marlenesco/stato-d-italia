@@ -54,4 +54,5 @@ jobs:
         if: steps.preflight.outputs.changed == 'true' || inputs.force
         run: >-
           uv run stato-data run --publish r2 --scope data
+          --plan reports/data-source-check.json
           ${{ inputs.force && '--force' || '' }}

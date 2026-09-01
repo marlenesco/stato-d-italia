@@ -93,6 +93,22 @@ Cache Actions accelera ma non decide se fonte è nuova. Uno scope recupera gli
 input fuori scope dalla release attiva e li carry-forward per riferimento
 immutabile: release resta completa anche su runner pulito.
 
+Il report del preflight è anche il piano effimero del run scoped. Ogni asset
+ufficiale è marcato `changed`, `unchanged` oppure `unverifiable` e il piano è
+vincolato al `releaseId` ancora attivo. Prima dell'ingestione tutti gli artifact
+dello scope sono verificati rispetto allo SHA-256 della release attiva: un file
+locale valido viene riusato, uno mancante o stale viene idratato atomicamente da
+R2, un object R2 mancante o corrotto interrompe il run. Gli adapter contattano
+la fonte soltanto per asset `changed` senza body già acquisito dal preflight.
+Se un `GET` di controllo ha già letto il body completo, questo viene conservato
+in `data/.preflight/<scope>` e promosso atomicamente dal run, senza un secondo
+download. La directory è temporanea e non è source state né fonte di verità.
+
+Un errore remoto con baseline attiva valida resta `unverifiable`: non costituisce
+prova di cambiamento e conserva il last-known-good. Senza baseline fidata il
+flusso resta fail-closed. Le metriche distinguono `sourcesUnverifiable` e non
+contano come controllate/acquisite le sorgenti soltanto portate avanti.
+
 Il preflight Copernicus calcola la signature del catalogo remoto senza scrivere
 `data/raw`, canonical o cache. Solo il vero run geospaziale persiste
 `catalog.json`; una signature nuova forza la rigenerazione delle statistiche
@@ -168,6 +184,14 @@ Se il contenuto della fonte è invariato:
 - non caricare oggetti già content-addressed;
 - non creare release e non aggiornare `manifest.json`.
 
+L'incrementalità è per asset logico, non per byte: se cambia un archivio o un
+workbook monolitico viene riscaricato per intero, mentre gli altri asset dello
+stesso scope vengono riusati dalla release attiva. INFC e Copernicus sono due
+famiglie indipendenti: un cambiamento INFC non acquisisce raster Copernicus; un
+cambiamento Copernicus non contatta INFC. Se cambia un solo ZIP INFC, gli altri
+ZIP vengono idratati/riusati e la canonical INFC viene rigenerata in modo
+coerente prima del delivery Foreste.
+
 Uno scope `data` sostituisce solo entry source `data` e conserva entry
 `geospatial`; scope geospatial fa opposto. Le fonti con URL scoperto dalla
 landing vengono prima ri-risolte: URL nuovo è cambiamento anche se quello
@@ -229,7 +253,7 @@ Registrare almeno:
 
 ```text
 raw bytes
-source checks / changed / unchanged
+source checks / changed / unchanged / unverifiable
 canonical bytes
 delivery bytes
 objects uploaded / reused
