@@ -13,6 +13,7 @@ import requests
 
 from .common import json_dump, now_iso, sha256_file, stable_id
 from .download import download
+from .ingestion_plan import materialize_planned_asset
 from .registry import load_source
 from .territories import load_territory_index
 
@@ -65,10 +66,24 @@ def _exports_signature(responses: dict[str, bytes]) -> str:
     return digest.hexdigest()
 
 
-def check_dissesto_source(expected_signature: str | None) -> dict:
+def check_dissesto_source(expected_signature: str | None, *, staged_path: Path | None = None) -> dict:
     """Read-only remote check for the four payloads composing the bundle."""
-    signature = _exports_signature(_export_payloads())
-    return {"changed": expected_signature != signature, "signature": signature, "exports": len(EXPORTS)}
+    responses = _export_payloads()
+    signature = _exports_signature(responses)
+    result = {
+        "changed": expected_signature != signature,
+        "signature": signature,
+        "exports": len(EXPORTS),
+        "checked_at": now_iso(),
+    }
+    if staged_path is not None:
+        _write_exports_archive(responses, staged_path)
+        result |= {
+            "staged_path": str(staged_path),
+            "sha256": sha256_file(staged_path),
+            "bytes": staged_path.stat().st_size,
+        }
+    return result
 
 
 def _archive_exports_signature(archive: Path) -> str:
@@ -84,6 +99,22 @@ def _write_entry(archive: zipfile.ZipFile, name: str, body: bytes) -> None:
     info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
     info.compress_type = zipfile.ZIP_DEFLATED
     archive.writestr(info, body)
+
+
+def _write_exports_archive(responses: dict[str, bytes], destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary, "w") as bundle:
+            for level in EXPORTS:
+                _write_entry(bundle, _entry(level), responses[level])
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _validate_metadata_assets(raw_dir: Path) -> None:
@@ -111,6 +142,21 @@ def fetch_dissesto(raw_root: Path) -> dict:
         for name, url in SOURCE["source_contract"]["metadata_urls"].items()
     }
     _validate_metadata_assets(raw_dir)
+    planned = materialize_planned_asset(
+        API_BASE_URL,
+        archive,
+        SOURCE_ID,
+        source_context={"preflight_method": "idrogeo_exports_v1"},
+    )
+    if planned is not None:
+        signature = _archive_exports_signature(archive)
+        if planned.get("source_signature") != signature:
+            raise ValueError("Planned IdroGEO bundle signature mismatch")
+        return {
+            "changed": planned.get("plan_status") == "changed",
+            "source": planned,
+            "metadata_assets": metadata_assets,
+        }
     requests_to_fetch = [(level, f"{API_BASE_URL}/{endpoint}") for level, endpoint in EXPORTS.items()]
     file_descriptor, temporary_name = tempfile.mkstemp(prefix="stato-italia-idrogeo-", suffix=".zip", dir=raw_dir)
     os.close(file_descriptor)

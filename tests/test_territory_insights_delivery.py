@@ -40,3 +40,11 @@ def test_delivery_keeps_domain_series_and_declares_snapshot(tmp_path) -> None:
     assert domains["forests"]["comparison"]["direction"] == "changed"
     assert domains["risk"]["comparison"]["reason"] == "single_snapshot"
     assert domains["emissions"]["comparison"]["percent"] == -20
+
+    for path in paths.values():
+        path.touch()
+    reused = generate_territory_insights_delivery(
+        paths["soil"], paths["forest"], paths["water"], paths["risk"], paths["emissions"],
+        territory_root, tmp_path / "delivery", "release-other",
+    )
+    assert reused["changed"] is False

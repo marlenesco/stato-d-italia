@@ -154,6 +154,38 @@ def test_hydration_replaces_stale_cache_with_active_release(tmp_path: Path) -> N
     assert destination.read_bytes() == b"V2"
 
 
+def test_hydration_downloads_missing_active_release_asset(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    active = tmp_path / "active.parquet"
+    active.write_bytes(b"active-V2")
+    publish_release(store, "r2", [ReleaseArtifact(active, "canonical/soil/observations.parquet")])
+    destination = tmp_path / "empty-cache" / "observations.parquet"
+
+    hydrate_active_artifact(store, "canonical/soil/observations.parquet", destination)
+
+    assert destination.read_bytes() == b"active-V2"
+
+
+def test_hydration_reuses_valid_local_asset_without_object_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    active = tmp_path / "active.parquet"
+    active.write_bytes(b"active-V2")
+    publish_release(store, "r2", [ReleaseArtifact(active, "canonical/soil/observations.parquet")])
+    destination = tmp_path / "cache" / "observations.parquet"
+    destination.parent.mkdir()
+    destination.write_bytes(b"active-V2")
+    monkeypatch.setattr(
+        store, "get_file",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("active object downloaded")),
+    )
+
+    hydrate_active_artifact(store, "canonical/soil/observations.parquet", destination)
+
+    assert destination.read_bytes() == b"active-V2"
+
+
 def test_failed_hydration_keeps_cache_and_manifest_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = LocalObjectStore(tmp_path / "store")
     active = tmp_path / "active.parquet"
