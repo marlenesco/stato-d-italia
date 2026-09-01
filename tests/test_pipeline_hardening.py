@@ -6,7 +6,8 @@ import pandas as pd
 import pytest
 
 import stato_italia.cli as cli
-from stato_italia.cli import _active_source_state_with_legacy_bootstrap, _publish_scoped, _run_geospatial, _validate_release_coherence
+from stato_italia.cli import _active_source_state_with_legacy_bootstrap, _process_geospatial_forest_sources, _publish_scoped, _run_geospatial, _validate_release_coherence
+from stato_italia.ingestion_plan import clear_ingestion_plan, load_ingestion_plan
 from stato_italia.release import LocalObjectStore, ReleaseArtifact, publish_release
 
 
@@ -24,6 +25,10 @@ def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
     assert "FOREST_PROCESSING_MODE: raster" in geospatial_workflow
     assert "INFC_HTTPS_PROXIES" not in data_workflow
     assert "INFC_HTTPS_PROXIES: ${{ secrets.INFC_HTTPS_PROXIES }}" in geospatial_workflow
+    assert "--plan reports/data-source-check.json" in data_workflow
+    assert "--plan reports/geospatial-source-check.json" in geospatial_workflow
+    assert "if: steps.preflight.outputs.changed == 'true' || inputs.force" in data_workflow
+    assert "if: inputs.bootstrap_all || steps.preflight.outputs.changed == 'true' || inputs.force" in geospatial_workflow
     assert "data/canonical/forests/algorithm_version=forests-zonal-statistics-v2" in data_workflow
     assert "data/raw/infc-2015-forests" in geospatial_workflow
 
@@ -111,6 +116,7 @@ def test_scoped_noops_and_data_geospatial_data_preserve_other_scope(
     )
     assert first_publication["changed"] is True
     assert first_metrics["sourceChecks"] == 1
+    manifest_before_noop = store.read_json("manifest.json")
 
     second, second_metrics, second_publication = _publish_scoped(
         store=store, root=root, output=output, release_id="data-r2", scope="data",
@@ -118,7 +124,9 @@ def test_scoped_noops_and_data_geospatial_data_preserve_other_scope(
     )
     assert second_publication["changed"] is False
     assert second["releaseId"] == first["releaseId"]
+    assert store.read_json("manifest.json") == manifest_before_noop
     assert second_metrics["bytesUploadedToR2"] == 0
+    assert second_metrics["objectsUploaded"] == 0
     assert second_metrics["sourceChecks"] == 1
     assert second_metrics["carriedSources"] == 0
 
@@ -315,3 +323,107 @@ def test_geospatial_scope_reuses_active_infc_raw_and_owns_infc_ingest(
 
     assert "raw/infc-2015-forests/volume.zip" in hydrated
     assert "raw/infc-2015-forests/volume.zip.metadata.json" in hydrated
+
+
+def _forest_plan(tmp_path: Path, *, infc_status: str, catalog_status: str) -> None:
+    plan = {
+        "schemaVersion": 1, "activeReleaseId": "r1", "scope": "geospatial",
+        "sourceChecks": 2, "sourcesChanged": int(infc_status == "changed") + int(catalog_status == "changed"),
+        "sourcesUnchanged": int(infc_status == "unchanged") + int(catalog_status == "unchanged"),
+        "sourcesUnverifiable": 0, "changed": "changed" in {infc_status, catalog_status},
+        "sources": [{
+            "source_id": "infc-2015-forests", "asset_path": "infc-2015-forests/volume.zip",
+            "status": infc_status, "baseline_sha256": "a" * 64, "baseline_bytes": 1,
+        }],
+        "catalog": {"status": catalog_status},
+    }
+    path = tmp_path / "forest-plan.json"
+    path.write_text(json.dumps(plan))
+    load_ingestion_plan(
+        path, scope="geospatial", active_release_id="r1", raw_root=tmp_path / "data/raw",
+    )
+
+
+def test_infc_only_change_does_not_acquire_or_ingest_copernicus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forest_plan(tmp_path, infc_status="changed", catalog_status="unchanged")
+    calls: list[tuple[str, bool]] = []
+
+    def fetch(_root: Path, **kwargs: object) -> dict:
+        calls.append(("fetch", bool(kwargs["check_geospatial"])))
+        assert kwargs["include_infc"] is True
+        return {"infc": [], "catalog": {"status": "deferred"}}
+
+    monkeypatch.setattr(cli, "fetch_forests", fetch)
+    monkeypatch.setattr(cli, "ingest_infc_forests", lambda *_args, **kwargs: calls.append(("infc", bool(kwargs["force"]))) or {"changed": True})
+    monkeypatch.setattr(cli, "ingest_forests", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Copernicus ingested")))
+    monkeypatch.setattr(cli, "_reused_canonical", lambda *_args, **_kwargs: {"changed": False, "mode": "active_release"})
+    try:
+        _fetch, infc, zonal = _process_geospatial_forest_sources(
+            Namespace(offline=False, force=False), root=tmp_path / "data",
+            canonical=tmp_path / "data/canonical", previous_state=None,
+        )
+    finally:
+        clear_ingestion_plan()
+
+    assert calls == [("fetch", False), ("infc", True)]
+    assert infc["changed"] is True
+    assert zonal == {"changed": False, "mode": "active_release"}
+
+
+def test_copernicus_only_change_does_not_acquire_or_ingest_infc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forest_plan(tmp_path, infc_status="unchanged", catalog_status="changed")
+    calls: list[tuple[str, bool]] = []
+
+    def fetch(_root: Path, **kwargs: object) -> dict:
+        calls.append(("fetch", bool(kwargs["check_geospatial"])))
+        assert kwargs["include_infc"] is False
+        return {"infc": [], "catalog": {"status": "checked", "signature": "b" * 64}}
+
+    previous = {"schemaVersion": 1, "sources": [
+        _entry("copernicus-hrl-forests", "copernicus-hrl-forests/catalog.json", "a" * 64, kind="catalog"),
+    ]}
+    monkeypatch.setattr(cli, "fetch_forests", fetch)
+    monkeypatch.setattr(cli, "ingest_infc_forests", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("INFC ingested")))
+    monkeypatch.setattr(cli, "ingest_forests", lambda *_args, **kwargs: calls.append(("copernicus", bool(kwargs["force"]))) or {"changed": True})
+    monkeypatch.setattr(cli, "_reused_canonical", lambda *_args, **_kwargs: {"changed": False, "mode": "active_release"})
+    try:
+        _fetch, infc, zonal = _process_geospatial_forest_sources(
+            Namespace(offline=False, force=False), root=tmp_path / "data",
+            canonical=tmp_path / "data/canonical", previous_state=previous,
+        )
+    finally:
+        clear_ingestion_plan()
+
+    assert calls == [("fetch", True), ("copernicus", True)]
+    assert infc == {"changed": False, "mode": "active_release"}
+    assert zonal["changed"] is True
+
+
+def test_geospatial_noop_contacts_neither_forest_source_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forest_plan(tmp_path, infc_status="unchanged", catalog_status="unchanged")
+
+    def fetch(_root: Path, **kwargs: object) -> dict:
+        assert kwargs["include_infc"] is False
+        assert kwargs["check_geospatial"] is False
+        return {"infc": [], "catalog": {"status": "deferred"}}
+
+    monkeypatch.setattr(cli, "fetch_forests", fetch)
+    monkeypatch.setattr(cli, "ingest_infc_forests", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("INFC ingested")))
+    monkeypatch.setattr(cli, "ingest_forests", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Copernicus ingested")))
+    monkeypatch.setattr(cli, "_reused_canonical", lambda *_args, **_kwargs: {"changed": False, "mode": "active_release"})
+    try:
+        _fetch, infc, zonal = _process_geospatial_forest_sources(
+            Namespace(offline=False, force=False), root=tmp_path / "data",
+            canonical=tmp_path / "data/canonical", previous_state=None,
+        )
+    finally:
+        clear_ingestion_plan()
+
+    assert infc["changed"] is False
+    assert zonal["changed"] is False

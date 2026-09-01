@@ -138,7 +138,8 @@ def test_infc_is_geospatial_and_data_preflight_never_contacts_it(monkeypatch: py
     assert source_scope("infc-2015-forests") == "geospatial"
     assert result == {
         "scope": "data", "sourceChecks": 0, "sourcesChanged": 0,
-        "sourcesUnchanged": 0, "changed": False, "sources": [],
+        "sourcesUnchanged": 0, "sourcesUnverifiable": 0,
+        "changed": True, "reason": "no_persisted_data_state", "sources": [],
     }
 
 
@@ -216,7 +217,10 @@ def test_idrogeo_preflight_checks_composite_exports_not_api_base(monkeypatch: py
     }]}
     monkeypatch.setattr(
         "stato_italia.dissesto.check_dissesto_source",
-        lambda expected: {"changed": expected != "b" * 64, "signature": "b" * 64, "exports": 4},
+        lambda expected, staged_path=None: {
+            "changed": expected != "b" * 64, "signature": "b" * 64,
+            "exports": 4, "staged_path": staged_path,
+        },
     )
     monkeypatch.setattr(
         "stato_italia.source_state.requests.get",
@@ -226,13 +230,14 @@ def test_idrogeo_preflight_checks_composite_exports_not_api_base(monkeypatch: py
     result = check_persisted_sources(state, scope="data")
 
     assert result["changed"] is False
-    assert result["sources"] == [{
-        "asset_path": "ispra-idrogeo-risk-2024/idrogeo-risk-api-responses.zip",
-        "status": "unchanged", "method": "idrogeo_exports_v1", "exports": 4,
-    }]
+    assert result["sources"][0]["source_id"] == "ispra-idrogeo-risk-2024"
+    assert result["sources"][0]["asset_path"] == "ispra-idrogeo-risk-2024/idrogeo-risk-api-responses.zip"
+    assert result["sources"][0]["status"] == "unchanged"
+    assert result["sources"][0]["method"] == "idrogeo_exports_v1"
+    assert result["sources"][0]["exports"] == 4
 
 
-def test_idrogeo_preflight_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_idrogeo_preflight_marks_trusted_baseline_unverifiable(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"schemaVersion": 1, "sources": [{
         "source_id": "ispra-idrogeo-risk-2024",
         "asset_path": "ispra-idrogeo-risk-2024/idrogeo-risk-api-responses.zip",
@@ -243,13 +248,14 @@ def test_idrogeo_preflight_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None
     }]}
     monkeypatch.setattr(
         "stato_italia.dissesto.check_dissesto_source",
-        lambda _expected: (_ for _ in ()).throw(RuntimeError("offline")),
+        lambda _expected, staged_path=None: (_ for _ in ()).throw(RuntimeError("offline")),
     )
 
     result = check_persisted_sources(state, scope="data")
 
-    assert result["changed"] is True
-    assert result["sourcesChanged"] == 1
+    assert result["changed"] is False
+    assert result["sourcesChanged"] == 0
+    assert result["sourcesUnverifiable"] == 1
     assert result["sources"][0]["status"] == "unverifiable"
 
 

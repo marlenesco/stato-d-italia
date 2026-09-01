@@ -13,6 +13,7 @@ import requests
 
 from .common import json_dump, now_iso, sha256_file
 from .infc_transport import InfcTransportError, infc_proxy_candidates, is_infc_url, is_retryable_infc_status
+from .ingestion_plan import materialize_planned_asset
 
 
 class _LinkCollector(HTMLParser):
@@ -101,6 +102,11 @@ def download(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".partial")
     metadata_path = destination.with_suffix(destination.suffix + ".metadata.json")
+    planned = materialize_planned_asset(
+        url, destination, source_id, source_context=source_context,
+    )
+    if planned is not None:
+        return planned
     prior = json.loads(metadata_path.read_text()) if destination.exists() and metadata_path.exists() else None
     if offline:
         if not destination.exists():
@@ -197,6 +203,15 @@ def download(
 
 def download_registered_source(source: dict, destination: Path, *, offline: bool = False) -> dict:
     """Acquire a registry source, retaining both landing and resolved URLs."""
+    context = _source_context(source)
+    planned = materialize_planned_asset(
+        str(source.get("download_url") or source["landing_url"]),
+        destination,
+        str(source["source_id"]),
+        source_context=context,
+    )
+    if planned is not None:
+        return planned
     if offline:
         metadata_path = destination.with_suffix(destination.suffix + ".metadata.json")
         prior = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
@@ -208,7 +223,7 @@ def download_registered_source(source: dict, destination: Path, *, offline: bool
         destination,
         str(source["source_id"]),
         offline=offline,
-        source_context=_source_context(source),
+        source_context=context,
     )
 
 

@@ -15,8 +15,16 @@ from .delivery import generate_soil_delivery
 from .emissions import fetch_emissions, ingest_emissions
 from .emissions_delivery import generate_emissions_delivery
 from .emissions_national import fetch_national_emissions, ingest_national_emissions
-from .forests import ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
+from .forests import ZONAL_ALGORITHM_VERSION, declared_forest_raw_paths, fetch_forests, ingest_forests, ingest_infc_forests
 from .forests_delivery import generate_forests_delivery
+from .ingestion_plan import (
+    PLAN_SCHEMA_VERSION,
+    active_ingestion_plan,
+    catalog_changed as planned_catalog_changed,
+    clear_ingestion_plan,
+    load_ingestion_plan,
+    source_family_changed,
+)
 from .dissesto import fetch_dissesto, ingest_dissesto
 from .dissesto_delivery import generate_dissesto_delivery
 from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, artifact_scope, carry_forward_active_artifacts, hydrate_active_artifact, publish_release, rollback
@@ -105,6 +113,21 @@ def _hydrate(store: LocalObjectStore | R2ObjectStore, root: Path, logical_paths:
         hydrate_active_artifact(store, logical_path, root / logical_path)
 
 
+def _hydrate_active_scope(store: LocalObjectStore | R2ObjectStore, root: Path, scope: str) -> None:
+    """Validate cache against, or hydrate from, active same-scope/shared objects."""
+    release = active_release(store)
+    if release is None:
+        raise FileNotFoundError("Incremental scoped run requires an active release")
+    logical_paths = []
+    for item in release.get("objects", []):
+        logical_path = str(item["logicalPath"])
+        if logical_path == SOURCE_STATE_LOGICAL_PATH:
+            continue
+        if artifact_scope(logical_path) in {scope, "shared"}:
+            logical_paths.append(logical_path)
+    _hydrate(store, root, sorted(logical_paths))
+
+
 def _active_source_state_with_legacy_bootstrap(store: LocalObjectStore | R2ObjectStore) -> dict | None:
     """Migrate one legacy active release by reading its immutable raw provenance."""
     persisted = active_source_state(store, SOURCE_STATE_LOGICAL_PATH)
@@ -167,6 +190,17 @@ def _active_infc_logical_paths(previous_state: dict | None) -> list[str]:
         raw_path = f"raw/{asset_path}"
         logical_paths.extend((raw_path, f"{raw_path}.metadata.json"))
     return logical_paths
+
+
+def _reused_canonical(path: Path, *, mode: str) -> dict:
+    if not path.is_file():
+        raise FileNotFoundError(f"Active release canonical dependency is missing: {path}")
+    return {
+        "changed": False,
+        "records": len(pd.read_parquet(path)),
+        "canonical_bytes": path.stat().st_size,
+        "mode": mode,
+    }
 
 
 def _validate_data_canonical_provenance(root: Path, source_state: dict, logical_paths: set[str]) -> None:
@@ -263,9 +297,14 @@ def _publish_scoped(
     _validate_release_coherence(root, source_state, [*fresh, *carried], scope=scope)
     manifest = publish_release(store, release_id, [*fresh, *carried]) if changed else store.read_json("manifest.json")
     carried_sources = len(source_state["sources"]) - len(current_state["sources"])
+    plan = active_ingestion_plan()
+    plan_metrics = plan if plan and plan.get("scope") == scope else None
     metrics = {
-        "sourceChecks": source_counts["checked"], "sourcesChanged": source_counts["changed"],
-        "sourcesUnchanged": source_counts["unchanged"], "rawBytesAcquired": sum(entry["bytes"] for entry in changed_sources),
+        "sourceChecks": int(plan_metrics["sourceChecks"]) if plan_metrics else source_counts["checked"],
+        "sourcesChanged": int(plan_metrics["sourcesChanged"]) if plan_metrics else source_counts["changed"],
+        "sourcesUnchanged": int(plan_metrics["sourcesUnchanged"]) if plan_metrics else source_counts["unchanged"],
+        "sourcesUnverifiable": int(plan_metrics.get("sourcesUnverifiable", 0)) if plan_metrics else 0,
+        "rawBytesAcquired": sum(entry["bytes"] for entry in changed_sources),
         "objectsUploaded": manifest.get("publishMetrics", {}).get("objectsUploaded", 0),
         "objectsReused": manifest.get("publishMetrics", {}).get("objectsReused", 0),
         "bytesUploadedToR2": manifest.get("publishMetrics", {}).get("bytesUploaded", 0),
@@ -274,6 +313,40 @@ def _publish_scoped(
         "carriedArtifacts": len(carried),
     }
     return manifest, metrics, {"changed": changed, "source_state": source_state, "carried": len(carried)}
+
+
+def _process_geospatial_forest_sources(
+    args: argparse.Namespace, *, root: Path, canonical: Path, previous_state: dict | None,
+) -> tuple[dict, dict, dict]:
+    """Acquire and rebuild only the changed Forest source family."""
+    plan = active_ingestion_plan()
+    infc_changed = source_family_changed("infc-2015-forests")
+    copernicus_changed = source_family_changed("copernicus-") or planned_catalog_changed()
+    process_infc = plan is None or infc_changed or args.force
+    process_copernicus = plan is None or copernicus_changed or args.force
+    forest_fetch = fetch_forests(
+        root,
+        offline=args.offline,
+        include_infc=process_infc,
+        check_geospatial=plan is None or copernicus_changed,
+    )
+    infc_path = canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet"
+    zonal_path = canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
+    infc = (
+        ingest_infc_forests(root, canonical, force=args.force or infc_changed)
+        if process_infc
+        else _reused_canonical(infc_path, mode="active_release")
+    )
+    catalog_was_changed = _catalog_changed_from_active(previous_state, forest_fetch)
+    zonal = (
+        ingest_forests(
+            root, canonical, force=args.force or catalog_was_changed,
+            mode=os.getenv("FOREST_PROCESSING_MODE", "raster"),
+        )
+        if process_copernicus
+        else _reused_canonical(zonal_path, mode="active_release")
+    )
+    return forest_fetch, infc, zonal
 
 
 def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canonical: Path, delivery: Path, store: LocalObjectStore | R2ObjectStore, previous_state: dict | None, release_id: str, started: float, started_at: str) -> int:
@@ -289,10 +362,10 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         *_active_infc_logical_paths(previous_state),
     ]
     _hydrate(store, root, [str(path.relative_to(root)) if isinstance(path, Path) else path for path in required])
-    forest_fetch = fetch_forests(root, offline=args.offline, include_infc=True)
-    infc = ingest_infc_forests(root, canonical, force=args.force)
-    catalog_changed = _catalog_changed_from_active(previous_state, forest_fetch)
-    zonal = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=os.getenv("FOREST_PROCESSING_MODE", "raster"))
+    plan = active_ingestion_plan()
+    forest_fetch, infc, zonal = _process_geospatial_forest_sources(
+        args, root=root, canonical=canonical, previous_state=previous_state,
+    )
     forests_pmtiles: dict[str, dict] = {}
     for level in ("municipality", "province", "region"):
         path = delivery / "foreste" / "geometry" / f"istat-{level}-2023.pmtiles"
@@ -319,16 +392,25 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
         canonical, delivery, release_id, force=args.force or zonal["changed"],
     )
-    metadata_paths = [path for path in _declared_raw_paths(forest_fetch) if path.name.endswith(".metadata.json")]
-    current_state = build_source_state_from_metadata_paths(root / "raw", metadata_paths, include_catalog=Path(forest_fetch["catalog"]["path"]) if forest_fetch.get("catalog", {}).get("path") else None)
+    fetched_raw_paths = _declared_raw_paths(forest_fetch)
+    raw_paths = sorted(set(fetched_raw_paths) | (
+        set(declared_forest_raw_paths(root)) if plan is not None else set()
+    ))
+    metadata_paths = [path for path in raw_paths if path.name.endswith(".metadata.json")]
+    catalog_path = next((
+        path for path in raw_paths
+        if path.name == "catalog.json" and path.parent.name == "copernicus-hrl-forests"
+    ), None)
+    current_state = build_source_state_from_metadata_paths(
+        root / "raw", metadata_paths, include_catalog=catalog_path,
+    )
     declared = [
         *_territory_paths(canonical),
         canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
         canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
         *[Path(item["path"]) for item in forests_pmtiles.values()],
         *forest_delivery.get("files", []), *insights.get("files", []),
-        Path(forest_fetch["catalog"]["path"]),
-        *[path for path in _declared_raw_paths(forest_fetch) if not path.name.endswith(".metadata.json")], *metadata_paths,
+        *[path for path in raw_paths if not path.name.endswith(".metadata.json")], *metadata_paths,
     ]
     manifest, metrics, publication = _publish_scoped(
         store=store, root=root, output=output, release_id=release_id, scope="geospatial", previous_state=previous_state,
@@ -379,6 +461,7 @@ def _run_combined_scope_forests(
 
 
 def run(args: argparse.Namespace) -> int:
+    clear_ingestion_plan()
     started = time.monotonic()
     started_at = now_iso()
     root = Path(args.workdir)
@@ -389,6 +472,17 @@ def run(args: argparse.Namespace) -> int:
     release_id = args.release_id or _release_id()
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
     previous_source_state = _active_source_state_with_legacy_bootstrap(store)
+    plan_path = getattr(args, "plan", None)
+    if plan_path:
+        if args.scope == "all":
+            raise ValueError("Incremental ingestion plans are supported only for scoped runs")
+        release = active_release(store)
+        if release is None:
+            raise FileNotFoundError("Incremental ingestion plan requires an active release")
+        load_ingestion_plan(
+            Path(plan_path), scope=args.scope, active_release_id=str(release["releaseId"]), raw_root=root / "raw",
+        )
+        _hydrate_active_scope(store, root, args.scope)
     if args.scope == "geospatial":
         return _run_geospatial(
             args, root=root, output=output, canonical=canonical, delivery=delivery, store=store,
@@ -600,6 +694,7 @@ def run(args: argparse.Namespace) -> int:
             "sourceChecks": scoped_metrics["sourceChecks"],
             "sourcesChanged": scoped_metrics["sourcesChanged"],
             "sourcesUnchanged": scoped_metrics["sourcesUnchanged"],
+            "sourcesUnverifiable": scoped_metrics["sourcesUnverifiable"],
             "rawBytesAcquired": scoped_metrics["rawBytesAcquired"],
             "canonicalBytesGenerated": sum(info.get("canonical_bytes", 0) for info in [soil, water, national_emissions, provincial_emissions, dissesto, forests.get("infc", {}), forests.get("zonal", {})] if info.get("changed")),
             "derivedBytesGenerated": analytics.get("bytes", 0) if analytics.get("changed") else 0,
@@ -635,6 +730,7 @@ def main() -> int:
     run_parser.add_argument("--force", action="store_true", help="reprocess unchanged source assets; manual recovery only")
     run_parser.add_argument("--offline", action="store_true", help="use only pre-existing official raw assets; never make HTTP requests")
     run_parser.add_argument("--scope", choices=("all", "data", "geospatial"), default="all", help="workflow ownership; data reuses validated geospatial canonical")
+    run_parser.add_argument("--plan", help="ephemeral check-sources report tied to the active release")
     fetch_parser = sub.add_parser("fetch", help="acquire official raw assets for one domain")
     fetch_parser.add_argument("domain", choices=("dissesto", "emissions", "foreste"))
     fetch_parser.add_argument("--workdir", default="data")
@@ -668,7 +764,14 @@ def main() -> int:
     if args.command == "check-sources":
         store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(Path(args.output) / "object-store")
         persisted = _active_source_state_with_legacy_bootstrap(store)
-        result = check_persisted_sources(persisted, scope=args.scope)
+        release = active_release(store)
+        result = check_persisted_sources(
+            persisted,
+            scope=args.scope,
+            stage_dir=Path(args.workdir) / ".preflight" / args.scope,
+        )
+        result["schemaVersion"] = PLAN_SCHEMA_VERSION
+        result["activeReleaseId"] = release.get("releaseId") if release else None
         if args.scope == "geospatial":
             from .forests import HRL, _cdse_token, _check_catalog
 
@@ -678,16 +781,35 @@ def main() -> int:
             try:
                 catalog = _check_catalog(HRL, _cdse_token(HRL))
                 catalog_changed = previous_catalog is None or previous_catalog.get("sha256") != catalog["signature"]
-                result["catalog"] = {"checked": True, "changed": catalog_changed, "products": catalog["products"]}
+                result["catalog"] = {
+                    "checked": True,
+                    "status": "changed" if catalog_changed else "unchanged",
+                    "changed": catalog_changed,
+                    "products": catalog["products"],
+                    "signature": catalog["signature"],
+                }
+                if catalog_changed:
+                    staged_catalog = Path(args.workdir) / ".preflight" / args.scope / "copernicus-catalog.json"
+                    json_dump(staged_catalog, catalog)
+                    result["catalog"]["stagedPath"] = str(staged_catalog)
                 result["changed"] = bool(result["changed"] or catalog_changed)
                 if catalog_changed:
                     result["sourcesChanged"] += 1
                 else:
                     result["sourcesUnchanged"] += 1
             except Exception as exc:
-                result["catalog"] = {"checked": False, "changed": True, "reason": type(exc).__name__}
-                result["changed"] = True
-                result["sourcesChanged"] += 1
+                has_baseline = previous_catalog is not None
+                result["catalog"] = {
+                    "checked": False,
+                    "status": "unverifiable" if has_baseline else "changed",
+                    "changed": not has_baseline,
+                    "reason": type(exc).__name__,
+                }
+                if has_baseline:
+                    result["sourcesUnverifiable"] = result.get("sourcesUnverifiable", 0) + 1
+                else:
+                    result["changed"] = True
+                    result["sourcesChanged"] += 1
         if args.force:
             result["changed"] = True
             result["reason"] = "force"

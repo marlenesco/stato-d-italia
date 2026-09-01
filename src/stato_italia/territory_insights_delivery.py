@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .common import sha256_file
+
 ALGORITHM_VERSION = "territory-profile-insights-v1"
 
 DOMAIN_DEFINITIONS = (
@@ -86,7 +88,7 @@ def generate_territory_insights_delivery(
     root = destination / "territory-insights"
     index_path = root / "index.json"
     inputs = [soil_path, water_path, dissesto_path, emissions_path, forests_path]
-    signature = "|".join(str(path.stat().st_mtime_ns) if path and path.exists() else "absent" for path in inputs)
+    signature = "|".join(sha256_file(path) if path and path.exists() else "absent" for path in inputs)
     if index_path.exists() and not force and json.loads(index_path.read_text()).get("inputSignature") == signature:
         files = sorted(root.rglob("*.json"))
         return {"changed": False, "files": files, "bytes": sum(path.stat().st_size for path in files)}

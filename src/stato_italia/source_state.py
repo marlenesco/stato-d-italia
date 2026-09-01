@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 
+from .common import now_iso
 from .download import resolve_download_url
 from .infc_transport import get_with_infc_fallback
 
@@ -167,6 +168,24 @@ def source_scope(source_id: str) -> str:
     return "geospatial" if source_id == "infc-2015-forests" or source_id.startswith("copernicus-") else "data"
 
 
+def _plan_detail(entry: dict[str, Any], status: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "source_id": entry["source_id"],
+        "asset_path": entry["asset_path"],
+        "status": status,
+        "baseline_sha256": entry["sha256"],
+        "baseline_bytes": int(entry["bytes"]),
+        **extra,
+    }
+
+
+def _staged_path(stage_dir: Path | None, entry: dict[str, Any], suffix: str = ".asset") -> Path | None:
+    if stage_dir is None:
+        return None
+    identity = sha256(str(entry["asset_path"]).encode()).hexdigest()[:20]
+    return stage_dir / f"{identity}{suffix}"
+
+
 def scoped_source_state(state: dict[str, Any] | None, scope: str) -> dict[str, Any] | None:
     if state is None:
         return None
@@ -179,20 +198,31 @@ def scoped_source_state(state: dict[str, Any] | None, scope: str) -> dict[str, A
     }
 
 
-def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict[str, Any]:
+def check_persisted_sources(
+    state: dict[str, Any] | None, *, scope: str, stage_dir: Path | None = None,
+) -> dict[str, Any]:
     """GET-check active source state without relying on HEAD or local cache.
 
-    A failed or unverifiable source stays changed: caller must run the fail-closed
-    pipeline instead of treating it as a no-op.
+    A failed check remains explicitly unverifiable. A trusted active baseline may
+    be preserved, but absence of persisted state still forces a fail-closed run.
     """
     if state is None:
-        return {"scope": scope, "sourceChecks": 0, "sourcesChanged": 0, "sourcesUnchanged": 0, "changed": True, "reason": "no_persisted_source_state"}
+        return {
+            "scope": scope, "sourceChecks": 0, "sourcesChanged": 0,
+            "sourcesUnchanged": 0, "sourcesUnverifiable": 0, "changed": True,
+            "reason": "no_persisted_source_state", "sources": [],
+        }
     state = _normalised_state(state)
     entries = [entry for entry in state["sources"] if source_scope(str(entry["source_id"])) == scope]
-    if scope == "geospatial" and not entries:
-        return {"scope": scope, "sourceChecks": 0, "sourcesChanged": 0, "sourcesUnchanged": 0, "changed": True, "reason": "no_persisted_geospatial_state"}
+    if not entries:
+        return {
+            "scope": scope, "sourceChecks": 0, "sourcesChanged": 0,
+            "sourcesUnchanged": 0, "sourcesUnverifiable": 0, "changed": True,
+            "reason": f"no_persisted_{scope}_state", "sources": [],
+        }
     changed = 0
     unchanged = 0
+    unverifiable = 0
     details: list[dict[str, Any]] = []
     for entry in entries:
         if entry.get("kind") == "catalog":
@@ -204,18 +234,26 @@ def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict
             try:
                 from .dissesto import check_dissesto_source
 
-                check = check_dissesto_source(entry.get("source_signature"))
+                staged = _staged_path(stage_dir, entry, ".zip")
+                check = check_dissesto_source(entry.get("source_signature"), staged_path=staged)
                 is_changed = bool(check["changed"])
                 changed += int(is_changed)
                 unchanged += int(not is_changed)
-                details.append({
-                    "asset_path": entry["asset_path"],
-                    "status": "changed" if is_changed else "unchanged",
-                    "method": "idrogeo_exports_v1", "exports": check["exports"],
-                })
+                details.append(_plan_detail(
+                    entry, "changed" if is_changed else "unchanged",
+                    method="idrogeo_exports_v1", exports=check["exports"],
+                    staged_path=check.get("staged_path"), observed_sha256=check.get("sha256"),
+                    observed_bytes=check.get("bytes"), remote={
+                        "requested_url": entry.get("resolved_url"),
+                        "resolved_url": entry.get("resolved_url"),
+                        "content_type": "application/zip", "etag": None, "last_modified": None,
+                        "checked_at": check.get("checked_at"), "preflight_method": "idrogeo_exports_v1",
+                        "source_signature": check["signature"], "acquisition_mode": "official_public_api",
+                    },
+                ))
             except Exception as exc:
-                changed += 1
-                details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": type(exc).__name__})
+                unverifiable += 1
+                details.append(_plan_detail(entry, "unverifiable", reason=type(exc).__name__))
             continue
         url = entry.get("resolved_url")
         if entry.get("landing_url") and entry.get("download_link_filename_pattern"):
@@ -225,17 +263,20 @@ def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict
                     "download_link_filename_pattern": entry["download_link_filename_pattern"],
                 })
             except Exception as exc:
-                changed += 1
-                details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": type(exc).__name__})
+                unverifiable += 1
+                details.append(_plan_detail(entry, "unverifiable", reason=type(exc).__name__))
                 continue
             if resolved != url:
                 changed += 1
-                details.append({"asset_path": entry["asset_path"], "status": "changed", "reason": "resolved_url_changed"})
+                details.append(_plan_detail(
+                    entry, "changed", reason="resolved_url_changed",
+                    remote={"requested_url": resolved, "resolved_url": resolved},
+                ))
                 continue
             url = resolved
         if not url:
-            changed += 1
-            details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": "missing_resolved_url"})
+            unverifiable += 1
+            details.append(_plan_detail(entry, "unverifiable", reason="missing_resolved_url"))
             continue
         headers = {"User-Agent": "stato-italia-data/0.1"}
         if entry.get("etag"):
@@ -249,45 +290,72 @@ def check_persisted_sources(state: dict[str, Any] | None, *, scope: str) -> dict
             with response:
                 if response.status_code == 304:
                     unchanged += 1
-                    details.append({
-                        "asset_path": entry["asset_path"], "status": "unchanged",
-                        "method": "conditional_get", "transport": transport,
-                    })
+                    details.append(_plan_detail(
+                        entry, "unchanged", method="conditional_get", transport=transport,
+                    ))
                     continue
                 response.raise_for_status()
                 response_etag = response.headers.get("ETag")
                 if response_etag and response_etag == entry.get("etag"):
                     unchanged += 1
-                    details.append({
-                        "asset_path": entry["asset_path"], "status": "unchanged",
-                        "method": "get_etag", "transport": transport,
-                    })
+                    details.append(_plan_detail(
+                        entry, "unchanged", method="get_etag", transport=transport,
+                    ))
                     continue
                 digest = sha256()
                 total = 0
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        digest.update(chunk)
-                        total += len(chunk)
+                staged = _staged_path(stage_dir, entry)
+                if staged:
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = staged.with_suffix(staged.suffix + ".partial")
+                else:
+                    temporary = None
+                try:
+                    target = temporary.open("wb") if temporary else None
+                    try:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                digest.update(chunk)
+                                total += len(chunk)
+                                if target:
+                                    target.write(chunk)
+                    finally:
+                        if target:
+                            target.close()
+                    if temporary and staged:
+                        temporary.replace(staged)
+                finally:
+                    if temporary:
+                        temporary.unlink(missing_ok=True)
                 same = digest.hexdigest() == entry["sha256"] and total == int(entry["bytes"])
+                remote = {
+                    "requested_url": str(url), "resolved_url": str(response.url),
+                    "content_type": response.headers.get("Content-Type"),
+                    "etag": response.headers.get("ETag"),
+                    "last_modified": response.headers.get("Last-Modified"),
+                    "checked_at": now_iso(),
+                }
                 if same:
                     unchanged += 1
-                    details.append({
-                        "asset_path": entry["asset_path"], "status": "unchanged",
-                        "method": "get_sha256", "transport": transport,
-                    })
+                    details.append(_plan_detail(
+                        entry, "unchanged", method="get_sha256", transport=transport,
+                        staged_path=str(staged) if staged else None,
+                        observed_sha256=digest.hexdigest(), observed_bytes=total, remote=remote,
+                    ))
                 else:
                     changed += 1
-                    details.append({
-                        "asset_path": entry["asset_path"], "status": "changed",
-                        "method": "get_sha256", "transport": transport,
-                    })
+                    details.append(_plan_detail(
+                        entry, "changed", method="get_sha256", transport=transport,
+                        staged_path=str(staged) if staged else None,
+                        observed_sha256=digest.hexdigest(), observed_bytes=total, remote=remote,
+                    ))
         except requests.RequestException as exc:
-            changed += 1
-            details.append({"asset_path": entry["asset_path"], "status": "unverifiable", "reason": type(exc).__name__})
+            unverifiable += 1
+            details.append(_plan_detail(entry, "unverifiable", reason=type(exc).__name__))
     return {
         "scope": scope, "sourceChecks": len(entries), "sourcesChanged": changed,
-        "sourcesUnchanged": unchanged, "changed": bool(changed), "sources": details,
+        "sourcesUnchanged": unchanged, "sourcesUnverifiable": unverifiable,
+        "changed": bool(changed), "sources": details,
     }
 
 

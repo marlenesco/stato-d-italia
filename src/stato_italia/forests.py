@@ -25,6 +25,7 @@ from shapely.ops import transform
 
 from .common import json_dump, now_iso, sha256_file, stable_id
 from .download import download
+from .ingestion_plan import planned_catalog_check
 from .registry import load_source
 
 HRL = load_source("copernicus-forests")
@@ -275,11 +276,49 @@ def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool =
     if not os.getenv(HRL["client_id_environment"]) or not os.getenv(HRL["client_secret_environment"]):
         return {"infc": infc, "catalog": {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     token = _cdse_token(HRL)
-    catalog = _persist_catalog(root, _check_catalog(HRL, token))
+    catalog_check = planned_catalog_check() or _check_catalog(HRL, token)
+    catalog = _persist_catalog(root, catalog_check)
     raster = None
     if os.getenv(HRL["processing_mode_environment"], "raster") == "raster":
         raster = _fetch_process_raster_slices(root, root / "canonical", token)
     return {"infc": infc, "catalog": catalog, "raster": raster, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
+
+
+def declared_forest_raw_paths(root: Path) -> list[Path]:
+    """Declare only raw artifacts implied by the current Forest configuration."""
+    paths: list[Path] = []
+    for asset in INFC["assets"]:
+        raw = root / "raw" / INFC["source_id"] / f"{asset['id']}.zip"
+        paths.extend((raw, raw.with_suffix(raw.suffix + ".metadata.json")))
+    paths.append(_catalog_state(root))
+    if os.getenv(HRL["processing_mode_environment"], "raster") != "raster":
+        return paths
+    for asset in HRL["assets"]:
+        if not asset.get("statistical_api_enabled", True):
+            continue
+        for start_year, end_year in _asset_periods(asset):
+            for region_code in HRL["development_slice"]["region_istat_codes"]:
+                manifest = _process_slice_path(root, asset, start_year, end_year, region_code, 0, 0).parent / "slice-manifest.json"
+                if not manifest.is_file():
+                    raise FileNotFoundError(f"Declared CDSE Process API slice manifest missing: {manifest}")
+                payload = json.loads(manifest.read_text())
+                if (
+                    payload.get("source_id") != HRL["source_id"]
+                    or payload.get("asset_id") != asset["id"]
+                    or payload.get("period") != [start_year, end_year]
+                    or payload.get("region_istat_code") != region_code
+                    or not isinstance(payload.get("entries"), list)
+                ):
+                    raise ValueError(f"Declared CDSE Process API slice manifest mismatch: {manifest}")
+                paths.append(manifest)
+                for entry in payload["entries"]:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                        raise ValueError(f"Invalid CDSE Process API slice entry: {manifest}")
+                    raw = manifest.parent / entry["path"]
+                    if raw.parent != manifest.parent:
+                        raise ValueError(f"CDSE Process API slice path escapes manifest directory: {manifest}")
+                    paths.extend((raw, raw.with_suffix(raw.suffix + ".metadata.json")))
+    return paths
 
 
 def _year_from_path(path: Path) -> int:
