@@ -27,7 +27,6 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      INFC_HTTPS_PROXIES: ${{ secrets.INFC_HTTPS_PROXIES }}
       FOREST_PROCESSING_MODE: statistical-api
     steps:
       - uses: actions/checkout@v7
@@ -43,7 +42,7 @@ jobs:
       - name: Restore reusable geospatial canonical cache
         uses: actions/cache@v6.1.0
         with:
-          path: data/canonical/forests
+          path: data/canonical/forests/algorithm_version=forests-zonal-statistics-v2
           key: forests-canonical-${{ runner.os }}-${{ github.run_id }}
           restore-keys: forests-canonical-${{ runner.os }}-
       - id: preflight

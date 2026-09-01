@@ -22,8 +22,36 @@ def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
     assert "--scope ${{ inputs.bootstrap_all && 'all' || 'geospatial' }}" in geospatial_workflow
     assert "timeout-minutes: 360" in geospatial_workflow
     assert "FOREST_PROCESSING_MODE: raster" in geospatial_workflow
-    assert "INFC_HTTPS_PROXIES: ${{ secrets.INFC_HTTPS_PROXIES }}" in data_workflow
+    assert "INFC_HTTPS_PROXIES" not in data_workflow
     assert "INFC_HTTPS_PROXIES: ${{ secrets.INFC_HTTPS_PROXIES }}" in geospatial_workflow
+    assert "data/canonical/forests/algorithm_version=forests-zonal-statistics-v2" in data_workflow
+    assert "data/raw/infc-2015-forests" in geospatial_workflow
+
+
+def test_data_scope_uses_carried_forest_input_without_fetch_or_infc_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = tmp_path / "canonical"
+    zonal = canonical / f"forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
+    zonal.parent.mkdir(parents=True)
+    zonal.write_bytes(b"carried-zonal")
+    monkeypatch.setattr(
+        cli, "fetch_forests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("data scope fetched forests")),
+    )
+    monkeypatch.setattr(
+        cli, "ingest_infc_forests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("data scope ingested INFC")),
+    )
+
+    forests = cli._run_combined_scope_forests(
+        Namespace(scope="data", offline=False, force=False), tmp_path, canonical, previous_source_state=None,
+    )
+
+    assert forests == {
+        "fetch": {"status": "out_of_scope", "scope": "geospatial"},
+        "zonal": {"changed": False, "canonical_bytes": len(b"carried-zonal"), "mode": "carried_forward"},
+    }
 
 
 def _entry(source_id: str, asset_path: str, checksum: str, *, kind: str | None = None) -> dict:
@@ -149,12 +177,42 @@ def test_copernicus_release_coherence_rejects_new_state_with_old_canonical(
     ]}
     monkeypatch.setattr(cli, "_territory_paths", lambda _canonical: [])
     monkeypatch.setattr(cli, "_validate_data_canonical_provenance", lambda *_args: None)
+    monkeypatch.setattr(cli, "_validate_infc_canonical_provenance", lambda *_args: None)
     monkeypatch.setenv("FOREST_PROCESSING_MODE", "statistical-api")
 
     with pytest.raises(ValueError, match="signatures differ"):
         _validate_release_coherence(root, state, [
             ReleaseArtifact(catalog, "raw/copernicus-hrl-forests/catalog.json"),
             ReleaseArtifact(zonal, f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"),
+            ReleaseArtifact(state_path, "metadata/source-state.json"),
+        ], scope="geospatial")
+
+
+def test_infc_release_coherence_rejects_new_state_with_old_canonical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    raw = root / "raw/infc-2015-forests/volume.zip"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"infc-v2")
+    sidecar = Path(f"{raw}.metadata.json")
+    sidecar.write_text("{}")
+    canonical = root / "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"
+    canonical.parent.mkdir(parents=True)
+    pd.DataFrame({"source_asset_sha256": ["1" * 64]}).to_parquet(canonical)
+    state_path = tmp_path / "source-state.json"
+    state_path.write_text("{}")
+    state = {"schemaVersion": 1, "sources": [
+        _entry("infc-2015-forests", "infc-2015-forests/volume.zip", "2" * 64),
+    ]}
+    monkeypatch.setattr(cli, "_territory_paths", lambda _canonical: [])
+    monkeypatch.setattr(cli, "_validate_data_canonical_provenance", lambda *_args: None)
+
+    with pytest.raises(ValueError, match="Source-state and canonical provenance differ"):
+        _validate_release_coherence(root, state, [
+            ReleaseArtifact(raw, "raw/infc-2015-forests/volume.zip"),
+            ReleaseArtifact(sidecar, "raw/infc-2015-forests/volume.zip.metadata.json"),
+            ReleaseArtifact(canonical, "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"),
             ReleaseArtifact(state_path, "metadata/source-state.json"),
         ], scope="geospatial")
 
@@ -198,7 +256,6 @@ def test_data_release_coherence_rejects_new_state_with_old_canonical(
         "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
         "canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet",
         "canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet",
-        "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet",
     ):
         artifacts.append(ReleaseArtifact(tmp_path / "unused", logical_path))
 
@@ -226,3 +283,35 @@ def test_geospatial_processing_failure_never_advances_manifest(
         )
 
     assert store.read_json("manifest.json") == before
+
+
+def test_geospatial_scope_reuses_active_infc_raw_and_owns_infc_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    hydrated: list[str] = []
+    previous = {"schemaVersion": 1, "sources": [
+        _entry("infc-2015-forests", "infc-2015-forests/volume.zip", "a" * 64),
+    ]}
+    monkeypatch.setattr(cli, "_hydrate", lambda _store, _root, paths: hydrated.extend(paths))
+
+    def fetch(_root: Path, **kwargs: object) -> dict:
+        assert kwargs["include_infc"] is True
+        return {"infc": [], "catalog": {"status": "offline"}, "raw_retention": "selective"}
+
+    monkeypatch.setattr(cli, "fetch_forests", fetch)
+    monkeypatch.setattr(
+        cli, "ingest_infc_forests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("INFC ingest reached")),
+    )
+
+    with pytest.raises(RuntimeError, match="INFC ingest reached"):
+        _run_geospatial(
+            Namespace(offline=False, force=False, report=str(tmp_path / "report.json")),
+            root=tmp_path / "data", output=tmp_path / "output", canonical=tmp_path / "data/canonical",
+            delivery=tmp_path / "data/delivery", store=store, previous_state=previous, release_id="r2",
+            started=0.0, started_at="2026-08-30T00:00:00Z",
+        )
+
+    assert "raw/infc-2015-forests/volume.zip" in hydrated
+    assert "raw/infc-2015-forests/volume.zip.metadata.json" in hydrated
