@@ -98,7 +98,7 @@ def artifact_scope(logical_path: str) -> ArtifactScope:
     """Return explicit release ownership; unknown paths fail closed."""
     if logical_path == "metadata/source-state.json":
         return "shared"
-    if logical_path.startswith("raw/copernicus-"):
+    if logical_path.startswith(("raw/infc-", "raw/copernicus-")):
         return "geospatial"
     if logical_path.startswith("raw/"):
         return "data"
@@ -107,7 +107,7 @@ def artifact_scope(logical_path: str) -> ArtifactScope:
     if logical_path.startswith("canonical/forests/algorithm_version="):
         return "geospatial"
     if logical_path.startswith("canonical/forests/dataset_version=infc"):
-        return "data"
+        return "geospatial"
     if logical_path.startswith((
         "canonical/soil/", "canonical/water/", "canonical/dissesto/", "canonical/emissions/",
         "derived/soil/",

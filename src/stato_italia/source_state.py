@@ -164,7 +164,7 @@ def changed_source_entries(previous: dict[str, Any] | None, current: dict[str, A
 
 
 def source_scope(source_id: str) -> str:
-    return "geospatial" if source_id.startswith("copernicus-") else "data"
+    return "geospatial" if source_id == "infc-2015-forests" or source_id.startswith("copernicus-") else "data"
 
 
 def scoped_source_state(state: dict[str, Any] | None, scope: str) -> dict[str, Any] | None:

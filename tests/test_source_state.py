@@ -9,6 +9,8 @@ from stato_italia.source_state import (
     check_persisted_sources,
     declared_raw_paths,
     merge_source_states,
+    scoped_source_state,
+    source_scope,
     source_state_changed,
 )
 from stato_italia.cli import _release_artifacts
@@ -109,13 +111,51 @@ def test_infc_preflight_falls_back_to_proxy_and_keeps_tls_enabled(monkeypatch: p
     monkeypatch.setenv("INFC_HTTPS_PROXIES", "http://proxy.example:3128")
     monkeypatch.setattr("stato_italia.source_state.requests.get", get)
 
-    result = check_persisted_sources(state, scope="data")
+    result = check_persisted_sources(state, scope="geospatial")
 
     assert result["changed"] is False
     assert result["sources"][0]["transport"] == "proxy"
     assert calls[0]["verify"] is True
     assert calls[1]["verify"] is True
     assert calls[1]["proxies"] == {"https": "http://proxy.example:3128"}
+
+
+def test_infc_is_geospatial_and_data_preflight_never_contacts_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = {"schemaVersion": 1, "sources": [{
+        "source_id": "infc-2015-forests", "asset_path": "infc-2015-forests/asset.zip",
+        "resolved_url": "https://www.inventarioforestale.org/asset.zip",
+        "etag": '"v1"', "last_modified": None, "sha256": "a" * 64, "bytes": 1,
+        "dataset_version": "infc2015-published-tables", "period": "2015",
+        "checked_at": "2024-01-01T00:00:00Z",
+    }]}
+    monkeypatch.setattr(
+        "stato_italia.source_state.requests.get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("data scope contacted INFC")),
+    )
+
+    result = check_persisted_sources(state, scope="data")
+
+    assert source_scope("infc-2015-forests") == "geospatial"
+    assert result == {
+        "scope": "data", "sourceChecks": 0, "sourcesChanged": 0,
+        "sourcesUnchanged": 0, "changed": False, "sources": [],
+    }
+
+
+def test_persisted_infc_state_is_reusable_after_ownership_migration() -> None:
+    infc = {
+        "source_id": "infc-2015-forests", "asset_path": "infc-2015-forests/volume.zip",
+        "resolved_url": "https://www.inventarioforestale.org/volume.zip",
+        "etag": '"v1"', "last_modified": "Mon, 01 Jan 2024 00:00:00 GMT",
+        "sha256": "a" * 64, "bytes": 123, "dataset_version": "infc2015-published-tables",
+        "period": "2015", "checked_at": "2024-01-01T00:00:00Z",
+    }
+    persisted = {"schemaVersion": 1, "sources": [infc]}
+    current = scoped_source_state(persisted, "geospatial")
+
+    assert current == persisted
+    assert merge_source_states(persisted, current, scope="geospatial") == persisted
+    assert source_state_changed(persisted, current) is False
 
 
 def test_scope_state_carry_forward_data_geospatial_data() -> None:
