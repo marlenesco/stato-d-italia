@@ -183,6 +183,11 @@ gli artifact `shared` devono essere dichiarati dal run. `scope=all` ricostruisce
 source state e membership artifact soltanto dagli output correnti, senza
 carry-forward implicito.
 
+Il dominio Foreste è interamente `geospatial`: source state e raw INFC,
+cataloghi/raw Copernicus, canonical INFC e zonali, PMTiles e delivery Foreste
+avanzano nello stesso scope. L'ownership è policy della pipeline e non entra
+nell'identità content-addressed della sorgente.
+
 ## Relazioni essenziali
 
 ```text
