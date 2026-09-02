@@ -348,11 +348,15 @@ def test_boundary_dependencies_are_reference_year_specific() -> None:
     assert current_delivery == {"soil_delivery", "water_delivery"}
     assert current_geometry == {"soil_geometry_2025"}
 
-    emissions_delivery, emissions_geometry = _data_downstream_families({"boundaries"}, {2023})
-    assert emissions_delivery == {"emissions_delivery"}
-    assert emissions_geometry == {"emissions_geometry_2023"}
+    dissesto_delivery, dissesto_geometry = _data_downstream_families({"boundaries"}, {2024})
+    assert dissesto_delivery == {"dissesto_delivery"}
+    assert dissesto_geometry == {"dissesto_geometry_2024"}
 
-    historical_delivery, historical_geometry = _data_downstream_families({"boundaries"}, {2015})
+    emissions_delivery, emissions_geometry = _data_downstream_families({"boundaries"}, {2019})
+    assert emissions_delivery == {"emissions_delivery"}
+    assert emissions_geometry == {"emissions_geometry_2019"}
+
+    historical_delivery, historical_geometry = _data_downstream_families({"boundaries"}, {2022})
     assert historical_delivery == set()
     assert historical_geometry == set()
 
@@ -548,6 +552,140 @@ def _planned_entry(source_id: str, asset_path: str, status: str) -> dict:
         "source_id": source_id, "asset_path": asset_path, "status": status,
         "baseline_sha256": "a" * 64, "baseline_bytes": 8,
     }
+
+
+@pytest.mark.parametrize(("year", "offline"), ((2015, False), (2023, True)))
+def test_scoped_data_rejects_forest_boundary_change_before_any_work_or_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, year: int, offline: bool,
+) -> None:
+    root = tmp_path / "data"
+    output = tmp_path / "artifacts"
+    store = LocalObjectStore(output / "object-store")
+    initial = tmp_path / "initial.json"
+    initial.write_text("{}")
+    publish_release(store, "r1", [ReleaseArtifact(initial, "delivery/soil/index.json")])
+    manifest_path = store.root / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    asset_path = f"istat-administrative-boundaries/{year}/limiti-{year}-generalized.zip"
+    _scoped_plan(tmp_path, scope="data", sources=[
+        _planned_entry("istat-administrative-boundaries", asset_path, "changed"),
+    ])
+    monkeypatch.setattr(
+        cli, "_hydrate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("guard hydrated artifacts")),
+    )
+    monkeypatch.setattr(
+        cli, "ingest_boundaries",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("guard processed boundaries")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match=rf"reference year {year} changed.*scope=all"):
+            cli._run_incremental_data(
+                Namespace(force=False, offline=offline, report=str(tmp_path / "report.json")),
+                root=root, output=output, canonical=root / "canonical", derived=root / "derived",
+                delivery=root / "delivery", store=store,
+                previous_state={"schemaVersion": 1, "sources": [
+                    _entry("istat-administrative-boundaries", asset_path, "a" * 64),
+                ]},
+                release_id="r2", started=0.0, started_at="2026-09-02T00:00:00Z",
+            )
+    finally:
+        clear_ingestion_plan()
+
+    assert manifest_path.read_bytes() == manifest_before
+
+
+def test_publish_boundary_guard_also_applies_without_incremental_family_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    initial = tmp_path / "initial.json"
+    initial.write_text("{}")
+    publish_release(store, "r1", [ReleaseArtifact(initial, "delivery/soil/index.json")])
+    manifest_path = store.root / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    asset_path = "istat-administrative-boundaries/2015/limiti-2015-generalized.zip"
+    previous = {"schemaVersion": 1, "sources": [
+        _entry("istat-administrative-boundaries", asset_path, "a" * 64),
+    ]}
+    current = {"schemaVersion": 1, "sources": [
+        _entry("istat-administrative-boundaries", asset_path, "b" * 64),
+    ]}
+    monkeypatch.setattr(cli, "_validate_release_coherence", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="reference year 2015 changed.*scope=all"):
+        _publish_scoped(
+            store=store, root=tmp_path, output=tmp_path / "output", release_id="r2", scope="data",
+            previous_state=previous, current_state=current, declared_paths=[], changed=True,
+        )
+
+    assert manifest_path.read_bytes() == manifest_before
+
+
+def test_publish_boundary_rejects_cross_scope_state_delta_even_if_runner_guard_is_bypassed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    initial = tmp_path / "initial.json"
+    initial.write_text("{}")
+    publish_release(store, "r1", [ReleaseArtifact(initial, "delivery/soil/index.json")])
+    manifest_path = store.root / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    asset_path = "istat-administrative-boundaries/2023/limiti-2023-generalized.zip"
+    previous = {"schemaVersion": 1, "sources": [
+        _entry("istat-administrative-boundaries", asset_path, "a" * 64),
+    ]}
+    current = {"schemaVersion": 1, "sources": [
+        _entry("istat-administrative-boundaries", asset_path, "b" * 64),
+    ]}
+    monkeypatch.setattr(cli, "_validate_release_coherence", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="reference year 2023 changed.*scope=all"):
+        _publish_scoped(
+            store=store, root=tmp_path, output=tmp_path / "output", release_id="r2", scope="data",
+            previous_state=previous, current_state=current, declared_paths=[], changed=True,
+            affected_families={"boundaries"},
+        )
+
+    assert manifest_path.read_bytes() == manifest_before
+
+
+def test_scope_all_accepts_cross_scope_boundary_delta_without_carrying_obsolete_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    output = tmp_path / "output"
+    store = LocalObjectStore(tmp_path / "store")
+    old = tmp_path / "old.zip"
+    old.write_bytes(b"old")
+    publish_release(store, "r1", [
+        ReleaseArtifact(old, "raw/istat-administrative-boundaries/2023/obsolete.zip"),
+    ])
+    current_raw = root / "raw/istat-administrative-boundaries/2023/limiti-2023-generalized.zip"
+    current_raw.parent.mkdir(parents=True)
+    current_raw.write_bytes(b"new")
+    current = {"schemaVersion": 1, "sources": [
+        _entry(
+            "istat-administrative-boundaries",
+            "istat-administrative-boundaries/2023/limiti-2023-generalized.zip",
+            "b" * 64,
+        ),
+    ]}
+    monkeypatch.setattr(cli, "_validate_release_coherence", lambda *_args, **_kwargs: None)
+
+    manifest, _metrics, publication = _publish_scoped(
+        store=store, root=root, output=output, release_id="r2", scope="all",
+        previous_state={"schemaVersion": 1, "sources": [
+            _entry("istat-administrative-boundaries", "istat-administrative-boundaries/2023/obsolete.zip", "a" * 64),
+        ]},
+        current_state=current, declared_paths=[current_raw], changed=True,
+    )
+
+    release = store.read_json(manifest["releaseKey"])
+    logical_paths = {item["logicalPath"] for item in release["objects"]}
+    assert publication["carried"] == 0
+    assert "raw/istat-administrative-boundaries/2023/obsolete.zip" not in logical_paths
+    assert "raw/istat-administrative-boundaries/2023/limiti-2023-generalized.zip" in logical_paths
 
 
 def test_changed_data_family_hydrates_only_its_unchanged_raw_dependencies(
