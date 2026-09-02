@@ -225,14 +225,26 @@ se cambia un input semantico e, in quel caso, idrata soltanto le canonical
 invariate che consuma. `all` non esegue carry-forward e sostituisce inoltre
 l'intero source state: entry e raw obsoleti non restano nella nuova release.
 
-Le dipendenze geometriche sono esplicite per dominio e anno. Un nuovo confine
-ISTAT rigenera soltanto PMTiles e delivery che usano quel reference year:
-Suolo/Acqua 2025, Dissesto 2024, Emissioni 2019 o 2023. Il bundle Foreste resta
-geospatial e internamente coerente per object identity immutabile; quando cambia
-INFC viene rigenerata la geometria regionale 2015, quando cambia Copernicus
-vengono rigenerate le geometrie 2023. Un aggiornamento di un altro anno non
-invalida la geometria storica 2015. Gli indici delivery referenziano soltanto
-geometrie presenti nella release e le mappe dichiarano il reference year
+Le dipendenze geometriche sono esplicite per dominio e anno. Nel solo scope
+`data`, un nuovo confine ISTAT 2025 rigenera PMTiles e delivery Suolo/Acqua e,
+quando richiesto dagli input semantici, `territory-insights`; il 2024 rigenera
+Dissesto e il 2019 rigenera Emissioni. Un altro anno storico senza dipendenza
+dichiarata non invalida output estranei.
+
+Le territory canonical ISTAT 2015 e 2023 sono invece input cross-scope del
+dominio Foreste: il 2015 alimenta la geometria regionale INFC; il 2023 alimenta
+geometrie, griglia/slice Process API, statistiche zonali Copernicus, delivery
+Foreste e `territory-insights`. Se il preflight data rileva un cambiamento in
+uno di questi due anni, il run scoped si interrompe prima di hydration e publish
+con richiesta esplicita di un rebuild coordinato `scope=all`. Non avvia quel
+rebuild automaticamente e non pubblica prima i nuovi confini lasciando Foreste
+stale. La stessa guardia è ripetuta al confine di pubblicazione usando il delta
+del source state, quindi non dipende soltanto dal control flow del runner.
+
+Nel dominio geospatial, un cambiamento INFC rigenera la geometria regionale 2015;
+un cambiamento Copernicus rigenera le geometrie 2023. Un aggiornamento di un anno
+diverso non invalida la geometria storica 2015. Gli indici delivery referenziano
+soltanto geometrie presenti nella release e le mappe dichiarano il reference year
 compatibile. Le signature delle canonical Foreste e degli input semantici di
 `territory-insights` sono ricontrollate prima del publish.
 

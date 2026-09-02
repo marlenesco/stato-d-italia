@@ -196,7 +196,12 @@ La release risolve ogni logical path verso un object SHA immutabile; indici e
 mappe dichiarano livello e data territoriale compatibili. INFC usa la geometria
 regionale 2015, Copernicus le geometrie 2023, Suolo e Acqua il 2025, Dissesto il
 2024 ed Emissioni il 2019/2023. Un aggiornamento ISTAT non invalida geometrie di
-anni non interessati.
+anni non interessati. Poiché le territory canonical sono shared ma Foreste è
+geospatial, un run scoped `data` non può pubblicare un cambiamento ISTAT 2015 o
+2023: entrambi richiedono un rebuild coordinato `scope=all`, che sostituisce
+nella stessa release territory canonical, canonical forestali, geometrie e
+delivery dipendenti. La pubblicazione scoped fallisce prima di aggiornare il
+manifest.
 
 ## Relazioni essenziali
 
