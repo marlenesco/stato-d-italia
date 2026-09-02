@@ -245,6 +245,7 @@ def test_changed_copernicus_catalog_reuses_preflight_payload(
     _load(tmp_path, tmp_path / "data/raw", [], catalog={
         "status": "changed", "signature": catalog["signature"], "stagedPath": str(staged),
     })
+    monkeypatch.setenv("FOREST_PROCESSING_MODE", "raster")
     monkeypatch.setenv(forests.HRL["client_id_environment"], "fake")
     monkeypatch.setenv(forests.HRL["client_secret_environment"], "fake")
     monkeypatch.setattr(forests, "_cdse_token", lambda _source: "fake-token")
