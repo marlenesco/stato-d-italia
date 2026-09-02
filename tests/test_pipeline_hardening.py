@@ -68,6 +68,39 @@ def test_data_scope_uses_carried_forest_input_without_fetch_or_infc_ingest(
     }
 
 
+def test_scope_all_recalculates_zonal_when_2023_boundaries_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    canonical = root / "canonical"
+    infc_raw = root / "raw/infc-2015-forests/volume.zip"
+    raster = root / "raw/copernicus-hrl-forests/tree-cover/2023/tile.tif"
+    infc_raw.parent.mkdir(parents=True)
+    raster.parent.mkdir(parents=True)
+    infc_raw.write_bytes(b"infc")
+    raster.write_bytes(b"raster")
+    monkeypatch.setattr(cli, "fetch_forests", lambda *_args, **_kwargs: {
+        "catalog": {"status": "checked", "signature": "a" * 64},
+    })
+    monkeypatch.setattr(cli, "ingest_infc_forests", lambda *_args, **_kwargs: {"changed": False})
+    calls: list[tuple[bool, str]] = []
+    monkeypatch.setattr(
+        cli, "ingest_forests",
+        lambda *_args, **kwargs: calls.append((bool(kwargs["force"]), str(kwargs["mode"])))
+        or {"changed": True},
+    )
+    monkeypatch.setattr(cli, "_catalog_changed_from_active", lambda *_args, **_kwargs: False)
+    monkeypatch.setenv("FOREST_PROCESSING_MODE", "raster")
+
+    forests = cli._run_combined_scope_forests(
+        Namespace(scope="all", offline=False, force=False), root, canonical,
+        previous_source_state=None, changed_boundary_years={2023},
+    )
+
+    assert calls == [(True, "raster")]
+    assert forests["zonal"]["changed"] is True
+
+
 def _entry(source_id: str, asset_path: str, checksum: str, *, kind: str | None = None) -> dict:
     entry = {
         "source_id": source_id, "asset_path": asset_path, "resolved_url": "https://official.example/asset",
