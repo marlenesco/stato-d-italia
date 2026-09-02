@@ -228,18 +228,38 @@ def test_changed_copernicus_catalog_reuses_preflight_payload(
         forests, "_check_catalog",
         lambda *_args: (_ for _ in ()).throw(AssertionError("catalog downloaded twice")),
     )
-    monkeypatch.setattr(
-        forests, "_fetch_process_raster_slices",
-        lambda *_args: {"changed": False, "requests": 0, "files": [], "raw_files": [], "raw_bytes": 0},
-    )
+    process_calls = []
+
+    def process(*_args, **kwargs):
+        process_calls.append(kwargs)
+        return {"changed": False, "requests": 0, "files": [], "raw_files": [], "raw_bytes": 0}
+
+    monkeypatch.setattr(forests, "_fetch_process_raster_slices", process)
 
     result = forests.fetch_forests(
         tmp_path / "data", include_infc=False, check_geospatial=True,
     )
 
     assert result["catalog"]["signature"] == "c" * 64
+    assert process_calls == [{"force": True}]
     persisted = json.loads((tmp_path / "data/raw/copernicus-hrl-forests/catalog.json").read_text())
     assert persisted["products"] == catalog["products_payload"]
+
+
+def test_unchanged_copernicus_catalog_makes_no_process_api_acquisition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        forests, "_fetch_process_raster_slices",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Process API contacted")),
+    )
+
+    result = forests.fetch_forests(
+        tmp_path / "data", include_infc=False, check_geospatial=False,
+    )
+
+    assert result["catalog"] == {"status": "deferred"}
+    assert "raster" not in result
 
 
 def test_forest_raw_declaration_excludes_stale_same_scope_file(

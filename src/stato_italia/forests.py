@@ -203,7 +203,9 @@ def _process_slice_path(root: Path, asset: dict, start_year: int, end_year: int,
     return root / "raw" / HRL["source_id"] / asset["id"] / f"{start_year}-{end_year}" / region_istat_code / f"r{row:02d}-c{column:02d}.tif"
 
 
-def _fetch_process_raster_slices(root: Path, canonical_root: Path, token: str) -> dict:
+def _fetch_process_raster_slices(
+    root: Path, canonical_root: Path, token: str, *, force: bool = False,
+) -> dict:
     """Acquire a bounded local raster slice through CDSE Process API, never R2."""
     reference_year = int(HRL["development_slice"]["territory_reference_year"])
     territories = _slice_territories(canonical_root, reference_year)
@@ -225,7 +227,7 @@ def _fetch_process_raster_slices(root: Path, canonical_root: Path, token: str) -
                     target = _process_slice_path(root, asset, start_year, end_year, region["istat_code"], row, column)
                     sidecar = target.with_suffix(target.suffix + ".metadata.json")
                     expected = {"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "bbox_epsg3035": list(bbox), "width": width, "height": height}
-                    prior = json.loads(sidecar.read_text()) if target.exists() and sidecar.exists() else None
+                    prior = json.loads(sidecar.read_text()) if not force and target.exists() and sidecar.exists() else None
                     if prior and prior.get("request") == expected and prior.get("sha256") == sha256_file(target):
                         metadata = prior
                     else:
@@ -276,11 +278,14 @@ def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool =
     if not os.getenv(HRL["client_id_environment"]) or not os.getenv(HRL["client_secret_environment"]):
         return {"infc": infc, "catalog": {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     token = _cdse_token(HRL)
-    catalog_check = planned_catalog_check() or _check_catalog(HRL, token)
+    planned_catalog = planned_catalog_check()
+    catalog_check = planned_catalog or _check_catalog(HRL, token)
     catalog = _persist_catalog(root, catalog_check)
     raster = None
     if os.getenv(HRL["processing_mode_environment"], "raster") == "raster":
-        raster = _fetch_process_raster_slices(root, root / "canonical", token)
+        raster = _fetch_process_raster_slices(
+            root, root / "canonical", token, force=planned_catalog is not None,
+        )
     return {"infc": infc, "catalog": catalog, "raster": raster, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
 
 

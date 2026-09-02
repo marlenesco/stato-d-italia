@@ -344,6 +344,171 @@ def _forest_plan(tmp_path: Path, *, infc_status: str, catalog_status: str) -> No
     )
 
 
+def _scoped_plan(
+    tmp_path: Path, *, scope: str, sources: list[dict], catalog: dict | None = None,
+) -> None:
+    payload = {
+        "schemaVersion": 1, "activeReleaseId": "r1", "scope": scope,
+        "sourceChecks": len(sources),
+        "sourcesChanged": sum(item["status"] == "changed" for item in sources),
+        "sourcesUnchanged": sum(item["status"] == "unchanged" for item in sources),
+        "sourcesUnverifiable": sum(item["status"] == "unverifiable" for item in sources),
+        "changed": any(item["status"] == "changed" for item in sources),
+        "sources": sources,
+    }
+    if catalog is not None:
+        payload["catalog"] = catalog
+        payload["changed"] = payload["changed"] or catalog.get("status") == "changed"
+    path = tmp_path / f"{scope}-selective-plan.json"
+    path.write_text(json.dumps(payload))
+    load_ingestion_plan(
+        path, scope=scope, active_release_id="r1", raw_root=tmp_path / "data/raw",
+    )
+
+
+def _planned_entry(source_id: str, asset_path: str, status: str) -> dict:
+    return {
+        "source_id": source_id, "asset_path": asset_path, "status": status,
+        "baseline_sha256": "a" * 64, "baseline_bytes": 8,
+    }
+
+
+def test_changed_data_family_hydrates_only_its_unchanged_raw_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = [
+        _planned_entry("ispra-emissions-ghg-2026", "ispra-emissions-ghg-2026/ghg.xlsx", "changed"),
+        _planned_entry("ispra-emissions-nfr-2026", "ispra-emissions-nfr-2026/nfr.xlsx", "unchanged"),
+        _planned_entry("ispra-bigbang-10", "ispra-bigbang-10/water.nc", "unchanged"),
+    ]
+    _scoped_plan(tmp_path, scope="data", sources=sources)
+    hydrated: list[str] = []
+    monkeypatch.setattr(cli, "_hydrate", lambda _store, _root, paths: hydrated.extend(paths))
+    try:
+        cli._hydrate_planned_raw_dependencies(object(), tmp_path / "data", {"emissions"})
+    finally:
+        clear_ingestion_plan()
+
+    assert hydrated == [
+        "raw/ispra-emissions-nfr-2026/nfr.xlsx",
+        "raw/ispra-emissions-nfr-2026/nfr.xlsx.metadata.json",
+    ]
+    assert not any("bigbang" in path or "delivery/" in path for path in hydrated)
+
+
+def test_infc_only_run_hydrates_only_infc_raw_and_copernicus_zonal_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = [
+        _planned_entry("infc-2015-forests", "infc-2015-forests/volume.zip", "changed"),
+        _planned_entry("infc-2015-forests", "infc-2015-forests/biomass.zip", "unchanged"),
+        _planned_entry(
+            "copernicus-hrl-forests",
+            "copernicus-hrl-forests/tree-cover-density/2021-2021/01/tile-r0-c0.tif",
+            "unchanged",
+        ),
+    ]
+    _scoped_plan(tmp_path, scope="geospatial", sources=sources, catalog={"status": "unchanged"})
+    hydrated: list[str] = []
+    monkeypatch.setattr(cli, "_hydrate", lambda _store, _root, paths: hydrated.extend(paths))
+    monkeypatch.setattr(
+        cli, "_process_geospatial_forest_sources",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("hydration inspected")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="hydration inspected"):
+            _run_geospatial(
+                Namespace(offline=False, force=False, report=str(tmp_path / "report.json")),
+                root=tmp_path / "data", output=tmp_path / "output", canonical=tmp_path / "data/canonical",
+                delivery=tmp_path / "data/delivery", store=object(), previous_state=None, release_id="r2",
+                started=0.0, started_at="2026-09-02T00:00:00Z",
+            )
+    finally:
+        clear_ingestion_plan()
+
+    assert "raw/infc-2015-forests/biomass.zip" in hydrated
+    assert "raw/infc-2015-forests/biomass.zip.metadata.json" in hydrated
+    assert f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet" in hydrated
+    assert not any(path.startswith("raw/copernicus-") for path in hydrated)
+    assert not any(path.startswith("canonical/soil/") for path in hydrated)
+
+
+def test_copernicus_only_run_does_not_hydrate_process_slices_and_reuses_infc_canonical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = "raw/copernicus-hrl-forests/tree-cover-density/2021-2021/01/tile-r0-c0.tif"
+    obsolete = "raw/copernicus-hrl-forests/tree-cover-density/2018-2018/01/obsolete.tif"
+    sources = [
+        _planned_entry("infc-2015-forests", "infc-2015-forests/volume.zip", "unchanged"),
+        _planned_entry("copernicus-hrl-forests", current.removeprefix("raw/"), "unchanged"),
+        _planned_entry("copernicus-hrl-forests", obsolete.removeprefix("raw/"), "unchanged"),
+    ]
+    _scoped_plan(tmp_path, scope="geospatial", sources=sources, catalog={"status": "changed"})
+    hydrated: list[str] = []
+    monkeypatch.setattr(cli, "_hydrate", lambda _store, _root, paths: hydrated.extend(paths))
+    monkeypatch.setattr(
+        cli, "_process_geospatial_forest_sources",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("hydration inspected")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="hydration inspected"):
+            _run_geospatial(
+                Namespace(offline=False, force=False, report=str(tmp_path / "report.json")),
+                root=tmp_path / "data", output=tmp_path / "output", canonical=tmp_path / "data/canonical",
+                delivery=tmp_path / "data/delivery", store=object(), previous_state=None, release_id="r2",
+                started=0.0, started_at="2026-09-02T00:00:00Z",
+            )
+    finally:
+        clear_ingestion_plan()
+
+    assert "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet" in hydrated
+    assert current not in hydrated
+    assert f"{current}.metadata.json" not in hydrated
+    assert obsolete not in hydrated
+    assert f"{obsolete}.metadata.json" not in hydrated
+    assert not any(path.startswith("raw/infc-") for path in hydrated)
+
+
+def test_planned_noop_does_not_hydrate_or_advance_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    output = tmp_path / "artifacts"
+    store = LocalObjectStore(output / "object-store")
+    state = tmp_path / "source-state.json"
+    state.write_text(json.dumps({"schemaVersion": 1, "sources": []}))
+    publish_release(store, "r1", [ReleaseArtifact(state, "metadata/source-state.json")])
+    plan = tmp_path / "noop-plan.json"
+    plan.write_text(json.dumps({
+        "schemaVersion": 1, "activeReleaseId": "r1", "scope": "data",
+        "sourceChecks": 1, "sourcesChanged": 0, "sourcesUnchanged": 1,
+        "sourcesUnverifiable": 0, "changed": False,
+        "sources": [_planned_entry("ispra-soil-2025", "ispra-soil-2025/soil.xlsx", "unchanged")],
+    }))
+    before = store.read_json("manifest.json")
+    monkeypatch.setattr(
+        cli, "_hydrate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no-op hydrated artifacts")),
+    )
+    monkeypatch.setattr(
+        cli, "_run_incremental_data",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no-op entered ingestion")),
+    )
+    try:
+        result = cli.run(Namespace(
+            workdir=str(root), output=str(output), release_id="r2", publish="local", scope="data",
+            plan=str(plan), force=False, offline=False, report=str(tmp_path / "noop-report.json"),
+        ))
+    finally:
+        clear_ingestion_plan()
+
+    assert result == 0
+    assert store.read_json("manifest.json") == before
+    report = json.loads((tmp_path / "noop-report.json").read_text())
+    assert report["status"] == "noop"
+    assert report["operationalMetrics"]["bytesUploadedToR2"] == 0
+
+
 def test_infc_only_change_does_not_acquire_or_ingest_copernicus(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

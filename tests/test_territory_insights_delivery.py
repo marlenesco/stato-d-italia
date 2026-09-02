@@ -48,3 +48,14 @@ def test_delivery_keeps_domain_series_and_declares_snapshot(tmp_path) -> None:
         territory_root, tmp_path / "delivery", "release-other",
     )
     assert reused["changed"] is False
+
+    obsolete = tmp_path / "delivery/territory-insights/province/obsolete.json"
+    obsolete.write_text("{}")
+    soil.loc[0, "value_decimal"] = 13
+    soil.to_parquet(paths["soil"], index=False)
+    regenerated = generate_territory_insights_delivery(
+        paths["soil"], paths["forest"], paths["water"], paths["risk"], paths["emissions"],
+        territory_root, tmp_path / "delivery", "release-changed",
+    )
+    assert regenerated["changed"] is True
+    assert not obsolete.exists()
