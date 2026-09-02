@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections import defaultdict
 from pathlib import Path
 
@@ -92,6 +93,8 @@ def generate_territory_insights_delivery(
     if index_path.exists() and not force and json.loads(index_path.read_text()).get("inputSignature") == signature:
         files = sorted(root.rglob("*.json"))
         return {"changed": False, "files": files, "bytes": sum(path.stat().st_size for path in files)}
+    if root.exists():
+        shutil.rmtree(root)
     tables = {
         "soil": pd.read_parquet(soil_path), "water": pd.read_parquet(water_path), "risk": pd.read_parquet(dissesto_path),
         "emissions": pd.read_parquet(emissions_path), "forests": pd.read_parquet(forests_path) if forests_path and forests_path.exists() else pd.DataFrame(),
