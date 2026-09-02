@@ -30,7 +30,7 @@ from .ingestion_plan import (
 from .dissesto import fetch_dissesto, ingest_dissesto
 from .dissesto_delivery import generate_dissesto_delivery
 from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, artifact_scope, carry_forward_active_artifacts, hydrate_active_artifact, publish_release, rollback
-from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, merge_source_families, merge_source_states, scoped_source_state, source_family, source_state_changed, source_state_counts, source_state_entry
+from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, comparable_state, merge_source_families, merge_source_states, scoped_source_state, source_family, source_state_changed, source_state_counts, source_state_entry
 from .soil import ingest_soil
 from .territories import SOURCE_YEARS, ingest_boundaries
 from .water import ingest_water
@@ -474,6 +474,10 @@ def _publish_scoped(
         missing_source_families = source_families - declared_source_families
         if missing_source_families:
             raise ValueError(f"Affected source families lack current source-state: {sorted(missing_source_families)}")
+    if scope == "data" and (affected_families is None or "boundaries" in source_families):
+        _refuse_scoped_forest_boundary_changes(
+            _boundary_state_delta_years(previous_state, current_state)
+        )
     source_state = (
         merge_source_families(
             previous_state, current_state, scope=scope,
@@ -687,17 +691,56 @@ _DATA_DELIVERY_FAMILY = {
     "emissions": "emissions_delivery",
 }
 
+_FOREST_BOUNDARY_REFERENCE_YEARS = frozenset({2015, 2023})
+
+
+def _boundary_reference_year(asset_path: str) -> int:
+    matches = [int(part) for part in Path(asset_path).parts if part.isdigit()]
+    configured = [year for year in matches if year in SOURCE_YEARS]
+    if len(configured) != 1:
+        raise ValueError(f"Cannot resolve changed ISTAT boundary year: {asset_path}")
+    return configured[0]
+
+
+def _refuse_scoped_forest_boundary_changes(years: set[int]) -> None:
+    affected = sorted(years & _FOREST_BOUNDARY_REFERENCE_YEARS)
+    if not affected:
+        return
+    references = "/".join(str(year) for year in affected)
+    raise RuntimeError(
+        f"ISTAT boundary reference year {references} changed and affects geospatial Forest artifacts. "
+        "A coordinated scope=all rebuild is required; scoped data publication is refused."
+    )
+
+
+def _boundary_state_delta_years(previous: dict | None, current: dict) -> set[int]:
+    def entries(state: dict | None) -> dict[str, dict]:
+        normalised = scoped_source_state(state, "data") if state else None
+        return {
+            str(entry["asset_path"]): entry
+            for entry in (normalised or {}).get("sources", [])
+            if entry.get("source_id") == "istat-administrative-boundaries"
+        }
+
+    prior = entries(previous)
+    candidate = entries(current)
+    changed_years: set[int] = set()
+    for asset_path in prior.keys() | candidate.keys():
+        earlier = prior.get(asset_path)
+        latest = candidate.get(asset_path)
+        if earlier is None or latest is None or comparable_state(
+            {"schemaVersion": 1, "sources": [earlier]}
+        ) != comparable_state({"schemaVersion": 1, "sources": [latest]}):
+            changed_years.add(_boundary_reference_year(asset_path))
+    return changed_years
+
 
 def _changed_boundary_years() -> set[int]:
     years: set[int] = set()
     for entry in planned_entries():
         if entry.get("source_id") != "istat-administrative-boundaries" or entry.get("status") != "changed":
             continue
-        matches = [int(part) for part in Path(str(entry["asset_path"])).parts if part.isdigit()]
-        configured = [year for year in matches if year in SOURCE_YEARS]
-        if len(configured) != 1:
-            raise ValueError(f"Cannot resolve changed ISTAT boundary year: {entry['asset_path']}")
-        years.add(configured[0])
+        years.add(_boundary_reference_year(str(entry["asset_path"])))
     return years
 
 
@@ -737,6 +780,7 @@ def _run_incremental_data(
 ) -> int:
     families = _changed_source_families()
     boundary_years = _changed_boundary_years() if "boundaries" in families else set()
+    _refuse_scoped_forest_boundary_changes(boundary_years)
     if args.force:
         families = {"boundaries", "soil", "water", "dissesto", "emissions"}
         boundary_years = set(SOURCE_YEARS)
