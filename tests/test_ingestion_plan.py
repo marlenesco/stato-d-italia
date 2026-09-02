@@ -92,6 +92,30 @@ def test_unverifiable_infc_preserves_trusted_baseline_without_upstream_retry(
     assert destination.read_bytes() == b"trusted"
 
 
+def test_offline_run_rejects_changed_asset_without_staged_body(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    entry = _baseline_entry("official-source", "official-source/asset.zip", b"V1", "changed")
+    destination = _write_baseline(raw_root, entry, b"V1")
+    _load(tmp_path, raw_root, [entry])
+
+    with pytest.raises(RuntimeError, match="Offline run cannot acquire changed planned asset"):
+        download("https://official.example/asset.zip", destination, "official-source", offline=True)
+
+
+def test_plan_bound_to_old_active_release_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({
+        "schemaVersion": 1, "activeReleaseId": "r1", "scope": "geospatial",
+        "sourceChecks": 0, "sourcesChanged": 0, "sourcesUnchanged": 0,
+        "sourcesUnverifiable": 0, "changed": False, "sources": [],
+    }))
+
+    with pytest.raises(ValueError, match="does not reference the active release"):
+        load_ingestion_plan(
+            path, scope="geospatial", active_release_id="r2", raw_root=tmp_path / "raw",
+        )
+
+
 def test_preflight_full_body_is_promoted_without_second_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

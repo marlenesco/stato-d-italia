@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -47,9 +46,8 @@ def generate_forests_delivery(zonal_path: Path | None, infc_path: Path, territor
     if index_path.exists() and not force and (prior := json.loads(index_path.read_text())).get("algorithmVersion") == DELIVERY_ALGORITHM_VERSION and prior.get("canonicalSignature") == canonical_signature:
         files = sorted((destination / "foreste").rglob("*.json"))
         return {"changed": False, "files": files, "bytes": sum(path.stat().st_size for path in files)}
-    for generated in (destination / "foreste/maps", destination / "foreste/rankings"):
-        if generated.exists():
-            shutil.rmtree(generated)
+    for generated in (destination / "foreste").rglob("*.json"):
+        generated.unlink()
     zonal = pd.read_parquet(zonal_path) if zonal_path and zonal_path.exists() else pd.DataFrame()
     infc = pd.read_parquet(infc_path)
     required = {"metric_id", "territory_id", "territory_version_id", "territory_level", "period_start", "period_end", "value_decimal", "official_status"}

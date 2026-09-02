@@ -29,6 +29,8 @@ def generate_dissesto_delivery(
             return {"changed": False, "skipped": True, "files": files, "bytes": sum(path.stat().st_size for path in files)}
     if set(geometry) != set(MAPPABLE_LEVELS) or not all(path.exists() for path in geometry.values()):
         raise ValueError("Missing 2024 ISTAT PMTiles geometry required for IdroGEO delivery")
+    for generated in (destination / "dissesto").rglob("*.json"):
+        generated.unlink()
 
     table = pd.read_parquet(canonical_path)
     required = {"metric_id", "territory_id", "territory_level", "period_start", "period_end", "value_decimal", "value_state", "unit_ucum", "territory_version_id"}

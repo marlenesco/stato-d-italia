@@ -13,7 +13,7 @@ import requests
 
 from .common import json_dump, now_iso, sha256_file
 from .infc_transport import InfcTransportError, infc_proxy_candidates, is_infc_url, is_retryable_infc_status
-from .ingestion_plan import materialize_planned_asset
+from .ingestion_plan import materialize_planned_asset, planned_asset_status
 
 
 class _LinkCollector(HTMLParser):
@@ -109,6 +109,8 @@ def download(
         return planned
     prior = json.loads(metadata_path.read_text()) if destination.exists() and metadata_path.exists() else None
     if offline:
+        if planned_asset_status(destination, source_id) == "changed":
+            raise RuntimeError(f"Offline run cannot acquire changed planned asset: {destination}")
         if not destination.exists():
             raise FileNotFoundError(
                 f"Offline source asset missing for {source_id}: {destination}. "

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -109,15 +108,15 @@ def generate_emissions_delivery(
     if set(province_geometry_paths) != set(MAP_REFERENCE_YEARS) or not all(path.exists() for path in province_geometry_paths.values()):
         raise ValueError("Missing matching ISTAT province PMTiles geometry required for emissions delivery")
     root = destination / "emissions"
-    maps_root = root / "maps"
-    if maps_root.exists():
-        shutil.rmtree(maps_root)
+    for generated in root.rglob("*.json"):
+        generated.unlink()
     _write(root / "provenance.json", {"schemaVersion": DELIVERY_SCHEMA_VERSION, "releaseId": release_id, "theme": "emissions", "datasets": {"greenhouseGases": load_source("ispra-emissions-ghg-2026"), "airPollutantsNfr": load_source("ispra-emissions-nfr-2026"), "provincial": load_source("ispra-emissions-provincial-2026")}, "officialVsDerived": {"national_territorial_inventory": "Inventario nazionale ISPRA: non emissione dichiarata da singolo stabilimento e non concentrazione misurata nell'aria.", "provincial_disaggregation": "Stima ISPRA top-down per provincia e attività SNAP; non viene trasformata in dato comunale.", "derived_metric": "Questo delivery non somma attività SNAP e non pubblica ranking o percentili."}})
     ghg_path = "delivery/emissions/national/greenhouse-gases.json"
     nfr_path = "delivery/emissions/national/air-pollutants-nfr.json"
     provincial_catalog_path = "delivery/emissions/provincial/catalog.json"
     ghg_series, nfr_series = _national_series(ghg, "ghg"), _national_series(nfr, "nfr")
     provincial_catalog = _write_provincial_maps(provincial, destination, release_id)
+    map_paths = sorted({path for item in provincial_catalog for path in item["mapPaths"].values()})
     _write(destination / ghg_path.removeprefix("delivery/"), {"schemaVersion": DELIVERY_SCHEMA_VERSION, "releaseId": release_id, "kind": "official_national_series", "dataset": "greenhouse_gases", "series": ghg_series, "provenanceRef": "delivery/emissions/provenance.json"})
     _write(destination / nfr_path.removeprefix("delivery/"), {"schemaVersion": DELIVERY_SCHEMA_VERSION, "releaseId": release_id, "kind": "official_national_series", "dataset": "air_pollutants_nfr", "series": nfr_series, "provenanceRef": "delivery/emissions/provenance.json"})
     _write(destination / provincial_catalog_path.removeprefix("delivery/"), {"schemaVersion": DELIVERY_SCHEMA_VERSION, "releaseId": release_id, "kind": "official_provincial_map_catalog", "territoryLevel": "province", "combinations": provincial_catalog, "provenanceRef": "delivery/emissions/provenance.json"})
@@ -126,6 +125,6 @@ def generate_emissions_delivery(
     if default is None or total is None:
         raise ValueError("Required default emissions explorer series is absent from source")
     _write(root / "overview.json", {"schemaVersion": DELIVERY_SCHEMA_VERSION, "releaseId": release_id, "theme": "emissions", "greenhouseGases": {"label": "Gas serra nazionali", "coverage": "Italia · 1990–2024", "unit": "kt CO2 equivalenti", "seriesLabel": "Totale emissioni nette ufficiale", "series": total["values"], "metrics": ["CO2 equivalente", "CO2", "CH4", "N2O", "gas fluorurati"]}, "airPollutantsNfr": {"label": "Inquinanti atmosferici nazionali", "coverage": "Italia · 1990–2024", "metrics": int(nfr["metric_id"].nunique()), "sourceDimensions": ["settore NFR", "inquinante", "unità fonte"]}, "provincialDisaggregation": {"label": "Disaggregazione provinciale", "coverage": "Province · 2019 e 2023", "metrics": int(provincial["metric_id"].nunique()), "sourceDimensions": ["provincia", "attività SNAP", "inquinante"]}, "map": {"metricId": default["metricId"], "snapCode": default["snapCode"], "label": f"{default['pollutantLabel']} · {default['snapLabel']}", "detail": "Osservazione ISPRA per una singola combinazione inquinante e attività SNAP. Non è il totale del traffico né la concentrazione dell'aria.", "coverage": "Province · 2019 e 2023", "periods": [int(year) for year in default["mapPaths"]], "territoryLevel": "province"}, "provenanceRef": "delivery/emissions/provenance.json"})
-    _write(index_path, {"schemaVersion": DELIVERY_SCHEMA_VERSION, "releaseId": release_id, "theme": "emissions", "algorithmVersion": DELIVERY_ALGORITHM_VERSION, "overview": "delivery/emissions/overview.json", "provenance": "delivery/emissions/provenance.json", "national": {"greenhouseGases": ghg_path, "airPollutantsNfr": nfr_path}, "provincialCatalog": provincial_catalog_path, "geometry": [f"delivery/emissions/geometry/{province_geometry_paths[year].name}" for year in MAP_REFERENCE_YEARS]})
+    _write(index_path, {"schemaVersion": DELIVERY_SCHEMA_VERSION, "releaseId": release_id, "theme": "emissions", "algorithmVersion": DELIVERY_ALGORITHM_VERSION, "overview": "delivery/emissions/overview.json", "provenance": "delivery/emissions/provenance.json", "national": {"greenhouseGases": ghg_path, "airPollutantsNfr": nfr_path}, "provincialCatalog": provincial_catalog_path, "maps": map_paths, "geometry": [f"delivery/emissions/geometry/{province_geometry_paths[year].name}" for year in MAP_REFERENCE_YEARS]})
     files = sorted(path for path in root.rglob("*.json"))
     return {"changed": True, "files": files, "bytes": sum(path.stat().st_size for path in files)}
