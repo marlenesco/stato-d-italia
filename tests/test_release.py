@@ -8,9 +8,11 @@ from types import SimpleNamespace
 from botocore.exceptions import ClientError
 
 from stato_italia.release import (
+    CarriedArtifact,
     LocalObjectStore,
     R2ObjectStore,
     ReleaseArtifact,
+    active_release,
     artifact_scope,
     artifact_family,
     carry_forward_active_artifacts,
@@ -113,8 +115,11 @@ def test_artifact_ownership_is_explicit() -> None:
 
 def test_artifact_processing_family_is_explicit() -> None:
     assert artifact_family("raw/ispra-soil-2025/source.xlsx") == "soil"
-    assert artifact_family("delivery/soil/geometry/istat-region-2025.pmtiles") == "data_geometry"
-    assert artifact_family("delivery/foreste/geometry/istat-region-2023.pmtiles") == "forest_geometry"
+    assert artifact_family("delivery/soil/index.json") == "soil_delivery"
+    assert artifact_family("delivery/soil/geometry/istat-region-2025.pmtiles") == "soil_geometry_2025"
+    assert artifact_family("delivery/dissesto/geometry/istat-region-2024.pmtiles") == "dissesto_geometry_2024"
+    assert artifact_family("delivery/emissions/geometry/istat-province-2023.pmtiles") == "emissions_geometry_2023"
+    assert artifact_family("delivery/foreste/geometry/istat-region-2023.pmtiles") == "forest_geometry_2023"
     assert artifact_family("delivery/territory-insights/index.json") == "territory_insights"
 
 
@@ -193,6 +198,41 @@ def test_changed_shared_output_is_replaced_while_unrelated_shared_survives(tmp_p
 
     assert {item.logical_path for item in carried} == {
         "canonical/territories/reference_year=2025/region.parquet",
+    }
+
+
+def test_geometry_replacement_is_domain_and_reference_year_specific(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    artifacts = []
+    for logical_path in (
+        "delivery/emissions/geometry/istat-province-2019.pmtiles",
+        "delivery/emissions/geometry/istat-province-2023.pmtiles",
+        "delivery/foreste/geometry/istat-region-2015.pmtiles",
+        "delivery/foreste/geometry/istat-region-2023.pmtiles",
+    ):
+        path = tmp_path / logical_path.replace("/", "-")
+        path.write_bytes(logical_path.encode())
+        artifacts.append(ReleaseArtifact(path, logical_path))
+    publish_release(store, "r1", artifacts)
+
+    carried = carry_forward_active_artifacts(
+        store, set(), scope="data",
+        affected_families={"emissions_geometry_2023"},
+    )
+    assert {item.logical_path for item in carried} == {
+        "delivery/emissions/geometry/istat-province-2019.pmtiles",
+        "delivery/foreste/geometry/istat-region-2015.pmtiles",
+        "delivery/foreste/geometry/istat-region-2023.pmtiles",
+    }
+
+    carried = carry_forward_active_artifacts(
+        store, set(), scope="geospatial",
+        affected_families={"forest_geometry_2023"},
+    )
+    assert {item.logical_path for item in carried} == {
+        "delivery/emissions/geometry/istat-province-2019.pmtiles",
+        "delivery/emissions/geometry/istat-province-2023.pmtiles",
+        "delivery/foreste/geometry/istat-region-2015.pmtiles",
     }
 
 
@@ -293,3 +333,90 @@ def test_r2_immutable_json_identical_is_reused() -> None:
     store.bucket = "test"
     store.client = Client()
     store.put_json("releases/r1/release.json", {"value": 1}, immutable=True)
+
+
+def test_missing_carried_object_fails_before_manifest_update(tmp_path: Path) -> None:
+    source = tmp_path / "forest.parquet"
+    source.write_bytes(b"forest")
+    store = LocalObjectStore(tmp_path / "store")
+    publish_release(store, "r1", [ReleaseArtifact(source, "canonical/forests/algorithm_version=v1/data.parquet")])
+    before = store.read_json("manifest.json")
+    carried = carry_forward_active_artifacts(store, set(), scope="data")
+    object_path = store.root / carried[0].key
+    object_path.unlink()
+
+    with pytest.raises(FileNotFoundError, match="Referenced immutable object is missing"):
+        publish_release(store, "r2", carried)
+
+    assert store.read_json("manifest.json") == before
+
+
+def test_carried_descriptor_must_match_content_addressed_key(tmp_path: Path) -> None:
+    source = tmp_path / "forest.parquet"
+    source.write_bytes(b"forest")
+    store = LocalObjectStore(tmp_path / "store")
+    publish_release(store, "r1", [ReleaseArtifact(source, "canonical/forests/algorithm_version=v1/data.parquet")])
+    item = carry_forward_active_artifacts(store, set(), scope="data")[0]
+    invalid = CarriedArtifact(
+        key=item.key, sha256="0" * 64, bytes=item.bytes, name=item.name,
+        logical_path=item.logical_path,
+    )
+
+    with pytest.raises(ValueError, match="Invalid immutable object descriptor"):
+        publish_release(store, "r2", [invalid])
+
+
+def test_active_manifest_must_match_release_descriptor(tmp_path: Path) -> None:
+    source = tmp_path / "source.parquet"
+    source.write_bytes(b"source")
+    store = LocalObjectStore(tmp_path / "store")
+    publish_release(store, "r1", [source])
+    manifest = store.read_json("manifest.json")
+    manifest["releaseId"] = "r2"
+    store.put_json("manifest.json", manifest, immutable=False)
+
+    with pytest.raises(ValueError, match="manifest and immutable release descriptor disagree"):
+        active_release(store)
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    (("AccessDenied", 403), ("AccessDenied", 404), ("InternalError", 500)),
+)
+def test_r2_exists_does_not_hide_auth_or_server_errors(code: str, status: int) -> None:
+    error = ClientError(
+        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "HeadObject",
+    )
+
+    class Client:
+        exceptions = SimpleNamespace(ClientError=ClientError)
+
+        def head_object(self, **_kwargs):
+            raise error
+
+    store = object.__new__(R2ObjectStore)
+    store.bucket = "test"
+    store.client = Client()
+
+    with pytest.raises(ClientError):
+        store.exists("manifest.json")
+
+
+def test_r2_exists_returns_false_only_for_real_not_found() -> None:
+    error = ClientError(
+        {"Error": {"Code": "NoSuchKey"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+        "HeadObject",
+    )
+
+    class Client:
+        exceptions = SimpleNamespace(ClientError=ClientError)
+
+        def head_object(self, **_kwargs):
+            raise error
+
+    store = object.__new__(R2ObjectStore)
+    store.bucket = "test"
+    store.client = Client()
+
+    assert store.exists("missing") is False

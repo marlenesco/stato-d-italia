@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from .analytics import build_soil_analytics
-from .common import json_dump, now_iso
+from .common import json_dump, now_iso, sha256_file
 from .delivery import generate_soil_delivery
 from .emissions import fetch_emissions, ingest_emissions
 from .emissions_delivery import generate_emissions_delivery
@@ -278,9 +278,128 @@ def _validate_infc_canonical_provenance(root: Path, source_state: dict, logical_
         raise ValueError(f"Source-state and canonical provenance differ: {logical_path}")
 
 
+def _artifact_sha256(item: ReleaseArtifact | CarriedArtifact) -> str:
+    return item.sha256 if isinstance(item, CarriedArtifact) else sha256_file(item.path)
+
+
+def _artifact_json(
+    item: ReleaseArtifact | CarriedArtifact, store: LocalObjectStore | R2ObjectStore | None,
+) -> dict:
+    if isinstance(item, ReleaseArtifact):
+        return json.loads(item.path.read_text())
+    if store is None:
+        raise ValueError(f"Cannot validate carried JSON without object store: {item.logical_path}")
+    return store.read_json(item.key)
+
+
+def _validate_delivery_dependencies(
+    artifacts: list[ReleaseArtifact | CarriedArtifact], *,
+    store: LocalObjectStore | R2ObjectStore | None,
+    affected_families: set[str] | None,
+) -> None:
+    by_logical = {item.logical_path: item for item in artifacts}
+    logical_paths = set(by_logical)
+    if affected_families is not None:
+        required_downstream = {
+            "infc": {"forest_delivery", "forest_geometry_2015"},
+            "copernicus": {"forest_delivery", "forest_geometry_2023", "territory_insights"},
+            "soil": {"soil_delivery", "territory_insights"},
+            "water": {"water_delivery", "territory_insights"},
+            "dissesto": {"dissesto_delivery", "territory_insights"},
+            "emissions": {"emissions_delivery"},
+        }
+        required = set().union(*(
+            required_downstream.get(family, set()) for family in affected_families
+        ))
+        missing = required - affected_families
+        if missing:
+            raise ValueError(f"Affected source families lack dependent outputs: {sorted(missing)}")
+
+    forest_index_path = "delivery/foreste/index.json"
+    forest_canonicals = {
+        "infc": "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet",
+        "zonal": f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
+    }
+    if all(path in logical_paths for path in forest_canonicals.values()):
+        if forest_index_path not in by_logical:
+            raise ValueError("Release lacks forest delivery index")
+        forest_index = _artifact_json(by_logical[forest_index_path], store)
+        expected = {name: _artifact_sha256(by_logical[path]) for name, path in forest_canonicals.items()}
+        if forest_index.get("canonicalSignature") != expected:
+            raise ValueError("Forest delivery canonical signatures do not match release canonicals")
+        geometry = set(forest_index.get("geometry", []))
+        map_geometry = forest_index.get("mapGeometry", {})
+        if not isinstance(map_geometry, dict) or not geometry <= logical_paths:
+            raise ValueError("Forest delivery references missing geometry")
+        if set(map_geometry) != set(forest_index.get("maps", [])) or not set(map_geometry.values()) <= geometry:
+            raise ValueError("Forest map geometry references are incomplete")
+        if affected_families is None or "forest_delivery" in affected_families:
+            for map_path, geometry_path in map_geometry.items():
+                if map_path not in by_logical:
+                    raise ValueError(f"Forest delivery references missing map: {map_path}")
+                payload = _artifact_json(by_logical[map_path], store)
+                reference = str(payload.get("territoryReferenceDate", ""))
+                level = str(payload.get("territoryLevel", ""))
+                if Path(geometry_path).name != f"istat-{level}-{reference[:4]}.pmtiles":
+                    raise ValueError(f"Forest map lacks compatible geometry: {map_path}")
+
+    insight_index_path = "delivery/territory-insights/index.json"
+    insight_inputs = (
+        "canonical/soil/dataset_version=2025-2024-observations/observations.parquet",
+        "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
+        "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
+        "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
+        f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
+    )
+    if (
+        affected_families is not None
+        and "territory_insights" in affected_families
+        and insight_index_path not in by_logical
+    ):
+        raise ValueError("Release lacks regenerated territory insights index")
+    if insight_index_path in by_logical:
+        if not all(path in by_logical for path in insight_inputs):
+            raise ValueError("Territory insights release lacks a semantic canonical input")
+        expected = "|".join(_artifact_sha256(by_logical[path]) for path in insight_inputs)
+        insights = _artifact_json(by_logical[insight_index_path], store)
+        if insights.get("inputSignature") != expected:
+            raise ValueError("Territory insights input signature does not match release canonicals")
+
+    if affected_families is None:
+        checked_delivery = {"soil_delivery", "water_delivery", "dissesto_delivery", "emissions_delivery", "forest_delivery"}
+    else:
+        checked_delivery = affected_families
+    for domain, family in (
+        ("soil", "soil_delivery"), ("water", "water_delivery"),
+        ("dissesto", "dissesto_delivery"), ("emissions", "emissions_delivery"),
+    ):
+        index_path = f"delivery/{domain}/index.json"
+        if family not in checked_delivery:
+            continue
+        if index_path not in by_logical:
+            raise ValueError(f"Release lacks regenerated {domain} delivery index")
+        index = _artifact_json(by_logical[index_path], store)
+        geometry = set(index.get("geometry", []))
+        if not geometry or not geometry <= logical_paths:
+            raise ValueError(f"{domain} delivery references missing geometry")
+        for logical_path in index.get("maps", []):
+            if logical_path not in by_logical:
+                raise ValueError(f"{domain} delivery references missing map: {logical_path}")
+            payload = _artifact_json(by_logical[logical_path], store)
+            reference = str(payload.get("territoryReferenceDate", ""))
+            level = str(payload.get("territoryLevel", ""))
+            if level not in {"municipality", "province", "region"}:
+                continue
+            if len(reference) < 4 or not any(
+                Path(path).name == f"istat-{level}-{reference[:4]}.pmtiles" for path in geometry
+            ):
+                raise ValueError(f"{domain} map lacks compatible geometry: {logical_path}")
+
+
 def _validate_release_coherence(
     root: Path, source_state: dict, artifacts: list[ReleaseArtifact | CarriedArtifact], *, scope: str,
     affected_families: set[str] | None = None,
+    store: LocalObjectStore | R2ObjectStore | None = None,
 ) -> None:
     """Fail before upload when provenance, scope ownership, or Copernicus canonical diverge."""
     logical_paths = {item.logical_path for item in artifacts}
@@ -300,23 +419,42 @@ def _validate_release_coherence(
     if missing_shared:
         raise ValueError(f"Release lacks shared territory canonical artifacts: {sorted(missing_shared)}")
     _validate_data_canonical_provenance(root, source_state, logical_paths, affected_families)
-    if scope == "data":
-        return
-    if affected_families is None or "infc" in affected_families:
-        _validate_infc_canonical_provenance(root, source_state, logical_paths)
-    if affected_families is not None and "copernicus" not in affected_families:
-        return
-    catalog = next((entry for entry in source_state["sources"] if entry.get("kind") == "catalog"), None)
-    if catalog is None:
-        raise ValueError("Geospatial release lacks Copernicus catalog source-state")
-    zonal_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
-    if zonal_logical not in logical_paths:
-        raise ValueError("Geospatial release lacks forest zonal canonical")
-    if os.getenv("FOREST_PROCESSING_MODE", "raster") == "statistical-api":
-        table = pd.read_parquet(root / zonal_logical, columns=["source_asset_sha256"])
-        hashes = set(table["source_asset_sha256"].dropna().astype(str))
-        if hashes != {catalog["sha256"]}:
-            raise ValueError("Copernicus source-state and forest canonical signatures differ")
+    if scope != "data":
+        if affected_families is None or "infc" in affected_families:
+            _validate_infc_canonical_provenance(root, source_state, logical_paths)
+        if affected_families is None or "copernicus" in affected_families:
+            catalog = next((entry for entry in source_state["sources"] if entry.get("kind") == "catalog"), None)
+            if catalog is None:
+                raise ValueError("Geospatial release lacks Copernicus catalog source-state")
+            zonal_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
+            if zonal_logical not in logical_paths:
+                raise ValueError("Geospatial release lacks forest zonal canonical")
+            table = pd.read_parquet(root / zonal_logical, columns=["source_asset_sha256"])
+            hashes = set(table["source_asset_sha256"].dropna().astype(str))
+            if os.getenv("FOREST_PROCESSING_MODE", "raster") == "statistical-api":
+                if hashes != {catalog["sha256"]}:
+                    raise ValueError("Copernicus source-state and forest canonical signatures differ")
+            else:
+                manifests = [
+                    item for item in artifacts
+                    if item.logical_path.startswith("raw/copernicus-")
+                    and item.logical_path.endswith("/slice-manifest.json")
+                ]
+                if manifests:
+                    expected = {
+                        str(_artifact_json(item, store).get("source_signature")) for item in manifests
+                    }
+                else:
+                    expected = {
+                        str(entry["sha256"]) for entry in source_state["sources"]
+                        if str(entry.get("source_id", "")).startswith("copernicus-")
+                        and entry.get("kind") != "catalog"
+                    }
+                if not expected or "None" in expected or hashes != expected:
+                    raise ValueError("Copernicus raster provenance and forest canonical signatures differ")
+    _validate_delivery_dependencies(
+        artifacts, store=store, affected_families=affected_families,
+    )
 
 
 def _publish_scoped(
@@ -324,10 +462,22 @@ def _publish_scoped(
     scope: str, previous_state: dict | None, current_state: dict, declared_paths: list[Path], changed: bool,
     affected_families: set[str] | None = None,
 ) -> tuple[dict, dict, dict]:
+    source_families: set[str] = set()
+    if affected_families is not None:
+        source_families = {
+            family for family in affected_families
+            if family in {"boundaries", "soil", "water", "dissesto", "emissions", "infc", "copernicus"}
+        }
+        declared_source_families = {
+            source_family(str(entry["source_id"])) for entry in current_state.get("sources", [])
+        }
+        missing_source_families = source_families - declared_source_families
+        if missing_source_families:
+            raise ValueError(f"Affected source families lack current source-state: {sorted(missing_source_families)}")
     source_state = (
         merge_source_families(
             previous_state, current_state, scope=scope,
-            replace_families={family for family in (affected_families or set()) if family in {"boundaries", "soil", "water", "dissesto", "emissions", "infc", "copernicus"}},
+            replace_families=source_families,
         )
         if affected_families is not None
         else merge_source_states(previous_state, current_state, scope=scope)
@@ -344,7 +494,8 @@ def _publish_scoped(
         store, {item.logical_path for item in fresh}, scope=scope, affected_families=affected_families,
     )
     _validate_release_coherence(
-        root, source_state, [*fresh, *carried], scope=scope, affected_families=affected_families,
+        root, source_state, [*fresh, *carried], scope=scope,
+        affected_families=affected_families, store=store,
     )
     manifest = publish_release(store, release_id, [*fresh, *carried]) if changed else store.read_json("manifest.json")
     carried_sources = len(source_state["sources"]) - len(current_state["sources"])
@@ -375,6 +526,8 @@ def _process_geospatial_forest_sources(
     copernicus_changed = source_family_changed("copernicus-") or planned_catalog_changed()
     process_infc = plan is None or infc_changed or args.force
     process_copernicus = plan is None or copernicus_changed or args.force
+    if plan is not None and args.offline and copernicus_changed:
+        raise RuntimeError("Offline geospatial run cannot acquire changed Copernicus Process API slices")
     forest_fetch = fetch_forests(
         root,
         offline=args.offline,
@@ -420,6 +573,7 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
     forest_fetch, infc, zonal = _process_geospatial_forest_sources(
         args, root=root, canonical=canonical, previous_state=previous_state,
     )
+    fresh_geometry: list[Path] = []
     forests_pmtiles = {
         **{
             level: {"path": str(delivery / "foreste/geometry" / f"istat-{level}-2023.pmtiles"), "carried": True}
@@ -427,6 +581,19 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         },
         "region_2015": {"path": str(delivery / "foreste/geometry/istat-region-2015.pmtiles"), "carried": True},
     }
+    if "infc" in families:
+        path = delivery / "foreste/geometry/istat-region-2015.pmtiles"
+        forests_pmtiles["region_2015"] = build_pmtiles(
+            canonical / "territories/reference_year=2015/region.parquet", path,
+        )
+        fresh_geometry.append(path)
+    if "copernicus" in families:
+        for level in ("municipality", "province", "region"):
+            path = delivery / "foreste/geometry" / f"istat-{level}-2023.pmtiles"
+            forests_pmtiles[level] = build_pmtiles(
+                canonical / f"territories/reference_year=2023/{level}.parquet", path,
+            )
+            fresh_geometry.append(path)
     forest_delivery = generate_forests_delivery(
         root / zonal_logical, root / infc_logical, canonical, delivery, release_id,
         {level: Path(info["path"]) for level, info in forests_pmtiles.items()},
@@ -457,14 +624,15 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
     current_state = build_source_state_from_metadata_paths(
         root / "raw", metadata_paths, include_catalog=catalog_path,
     )
-    declared = [*raw_paths, *forest_delivery.get("files", []), *insights.get("files", [])]
+    declared = [
+        *raw_paths, *fresh_geometry,
+        *forest_delivery.get("files", []), *insights.get("files", []),
+    ]
     if "infc" in families:
         declared.append(root / infc_logical)
     if "copernicus" in families:
         declared.append(root / zonal_logical)
-    affected_artifacts = {*families, "forest_delivery"}
-    if "copernicus" in families:
-        affected_artifacts.add("territory_insights")
+    affected_artifacts = _geospatial_downstream_families(families)
     manifest, metrics, publication = _publish_scoped(
         store=store, root=root, output=output, release_id=release_id, scope="geospatial", previous_state=previous_state,
         current_state=current_state, declared_paths=declared,
@@ -475,6 +643,15 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
     json_dump(Path(args.report), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
+
+
+def _geospatial_downstream_families(source_families: set[str]) -> set[str]:
+    affected = {*source_families, "forest_delivery"}
+    if "infc" in source_families:
+        affected.add("forest_geometry_2015")
+    if "copernicus" in source_families:
+        affected.update(("forest_geometry_2023", "territory_insights"))
+    return affected
 
 
 def _data_scope_forests(canonical: Path) -> dict:
@@ -503,14 +680,67 @@ def _data_geometry_logical_paths() -> dict[str, list[str]]:
     }
 
 
+_DATA_DELIVERY_FAMILY = {
+    "soil": "soil_delivery",
+    "water": "water_delivery",
+    "dissesto": "dissesto_delivery",
+    "emissions": "emissions_delivery",
+}
+
+
+def _changed_boundary_years() -> set[int]:
+    years: set[int] = set()
+    for entry in planned_entries():
+        if entry.get("source_id") != "istat-administrative-boundaries" or entry.get("status") != "changed":
+            continue
+        matches = [int(part) for part in Path(str(entry["asset_path"])).parts if part.isdigit()]
+        configured = [year for year in matches if year in SOURCE_YEARS]
+        if len(configured) != 1:
+            raise ValueError(f"Cannot resolve changed ISTAT boundary year: {entry['asset_path']}")
+        years.add(configured[0])
+    return years
+
+
+def _active_family_metadata_paths(previous_state: dict | None, family: str) -> list[str]:
+    return sorted({
+        f"raw/{entry['asset_path']}.metadata.json"
+        for entry in (previous_state or {}).get("sources", [])
+        if entry.get("kind") != "catalog" and source_family(str(entry["source_id"])) == family
+    })
+
+
+def _data_downstream_families(
+    source_families: set[str], boundary_years: set[int],
+) -> tuple[set[str], set[str]]:
+    delivery_families = {
+        delivery_family for family, delivery_family in _DATA_DELIVERY_FAMILY.items()
+        if family in source_families
+    }
+    geometry_families: set[str] = set()
+    if 2025 in boundary_years:
+        delivery_families.update(("soil_delivery", "water_delivery"))
+        geometry_families.add("soil_geometry_2025")
+    if 2024 in boundary_years:
+        delivery_families.add("dissesto_delivery")
+        geometry_families.add("dissesto_geometry_2024")
+    emission_years = boundary_years & {2019, 2023}
+    if emission_years:
+        delivery_families.add("emissions_delivery")
+        geometry_families.update(f"emissions_geometry_{year}" for year in emission_years)
+    return delivery_families, geometry_families
+
+
 def _run_incremental_data(
     args: argparse.Namespace, *, root: Path, output: Path, canonical: Path, derived: Path, delivery: Path,
     store: LocalObjectStore | R2ObjectStore, previous_state: dict | None, release_id: str,
     started: float, started_at: str,
 ) -> int:
     families = _changed_source_families()
+    boundary_years = _changed_boundary_years() if "boundaries" in families else set()
     if args.force:
         families = {"boundaries", "soil", "water", "dissesto", "emissions"}
+        boundary_years = set(SOURCE_YEARS)
+    delivery_families, geometry_families = _data_downstream_families(families, boundary_years)
     _hydrate_planned_raw_dependencies(store, root, families)
 
     territory_years: set[int] = set(SOURCE_YEARS) if "boundaries" in families else set()
@@ -543,59 +773,89 @@ def _run_incremental_data(
         if "soil" in families else {"changed": False, "carried": True}
     )
 
+    unchanged_delivery_dependencies: list[str] = []
+    if "soil_delivery" in delivery_families and "soil" not in families:
+        unchanged_delivery_dependencies.extend((
+            "canonical/soil/dataset_version=2025-2024-observations/observations.parquet",
+            "derived/soil/algorithm_version=soil-analytics-v1/analytics.parquet",
+            *_active_family_metadata_paths(previous_state, "soil"),
+        ))
+    if "water_delivery" in delivery_families and "water" not in families:
+        unchanged_delivery_dependencies.append(
+            "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet"
+        )
+    if "dissesto_delivery" in delivery_families and "dissesto" not in families:
+        unchanged_delivery_dependencies.append(
+            "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet"
+        )
+    if "emissions_delivery" in delivery_families and "emissions" not in families:
+        unchanged_delivery_dependencies.extend((
+            "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
+            "canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet",
+            "canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet",
+        ))
+    if unchanged_delivery_dependencies:
+        _hydrate(store, root, sorted(set(unchanged_delivery_dependencies)))
+
     geometry_paths = _data_geometry_logical_paths()
     fresh_geometry: list[Path] = []
     geometry_reports: dict[str, dict] = {"soil": {}, "dissesto": {}, "emissions": {}}
-    if "boundaries" in families:
-        for level in ("municipality", "province", "region"):
-            target = delivery / "soil/geometry" / f"istat-{level}-2025.pmtiles"
+    for level, logical_path in zip(("municipality", "province", "region"), geometry_paths["soil"], strict=True):
+        target = root / logical_path
+        if 2025 in boundary_years:
             geometry_reports["soil"][level] = build_pmtiles(canonical / f"territories/reference_year=2025/{level}.parquet", target)
             fresh_geometry.append(target)
-            target = delivery / "dissesto/geometry" / f"istat-{level}-2024.pmtiles"
+        else:
+            geometry_reports["soil"][level] = {"path": str(target), "carried": True}
+    for level, logical_path in zip(("municipality", "province", "region"), geometry_paths["dissesto"], strict=True):
+        target = root / logical_path
+        if 2024 in boundary_years:
             geometry_reports["dissesto"][level] = build_pmtiles(canonical / f"territories/reference_year=2024/{level}.parquet", target)
             fresh_geometry.append(target)
-        for year in (2019, 2023):
-            target = delivery / "emissions/geometry" / f"istat-province-{year}.pmtiles"
+        else:
+            geometry_reports["dissesto"][level] = {"path": str(target), "carried": True}
+    for year, logical_path in zip((2019, 2023), geometry_paths["emissions"], strict=True):
+        target = root / logical_path
+        if year in boundary_years:
             geometry_reports["emissions"][year] = build_pmtiles(canonical / f"territories/reference_year={year}/province.parquet", target)
             fresh_geometry.append(target)
-    else:
-        for family in families & {"soil", "dissesto", "emissions"}:
-            _hydrate(store, root, geometry_paths[family])
-        geometry_reports["soil"] = {
-            level: {"path": str(root / path)} for level, path in zip(("municipality", "province", "region"), geometry_paths["soil"], strict=True)
-        }
-        geometry_reports["dissesto"] = {
-            level: {"path": str(root / path)} for level, path in zip(("municipality", "province", "region"), geometry_paths["dissesto"], strict=True)
-        }
-        geometry_reports["emissions"] = {
-            year: {"path": str(root / path)} for year, path in zip((2019, 2023), geometry_paths["emissions"], strict=True)
-        }
+        else:
+            geometry_reports["emissions"][year] = {"path": str(target), "carried": True}
+    if "soil_delivery" in delivery_families and 2025 not in boundary_years:
+        _hydrate(store, root, geometry_paths["soil"])
+    if "dissesto_delivery" in delivery_families and 2024 not in boundary_years:
+        _hydrate(store, root, geometry_paths["dissesto"])
+    if "emissions_delivery" in delivery_families:
+        _hydrate(store, root, [
+            path for year, path in zip((2019, 2023), geometry_paths["emissions"], strict=True)
+            if year not in boundary_years
+        ])
 
     soil_delivery = generate_soil_delivery(
         canonical / "soil/dataset_version=2025-2024-observations/observations.parquet",
         derived / "soil/algorithm_version=soil-analytics-v1/analytics.parquet", canonical, root, delivery,
         release_id, force=True,
-    ) if "soil" in families else {"changed": False, "files": [], "carried": True}
+    ) if "soil_delivery" in delivery_families else {"changed": False, "files": [], "carried": True}
     water_delivery = generate_water_delivery(
         canonical / "water/dataset_version=bigbang-10-1951-2025/observations.parquet", delivery, release_id, force=True,
-    ) if "water" in families else {"changed": False, "files": [], "carried": True}
+    ) if "water_delivery" in delivery_families else {"changed": False, "files": [], "carried": True}
     dissesto_delivery = generate_dissesto_delivery(
         canonical / "dissesto/dataset_version=idrogeo-risk-2024/observations.parquet", delivery, release_id,
         {level: Path(info["path"]) for level, info in geometry_reports["dissesto"].items()}, force=True,
-    ) if "dissesto" in families else {"changed": False, "files": [], "carried": True}
+    ) if "dissesto_delivery" in delivery_families else {"changed": False, "files": [], "carried": True}
     emissions_delivery = generate_emissions_delivery(
         canonical / "emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet",
         canonical / "emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet",
         canonical / "emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
         {year: Path(info["path"]) for year, info in geometry_reports["emissions"].items()},
         delivery, release_id, force=True,
-    ) if "emissions" in families else {"changed": False, "files": [], "carried": True}
+    ) if "emissions_delivery" in delivery_families else {"changed": False, "files": [], "carried": True}
 
     changed_source_ids = {
         str(entry["source_id"]) for entry in planned_entries() if entry.get("status") == "changed"
     }
-    insights_changed = args.force or bool(changed_source_ids & {
-        "istat-administrative-boundaries", "ispra-soil-2025", "ispra-bigbang-10",
+    insights_changed = args.force or 2025 in boundary_years or bool(changed_source_ids & {
+        "ispra-soil-2025", "ispra-bigbang-10",
         "ispra-idrogeo-risk-2024", "ispra-emissions-provincial-2026",
     })
     insights = {"changed": False, "files": [], "carried": True}
@@ -647,9 +907,7 @@ def _run_incremental_data(
         *fresh_geometry,
         *[path for report in delivery_reports for path in report.get("files", [])],
     ]
-    affected_artifacts = set(families)
-    if "boundaries" in families:
-        affected_artifacts.add("data_geometry")
+    affected_artifacts = {*families, *delivery_families, *geometry_families}
     if insights_changed:
         affected_artifacts.add("territory_insights")
     manifest, metrics, publication = _publish_scoped(

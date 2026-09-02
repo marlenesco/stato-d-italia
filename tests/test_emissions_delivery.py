@@ -36,17 +36,26 @@ def test_delivery_keeps_one_declared_snap_observation_per_province_and_period(tm
         for year in (2019, 2023) for code in range(1, 108)
     ]).to_parquet(provincial_path, index=False)
 
+    stale = tmp_path / "delivery" / "emissions" / "obsolete.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}")
     result = generate_emissions_delivery(
         ghg_path, nfr_path, provincial_path, geometry_paths, tmp_path / "delivery", "release-test",
     )
 
     assert result["changed"] is True
+    assert not stale.exists()
+    assert stale not in result["files"]
     index = json.loads((tmp_path / "delivery" / "emissions" / "index.json").read_text())
     assert index["national"] == {
         "greenhouseGases": "delivery/emissions/national/greenhouse-gases.json",
         "airPollutantsNfr": "delivery/emissions/national/air-pollutants-nfr.json",
     }
     assert index["provincialCatalog"] == "delivery/emissions/provincial/catalog.json"
+    assert index["maps"] == [
+        "delivery/emissions/maps/emissions_pollutant_002/2019/province.json",
+        "delivery/emissions/maps/emissions_pollutant_002/2023/province.json",
+    ]
     assert index["geometry"] == ["delivery/emissions/geometry/istat-province-2019.pmtiles", "delivery/emissions/geometry/istat-province-2023.pmtiles"]
     overview = json.loads((tmp_path / "delivery" / "emissions" / "overview.json").read_text())
     assert overview["map"]["metricId"] == "emissions_pollutant_002"

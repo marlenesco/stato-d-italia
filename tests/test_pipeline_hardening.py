@@ -6,7 +6,16 @@ import pandas as pd
 import pytest
 
 import stato_italia.cli as cli
-from stato_italia.cli import _active_source_state_with_legacy_bootstrap, _process_geospatial_forest_sources, _publish_scoped, _run_geospatial, _validate_release_coherence
+from stato_italia.cli import (
+    _active_source_state_with_legacy_bootstrap,
+    _data_downstream_families,
+    _geospatial_downstream_families,
+    _process_geospatial_forest_sources,
+    _publish_scoped,
+    _run_geospatial,
+    _validate_delivery_dependencies,
+    _validate_release_coherence,
+)
 from stato_italia.ingestion_plan import clear_ingestion_plan, load_ingestion_plan
 from stato_italia.release import LocalObjectStore, ReleaseArtifact, publish_release
 
@@ -271,6 +280,124 @@ def test_data_release_coherence_rejects_new_state_with_old_canonical(
         _validate_release_coherence(root, state, artifacts, scope="data")
 
 
+def test_forest_delivery_signature_must_match_release_canonicals(tmp_path: Path) -> None:
+    infc = tmp_path / "infc.parquet"
+    zonal = tmp_path / "zonal.parquet"
+    index = tmp_path / "forest-index.json"
+    infc.write_bytes(b"infc-v2")
+    zonal.write_bytes(b"zonal-v1")
+    index.write_text(json.dumps({
+        "canonicalSignature": {"infc": "0" * 64, "zonal": "1" * 64},
+        "geometry": [], "maps": [], "mapGeometry": {},
+    }))
+
+    with pytest.raises(ValueError, match="Forest delivery canonical signatures"):
+        _validate_delivery_dependencies([
+            ReleaseArtifact(infc, "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"),
+            ReleaseArtifact(zonal, f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"),
+            ReleaseArtifact(index, "delivery/foreste/index.json"),
+        ], store=None, affected_families={"forest_delivery"})
+
+
+def test_territory_insights_signature_must_match_all_semantic_inputs(tmp_path: Path) -> None:
+    logical_inputs = (
+        "canonical/soil/dataset_version=2025-2024-observations/observations.parquet",
+        "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
+        "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
+        "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
+        f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
+    )
+    artifacts = []
+    for number, logical_path in enumerate(logical_inputs):
+        path = tmp_path / f"input-{number}.parquet"
+        path.write_bytes(f"input-{number}".encode())
+        artifacts.append(ReleaseArtifact(path, logical_path))
+    index = tmp_path / "insights-index.json"
+    index.write_text(json.dumps({"inputSignature": "stale"}))
+    artifacts.append(ReleaseArtifact(index, "delivery/territory-insights/index.json"))
+
+    with pytest.raises(ValueError, match="Territory insights input signature"):
+        _validate_delivery_dependencies(
+            artifacts, store=None, affected_families={"territory_insights"},
+        )
+
+
+def test_map_reference_year_must_have_matching_geometry(tmp_path: Path) -> None:
+    index = tmp_path / "soil-index.json"
+    values = tmp_path / "soil-map.json"
+    geometry = tmp_path / "istat-region-2025.pmtiles"
+    index.write_text(json.dumps({
+        "geometry": ["delivery/soil/geometry/istat-region-2025.pmtiles"],
+        "maps": ["delivery/soil/maps/example/2024-2024/region.json"],
+    }))
+    values.write_text(json.dumps({
+        "territoryLevel": "region", "territoryReferenceDate": "2024-01-01",
+    }))
+    geometry.write_bytes(b"pmtiles")
+
+    with pytest.raises(ValueError, match="map lacks compatible geometry"):
+        _validate_delivery_dependencies([
+            ReleaseArtifact(index, "delivery/soil/index.json"),
+            ReleaseArtifact(values, "delivery/soil/maps/example/2024-2024/region.json"),
+            ReleaseArtifact(geometry, "delivery/soil/geometry/istat-region-2025.pmtiles"),
+        ], store=None, affected_families={"soil_delivery"})
+
+
+def test_boundary_dependencies_are_reference_year_specific() -> None:
+    current_delivery, current_geometry = _data_downstream_families({"boundaries"}, {2025})
+    assert current_delivery == {"soil_delivery", "water_delivery"}
+    assert current_geometry == {"soil_geometry_2025"}
+
+    emissions_delivery, emissions_geometry = _data_downstream_families({"boundaries"}, {2023})
+    assert emissions_delivery == {"emissions_delivery"}
+    assert emissions_geometry == {"emissions_geometry_2023"}
+
+    historical_delivery, historical_geometry = _data_downstream_families({"boundaries"}, {2015})
+    assert historical_delivery == set()
+    assert historical_geometry == set()
+
+
+def test_forest_downstream_dependencies_distinguish_infc_and_copernicus() -> None:
+    assert _geospatial_downstream_families({"infc"}) == {
+        "infc", "forest_delivery", "forest_geometry_2015",
+    }
+    assert _geospatial_downstream_families({"copernicus"}) == {
+        "copernicus", "forest_delivery", "forest_geometry_2023", "territory_insights",
+    }
+
+
+def test_raster_release_coherence_rejects_manifest_signature_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    catalog = root / "raw/copernicus-hrl-forests/catalog.json"
+    manifest = root / "raw/copernicus-hrl-forests/tree-cover/2023/01/slice-manifest.json"
+    zonal = root / f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
+    state_path = tmp_path / "source-state.json"
+    catalog.parent.mkdir(parents=True)
+    manifest.parent.mkdir(parents=True)
+    zonal.parent.mkdir(parents=True)
+    catalog.write_bytes(b"catalog")
+    manifest.write_text(json.dumps({"source_signature": "2" * 64}))
+    pd.DataFrame({"source_asset_sha256": ["1" * 64]}).to_parquet(zonal)
+    state_path.write_text("{}")
+    state = {"schemaVersion": 1, "sources": [
+        _entry("copernicus-hrl-forests", "copernicus-hrl-forests/catalog.json", "3" * 64, kind="catalog"),
+    ]}
+    monkeypatch.setattr(cli, "_territory_paths", lambda _canonical: [])
+    monkeypatch.setattr(cli, "_validate_data_canonical_provenance", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_validate_delivery_dependencies", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("FOREST_PROCESSING_MODE", "raster")
+
+    with pytest.raises(ValueError, match="raster provenance"):
+        _validate_release_coherence(root, state, [
+            ReleaseArtifact(catalog, "raw/copernicus-hrl-forests/catalog.json"),
+            ReleaseArtifact(manifest, "raw/copernicus-hrl-forests/tree-cover/2023/01/slice-manifest.json"),
+            ReleaseArtifact(zonal, f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"),
+            ReleaseArtifact(state_path, "metadata/source-state.json"),
+        ], scope="geospatial", affected_families={"copernicus", "forest_delivery", "territory_insights"})
+
+
 def test_geospatial_processing_failure_never_advances_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -288,6 +415,56 @@ def test_geospatial_processing_failure_never_advances_manifest(
             args, root=tmp_path / "data", output=tmp_path / "output", canonical=tmp_path / "data/canonical",
             delivery=tmp_path / "data/delivery", store=store, previous_state=None, release_id="r2",
             started=0.0, started_at="2026-08-30T00:00:00Z",
+        )
+
+    assert store.read_json("manifest.json") == before
+
+
+def test_release_validation_failure_never_advances_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    initial = tmp_path / "initial.parquet"
+    candidate = tmp_path / "candidate.parquet"
+    initial.write_bytes(b"initial")
+    candidate.write_bytes(b"candidate")
+    publish_release(store, "r1", [ReleaseArtifact(initial, "canonical/soil/initial.parquet")])
+    before = store.read_json("manifest.json")
+    monkeypatch.setattr(
+        cli, "_validate_release_coherence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("coherence failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="coherence failed"):
+        _publish_scoped(
+            store=store, root=tmp_path, output=tmp_path / "output", release_id="r2", scope="all",
+            previous_state={"schemaVersion": 1, "sources": []},
+            current_state={"schemaVersion": 1, "sources": []},
+            declared_paths=[candidate], changed=True,
+        )
+
+    assert store.read_json("manifest.json") == before
+
+
+def test_affected_family_requires_current_source_state_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    initial = tmp_path / "initial.parquet"
+    initial.write_bytes(b"initial")
+    publish_release(store, "r1", [ReleaseArtifact(initial, "canonical/soil/initial.parquet")])
+    before = store.read_json("manifest.json")
+    monkeypatch.setattr(cli, "_validate_release_coherence", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="Affected source families lack current source-state"):
+        _publish_scoped(
+            store=store, root=tmp_path, output=tmp_path / "output", release_id="r2", scope="data",
+            previous_state={"schemaVersion": 1, "sources": [
+                _entry("ispra-soil-2025", "ispra-soil-2025/old.xlsx", "1" * 64),
+            ]},
+            current_state={"schemaVersion": 1, "sources": []},
+            declared_paths=[], changed=True,
+            affected_families={"soil", "soil_delivery", "territory_insights"},
         )
 
     assert store.read_json("manifest.json") == before
@@ -566,6 +743,24 @@ def test_copernicus_only_change_does_not_acquire_or_ingest_infc(
     assert calls == [("fetch", True), ("copernicus", True)]
     assert infc == {"changed": False, "mode": "active_release"}
     assert zonal["changed"] is True
+
+
+def test_offline_copernicus_change_fails_before_using_stale_process_slices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forest_plan(tmp_path, infc_status="unchanged", catalog_status="changed")
+    monkeypatch.setattr(
+        cli, "fetch_forests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("offline contacted upstream")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="cannot acquire changed Copernicus"):
+            _process_geospatial_forest_sources(
+                Namespace(offline=True, force=False), root=tmp_path / "data",
+                canonical=tmp_path / "data/canonical", previous_state=None,
+            )
+    finally:
+        clear_ingestion_plan()
 
 
 def test_geospatial_noop_contacts_neither_forest_source_family(

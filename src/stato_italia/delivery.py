@@ -123,6 +123,9 @@ def generate_soil_delivery(
             files = sorted(path for path in (destination / "soil").rglob("*.json"))
             return {"changed": False, "skipped": True, "files": files, "bytes": sum(path.stat().st_size for path in files)}
 
+    for generated in (destination / "soil").rglob("*.json"):
+        generated.unlink()
+
     observations = pd.read_parquet(canonical_path)
     analytics = pd.read_parquet(analytics_path)
     context = load_territory_context(canonical_root)
