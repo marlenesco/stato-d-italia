@@ -173,20 +173,30 @@ Il prossimo run legge questo snapshot dalla release attiva; `manifest.json`
 resta l'unico puntatore mutabile. Metriche operative distinguono byte logici
 referenziati dalla release e nuovo storage caricato nell'object store.
 
-Ogni scope sostituisce soltanto le proprie entry e porta avanti le altre dallo
-snapshot attivo. Gli artifact fuori scope restano referenziati dagli stessi
-oggetti content-addressed nella nuova release.
+Ogni run scoped sostituisce esattamente le entry delle sole famiglie sorgente
+interessate. Famiglie invariate dello stesso scope e famiglie dello scope opposto
+restano nello snapshot trusted della release attiva.
 
 Per gli artifact, ownership è esplicita e distinta in `data`, `geospatial` e
-`shared`. Un run scoped porta avanti per riferimento soltanto ownership opposta;
-gli artifact `shared` devono essere dichiarati dal run. `scope=all` ricostruisce
-source state e membership artifact soltanto dagli output correnti, senza
-carry-forward implicito.
+`shared`; la famiglia di elaborazione descrive inoltre quali output devono essere
+sostituiti insieme. Un run scoped conserva per riferimento content-addressed
+ogni famiglia non interessata, anche nello stesso scope o shared. Una famiglia
+interessata viene ridefinita soltanto dagli output dichiarati, quindi artifact
+rimossi non sopravvivono. Gli shared derivati, come `territory-insights`, seguono
+gli input semantici reali. `scope=all` ricostruisce source state e membership
+soltanto dagli output correnti, senza carry-forward implicito.
 
 Il dominio Foreste è interamente `geospatial`: source state e raw INFC,
 cataloghi/raw Copernicus, canonical INFC e zonali, PMTiles e delivery Foreste
 avanzano nello stesso scope. L'ownership è policy della pipeline e non entra
 nell'identità content-addressed della sorgente.
+
+Le geometrie delivery sono dipendenze versionate per dominio e reference year.
+La release risolve ogni logical path verso un object SHA immutabile; indici e
+mappe dichiarano livello e data territoriale compatibili. INFC usa la geometria
+regionale 2015, Copernicus le geometrie 2023, Suolo e Acqua il 2025, Dissesto il
+2024 ed Emissioni il 2019/2023. Un aggiornamento ISTAT non invalida geometrie di
+anni non interessati.
 
 ## Relazioni essenziali
 

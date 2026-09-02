@@ -90,16 +90,23 @@ workflow sono `ingest-data.yml` (domini tabellari non forestali e delivery) e
 `ingest-geospatial.yml` (intero dominio Foreste: INFC, catalogo Copernicus,
 raster, canonical, PMTiles, zonal statistics e delivery).
 Cache Actions accelera ma non decide se fonte è nuova. Uno scope recupera gli
-input fuori scope dalla release attiva e li carry-forward per riferimento
-immutabile: release resta completa anche su runner pulito.
+input di elaborazione necessari dalla release R2 attiva, che è il last-known-good
+autorevole, e porta avanti gli altri artifact per riferimento immutabile: la
+release resta completa anche su runner pulito. Questo vale anche per famiglie
+invariate dello stesso scope; cache Actions e file locali sono soltanto
+acceleratori.
 
 Il report del preflight è anche il piano effimero del run scoped. Ogni asset
 ufficiale è marcato `changed`, `unchanged` oppure `unverifiable` e il piano è
-vincolato al `releaseId` ancora attivo. Prima dell'ingestione tutti gli artifact
-dello scope sono verificati rispetto allo SHA-256 della release attiva: un file
-locale valido viene riusato, uno mancante o stale viene idratato atomicamente da
-R2, un object R2 mancante o corrotto interrompe il run. Gli adapter contattano
-la fonte soltanto per asset `changed` senza body già acquisito dal preflight.
+vincolato al `releaseId` ancora attivo e non può essere riprodotto dopo un cambio
+di manifest. Prima dell'ingestione sono idratati soltanto gli artifact richiesti
+dal grafo di elaborazione interessato: un file locale valido viene riusato, uno
+mancante o stale viene idratato atomicamente da R2 e verificato con SHA-256. Gli
+artifact non necessari localmente restano riferimenti content-addressed. Oggetti
+carried mancanti o con key, byte o SHA incoerenti interrompono il publish; errori
+R2 di autenticazione o server non sono trattati come semplici `not found`. Gli
+adapter contattano la fonte soltanto per asset `changed` senza body già acquisito
+dal preflight.
 Se un `GET` di controllo ha già letto il body completo, questo viene conservato
 in `data/.preflight/<scope>` e promosso atomicamente dal run, senza un secondo
 download. La directory è temporanea e non è source state né fonte di verità.
@@ -160,6 +167,9 @@ senza proxy Vercel. Configurare quindi CORS sul bucket prima del deploy web:
 `config/r2-cors.example.json` è template: sostituire/aggiungere solo origini
 effettivamente autorizzate. Non usare `*` in produzione senza decisione
 esplicita. Vercel preview richiede origini preview dichiarate oppure test locale.
+Il frontend usa attualmente un endpoint pubblico `r2.dev` configurabile. Il
+futuro dominio `data.statoditalia.it` non è ancora attivo e nessuno dei due URL
+deve essere hardcoded nella logica storage o pipeline.
 
 ## Ordine di publish
 
@@ -214,6 +224,17 @@ condivisi seguono le loro dipendenze: `territory-insights` viene rigenerato solo
 se cambia un input semantico e, in quel caso, idrata soltanto le canonical
 invariate che consuma. `all` non esegue carry-forward e sostituisce inoltre
 l'intero source state: entry e raw obsoleti non restano nella nuova release.
+
+Le dipendenze geometriche sono esplicite per dominio e anno. Un nuovo confine
+ISTAT rigenera soltanto PMTiles e delivery che usano quel reference year:
+Suolo/Acqua 2025, Dissesto 2024, Emissioni 2019 o 2023. Il bundle Foreste resta
+geospatial e internamente coerente per object identity immutabile; quando cambia
+INFC viene rigenerata la geometria regionale 2015, quando cambia Copernicus
+vengono rigenerate le geometrie 2023. Un aggiornamento di un altro anno non
+invalida la geometria storica 2015. Gli indici delivery referenziano soltanto
+geometrie presenti nella release e le mappe dichiarano il reference year
+compatibile. Le signature delle canonical Foreste e degli input semantici di
+`territory-insights` sono ricontrollate prima del publish.
 
 Foreste non è diviso tra scope: `infc-2015-forests`, `raw/infc-*`,
 `raw/copernicus-*`, entrambi i rami `canonical/forests/` e
