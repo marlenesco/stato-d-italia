@@ -986,7 +986,8 @@ def _run_combined_scope_forests(
     infc_raw = root / "raw" / "infc-2015-forests" / "volume.zip"
     if not infc_raw.exists():
         return forests
-    forests["infc"] = ingest_infc_forests(root, canonical, force=args.force)
+    force_infc = args.force or 2015 in (changed_boundary_years or set())
+    forests["infc"] = ingest_infc_forests(root, canonical, force=force_infc)
     mode = os.getenv("FOREST_PROCESSING_MODE", "raster")
     zonal_raw = any(
         path
