@@ -12,6 +12,7 @@ from stato_italia.release import (
     R2ObjectStore,
     ReleaseArtifact,
     artifact_scope,
+    artifact_family,
     carry_forward_active_artifacts,
     hydrate_active_artifact,
     publish_release,
@@ -110,6 +111,13 @@ def test_artifact_ownership_is_explicit() -> None:
         artifact_scope("canonical/unknown/data.parquet")
 
 
+def test_artifact_processing_family_is_explicit() -> None:
+    assert artifact_family("raw/ispra-soil-2025/source.xlsx") == "soil"
+    assert artifact_family("delivery/soil/geometry/istat-region-2025.pmtiles") == "data_geometry"
+    assert artifact_family("delivery/foreste/geometry/istat-region-2023.pmtiles") == "forest_geometry"
+    assert artifact_family("delivery/territory-insights/index.json") == "territory_insights"
+
+
 def test_carry_forward_replaces_whole_scope_and_never_carries_all(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path / "store")
     artifacts = []
@@ -138,6 +146,54 @@ def test_carry_forward_replaces_whole_scope_and_never_carries_all(tmp_path: Path
     }
     assert {item.logical_path for item in geo_run} == {"raw/ispra-soil-2025/old.xlsx"}
     assert all_run == []
+
+
+def test_family_aware_carry_reuses_same_scope_and_shared_but_drops_affected_family(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    artifacts = []
+    for logical_path, body in (
+        ("raw/ispra-soil-2025/old.xlsx", b"obsolete-soil"),
+        ("canonical/soil/dataset_version=v1/observations.parquet", b"obsolete-canonical"),
+        ("raw/ispra-bigbang-10/water.xlsx", b"water"),
+        ("canonical/water/dataset_version=v1/observations.parquet", b"water-canonical"),
+        ("canonical/territories/reference_year=2025/region.parquet", b"territory"),
+        ("delivery/territory-insights/index.json", b"insights"),
+    ):
+        path = tmp_path / logical_path.replace("/", "-")
+        path.write_bytes(body)
+        artifacts.append(ReleaseArtifact(path, logical_path))
+    publish_release(store, "r1", artifacts)
+
+    carried = carry_forward_active_artifacts(
+        store, set(), scope="data", affected_families={"soil"},
+    )
+
+    assert {item.logical_path for item in carried} == {
+        "raw/ispra-bigbang-10/water.xlsx",
+        "canonical/water/dataset_version=v1/observations.parquet",
+        "canonical/territories/reference_year=2025/region.parquet",
+        "delivery/territory-insights/index.json",
+    }
+
+
+def test_changed_shared_output_is_replaced_while_unrelated_shared_survives(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    territory = tmp_path / "territory.parquet"
+    insights = tmp_path / "insights.json"
+    territory.write_bytes(b"territory")
+    insights.write_bytes(b"old-insights")
+    publish_release(store, "r1", [
+        ReleaseArtifact(territory, "canonical/territories/reference_year=2025/region.parquet"),
+        ReleaseArtifact(insights, "delivery/territory-insights/index.json"),
+    ])
+
+    carried = carry_forward_active_artifacts(
+        store, set(), scope="data", affected_families={"territory_insights"},
+    )
+
+    assert {item.logical_path for item in carried} == {
+        "canonical/territories/reference_year=2025/region.parquet",
+    }
 
 
 def test_hydration_replaces_stale_cache_with_active_release(tmp_path: Path) -> None:

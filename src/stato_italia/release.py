@@ -126,6 +126,38 @@ def artifact_scope(logical_path: str) -> ArtifactScope:
     raise ValueError(f"Release artifact has no explicit scope ownership: {logical_path}")
 
 
+def artifact_family(logical_path: str) -> str:
+    """Return explicit processing family used for selective replacement."""
+    artifact_scope(logical_path)
+    if logical_path == "metadata/source-state.json":
+        return "source_state"
+    if logical_path.startswith("delivery/territory-insights/"):
+        return "territory_insights"
+    if logical_path.startswith("delivery/foreste/geometry/"):
+        return "forest_geometry"
+    if "/geometry/" in logical_path and logical_path.startswith("delivery/"):
+        return "data_geometry"
+    if logical_path.startswith(("raw/infc-", "canonical/forests/dataset_version=infc")):
+        return "infc"
+    if logical_path.startswith(("raw/copernicus-", "canonical/forests/algorithm_version=")):
+        return "copernicus"
+    if logical_path.startswith("delivery/foreste/"):
+        return "forest_delivery"
+    if logical_path.startswith(("raw/istat-administrative-boundaries/", "canonical/territories/")):
+        return "boundaries"
+    if logical_path.startswith(("raw/ispra-soil-", "canonical/soil/", "derived/soil/", "delivery/soil/")):
+        return "soil"
+    if logical_path.startswith(("raw/ispra-bigbang-", "canonical/water/", "delivery/water/")):
+        return "water"
+    if logical_path.startswith(("raw/ispra-idrogeo-", "canonical/dissesto/", "delivery/dissesto/")):
+        return "dissesto"
+    if logical_path.startswith(("raw/ispra-emissions-", "canonical/emissions/", "delivery/emissions/")):
+        return "emissions"
+    if logical_path.startswith("delivery/delivery/"):
+        return "legacy_delivery"
+    raise ValueError(f"Release artifact has no explicit processing family: {logical_path}")
+
+
 class R2ObjectStore(ObjectStore):
     def __init__(self) -> None:
         required = ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT", "R2_BUCKET")
@@ -235,8 +267,9 @@ def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | 
 
 def carry_forward_active_artifacts(
     store: ObjectStore, replacing_logical_paths: set[str], *, scope: str,
+    affected_families: set[str] | None = None,
 ) -> list[CarriedArtifact]:
-    """Carry only opposite-scope objects; shared outputs must be declared fresh."""
+    """Carry immutable unaffected objects; drop every object in replaced families."""
     if scope == "all":
         return []
     if scope not in {"data", "geospatial"}:
@@ -249,7 +282,11 @@ def carry_forward_active_artifacts(
     for item in release.get("objects", []):
         logical_path = str(item["logicalPath"])
         owner = artifact_scope(logical_path)
-        if logical_path in replacing_logical_paths or owner != carried_scope:
+        if logical_path in replacing_logical_paths or logical_path == "metadata/source-state.json":
+            continue
+        if affected_families is None and owner != carried_scope:
+            continue
+        if affected_families is not None and artifact_family(logical_path) in affected_families:
             continue
         carried.append(CarriedArtifact(
             key=str(item["key"]), sha256=str(item["sha256"]), bytes=int(item["bytes"]),
