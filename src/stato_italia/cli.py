@@ -976,6 +976,7 @@ def _run_incremental_data(
 
 def _run_combined_scope_forests(
     args: argparse.Namespace, root: Path, canonical: Path, previous_source_state: dict | None,
+    *, changed_boundary_years: set[int] | None = None,
 ) -> dict:
     """Run Forest only when the combined pipeline owns the geospatial scope."""
     if args.scope == "data":
@@ -993,10 +994,11 @@ def _run_combined_scope_forests(
         for path in (root / "raw" / source).glob("**/*.tif")
     )
     catalog_changed = _catalog_changed_from_active(previous_source_state, forest_fetch)
+    force_zonal = args.force or 2023 in (changed_boundary_years or set())
     if mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
-        forests["zonal"] = ingest_forests(root, canonical, force=args.force or catalog_changed, mode=mode)
+        forests["zonal"] = ingest_forests(root, canonical, force=force_zonal or catalog_changed, mode=mode)
     elif zonal_raw:
-        forests["zonal"] = ingest_forests(root, canonical, force=args.force, mode="raster")
+        forests["zonal"] = ingest_forests(root, canonical, force=force_zonal, mode="raster")
     return forests
 
 
@@ -1055,7 +1057,13 @@ def run(args: argparse.Namespace) -> int:
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
         force=args.force or soil["changed"],
     )
-    forests = _run_combined_scope_forests(args, root, canonical, previous_source_state)
+    changed_boundary_years = {
+        int(item["year"]) for item in boundaries.get("years", []) if not item.get("skipped", False)
+    }
+    forests = _run_combined_scope_forests(
+        args, root, canonical, previous_source_state,
+        changed_boundary_years=changed_boundary_years,
+    )
     forest_fetch = forests["fetch"]
     changed = boundaries["changed"] or soil["changed"] or water["changed"] or emissions["changed"] or dissesto["changed"] or bool(dissesto_fetch and dissesto_fetch["changed"]) or analytics["changed"] or bool(forests.get("infc", {}).get("changed")) or bool(forests.get("zonal", {}).get("changed"))
     pmtiles: dict[str, dict] = {}
