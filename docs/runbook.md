@@ -240,6 +240,9 @@ con richiesta esplicita di un rebuild coordinato `scope=all`. Non avvia quel
 rebuild automaticamente e non pubblica prima i nuovi confini lasciando Foreste
 stale. La stessa guardia è ripetuta al confine di pubblicazione usando il delta
 del source state, quindi non dipende soltanto dal control flow del runner.
+Nel rebuild `scope=all`, un cambiamento 2023 forza il ricalcolo zonale sulle
+nuove territory canonical; le slice raster CDSE possono essere riusate soltanto
+se la griglia di richiesta resta identica.
 
 Nel dominio geospatial, un cambiamento INFC rigenera la geometria regionale 2015;
 un cambiamento Copernicus rigenera le geometrie 2023. Un aggiornamento di un anno
