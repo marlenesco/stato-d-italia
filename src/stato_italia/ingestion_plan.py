@@ -57,6 +57,10 @@ def active_ingestion_plan() -> dict[str, Any] | None:
     return _ACTIVE_PLAN.payload if _ACTIVE_PLAN else None
 
 
+def planned_entries() -> list[dict[str, Any]]:
+    return list(_ACTIVE_PLAN.entries.values()) if _ACTIVE_PLAN else []
+
+
 def source_family_changed(prefix: str) -> bool:
     if _ACTIVE_PLAN is None:
         return True

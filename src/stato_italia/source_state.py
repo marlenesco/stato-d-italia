@@ -119,6 +119,28 @@ def merge_source_states(previous: dict[str, Any] | None, current_scope: dict[str
     return {"schemaVersion": SOURCE_STATE_SCHEMA_VERSION, "sources": merged}
 
 
+def merge_source_families(
+    previous: dict[str, Any] | None, current: dict[str, Any], *, scope: str, replace_families: set[str],
+) -> dict[str, Any]:
+    """Replace changed families only; keep immutable state for unaffected families."""
+    prior = _normalised_state(previous) if previous else {"schemaVersion": SOURCE_STATE_SCHEMA_VERSION, "sources": []}
+    current = _normalised_state(current)
+    if scope == "all":
+        return current
+    if any(source_scope(str(entry["source_id"])) != scope for entry in current["sources"]):
+        raise ValueError(f"Source-state declaration contains an entry outside {scope} scope")
+    if any(source_family(str(entry["source_id"])) not in replace_families for entry in current["sources"]):
+        raise ValueError("Source-state declaration contains an unaffected source family")
+    merged = [
+        entry for entry in prior["sources"]
+        if source_scope(str(entry["source_id"])) != scope
+        or source_family(str(entry["source_id"])) not in replace_families
+    ]
+    merged.extend(current["sources"])
+    merged.sort(key=lambda entry: entry["asset_path"])
+    return {"schemaVersion": SOURCE_STATE_SCHEMA_VERSION, "sources": merged}
+
+
 def comparable_state(state: dict[str, Any]) -> tuple[tuple[tuple[str, Any], ...], ...]:
     """Exclude only check timestamp: URL, validators and bytes remain provenance."""
     state = _normalised_state(state)
@@ -166,6 +188,24 @@ def changed_source_entries(previous: dict[str, Any] | None, current: dict[str, A
 
 def source_scope(source_id: str) -> str:
     return "geospatial" if source_id == "infc-2015-forests" or source_id.startswith("copernicus-") else "data"
+
+
+def source_family(source_id: str) -> str:
+    if source_id == "istat-administrative-boundaries":
+        return "boundaries"
+    if source_id == "ispra-soil-2025":
+        return "soil"
+    if source_id == "ispra-bigbang-10":
+        return "water"
+    if source_id == "ispra-idrogeo-risk-2024":
+        return "dissesto"
+    if source_id.startswith("ispra-emissions-"):
+        return "emissions"
+    if source_id == "infc-2015-forests":
+        return "infc"
+    if source_id.startswith("copernicus-"):
+        return "copernicus"
+    raise ValueError(f"Source has no explicit family: {source_id}")
 
 
 def _plan_detail(entry: dict[str, Any], status: str, **extra: Any) -> dict[str, Any]:
@@ -223,14 +263,21 @@ def check_persisted_sources(
     changed = 0
     unchanged = 0
     unverifiable = 0
+    checked = 0
     details: list[dict[str, Any]] = []
     for entry in entries:
         if entry.get("kind") == "catalog":
+            continue
+        if entry.get("source_id") == "copernicus-hrl-forests":
+            details.append(_plan_detail(
+                entry, "unchanged", method="active_release_catalog_managed", checked=False,
+            ))
             continue
         if entry.get("preflight_method") == "idrogeo_exports_v1" or (
             entry.get("source_id") == "ispra-idrogeo-risk-2024"
             and str(entry.get("asset_path", "")).endswith("/idrogeo-risk-api-responses.zip")
         ):
+            checked += 1
             try:
                 from .dissesto import check_dissesto_source
 
@@ -284,6 +331,7 @@ def check_persisted_sources(
         if entry.get("last_modified"):
             headers["If-Modified-Since"] = str(entry["last_modified"])
         try:
+            checked += 1
             response, transport = get_with_infc_fallback(
                 requests.get, str(url), stream=True, timeout=(15, 180), headers=headers,
             )
@@ -353,7 +401,7 @@ def check_persisted_sources(
             unverifiable += 1
             details.append(_plan_detail(entry, "unverifiable", reason=type(exc).__name__))
     return {
-        "scope": scope, "sourceChecks": len(entries), "sourcesChanged": changed,
+        "scope": scope, "sourceChecks": checked, "sourcesChanged": changed,
         "sourcesUnchanged": unchanged, "sourcesUnverifiable": unverifiable,
         "changed": bool(changed), "sources": details,
     }

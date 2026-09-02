@@ -9,6 +9,7 @@ from stato_italia.source_state import (
     check_persisted_sources,
     declared_raw_paths,
     merge_source_states,
+    merge_source_families,
     scoped_source_state,
     source_scope,
     source_state_changed,
@@ -193,6 +194,29 @@ def test_scope_all_replaces_state_and_drops_obsolete_entries() -> None:
     assert merge_source_states(old, current, scope="all") == current
 
 
+def test_family_merge_keeps_unchanged_same_scope_and_drops_obsolete_family_entry() -> None:
+    def entry(source_id: str, asset_path: str, checksum: str) -> dict:
+        return {
+            "source_id": source_id, "asset_path": asset_path, "resolved_url": "https://official.example/asset",
+            "etag": None, "last_modified": None, "sha256": checksum, "bytes": 1,
+            "dataset_version": None, "period": None, "checked_at": "2026-01-01T00:00:00Z",
+        }
+
+    previous = {"schemaVersion": 1, "sources": [
+        entry("ispra-soil-2025", "ispra-soil-2025/old.xlsx", "1" * 64),
+        entry("ispra-bigbang-10", "ispra-bigbang-10/water.xlsx", "2" * 64),
+    ]}
+    current = {"schemaVersion": 1, "sources": [
+        entry("ispra-soil-2025", "ispra-soil-2025/new.xlsx", "3" * 64),
+    ]}
+
+    merged = merge_source_families(previous, current, scope="data", replace_families={"soil"})
+
+    assert {item["asset_path"] for item in merged["sources"]} == {
+        "ispra-soil-2025/new.xlsx", "ispra-bigbang-10/water.xlsx",
+    }
+
+
 def test_dynamic_landing_url_change_is_changed(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"schemaVersion": 1, "sources": [{
         "source_id": "ispra", "asset_path": "asset.xlsx", "resolved_url": "https://official.example/old.xlsx",
@@ -257,6 +281,27 @@ def test_idrogeo_preflight_marks_trusted_baseline_unverifiable(monkeypatch: pyte
     assert result["sourcesChanged"] == 0
     assert result["sourcesUnverifiable"] == 1
     assert result["sources"][0]["status"] == "unverifiable"
+
+
+def test_copernicus_process_slices_are_not_get_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = {"schemaVersion": 1, "sources": [{
+        "source_id": "copernicus-hrl-forests",
+        "asset_path": "copernicus-hrl-forests/tree-cover/2021-2021/12/r00-c00.tif",
+        "resolved_url": "https://sh.dataspace.copernicus.eu/api/v1/process",
+        "etag": None, "last_modified": None, "sha256": "a" * 64, "bytes": 10,
+        "dataset_version": None, "period": "2021", "checked_at": "2026-01-01T00:00:00Z",
+    }]}
+    monkeypatch.setattr(
+        "stato_italia.source_state.requests.get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Process API slice GET")),
+    )
+
+    result = check_persisted_sources(state, scope="geospatial")
+
+    assert result["sourceChecks"] == 0
+    assert result["sourcesChanged"] == 0
+    assert result["sources"][0]["method"] == "active_release_catalog_managed"
+    assert result["sources"][0]["checked"] is False
 
 
 def test_release_membership_excludes_old_raw_even_with_valid_sidecar(tmp_path: Path) -> None:
