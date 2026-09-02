@@ -101,6 +101,35 @@ def test_scope_all_recalculates_zonal_when_2023_boundaries_changed(
     assert forests["zonal"]["changed"] is True
 
 
+@pytest.mark.parametrize(("boundary_year", "expected_force"), ((2015, True), (2022, False)))
+def test_scope_all_forces_infc_only_for_2015_boundary_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    boundary_year: int, expected_force: bool,
+) -> None:
+    root = tmp_path / "data"
+    canonical = root / "canonical"
+    infc_raw = root / "raw/infc-2015-forests/volume.zip"
+    infc_raw.parent.mkdir(parents=True)
+    infc_raw.write_bytes(b"infc")
+    monkeypatch.setattr(cli, "fetch_forests", lambda *_args, **_kwargs: {
+        "catalog": {"status": "checked", "signature": "a" * 64},
+    })
+    forces: list[bool] = []
+    monkeypatch.setattr(
+        cli, "ingest_infc_forests",
+        lambda *_args, **kwargs: forces.append(bool(kwargs["force"])) or {"changed": expected_force},
+    )
+    monkeypatch.setattr(cli, "_catalog_changed_from_active", lambda *_args, **_kwargs: False)
+    monkeypatch.setenv("FOREST_PROCESSING_MODE", "raster")
+
+    cli._run_combined_scope_forests(
+        Namespace(scope="all", offline=False, force=False), root, canonical,
+        previous_source_state=None, changed_boundary_years={boundary_year},
+    )
+
+    assert forces == [expected_force]
+
+
 def _entry(source_id: str, asset_path: str, checksum: str, *, kind: str | None = None) -> dict:
     entry = {
         "source_id": source_id, "asset_path": asset_path, "resolved_url": "https://official.example/asset",
