@@ -142,7 +142,10 @@ contratti raw e provenance restano invariati.
 
 L'hydration confronta sempre lo SHA-256 locale con quello referenziato dalla
 release attiva. Un file di cache con SHA diverso viene riscaricato e verificato
-prima della sostituzione atomica: la cache non è mai fonte di verità.
+prima della sostituzione atomica: la cache non è mai fonte di verità. Nei run
+scoped l'hydration è limitata agli artifact necessari per ricalcolare gli output
+effettivamente interessati; gli altri artifact restano referenziati tramite il
+loro object key immutabile e non vengono copiati localmente.
 
 ## CORS R2/CDN per frontend diretto
 
@@ -190,18 +193,26 @@ stesso scope vengono riusati dalla release attiva. INFC e Copernicus sono due
 famiglie indipendenti: un cambiamento INFC non acquisisce raster Copernicus; un
 cambiamento Copernicus non contatta INFC. Se cambia un solo ZIP INFC, gli altri
 ZIP vengono idratati/riusati e la canonical INFC viene rigenerata in modo
-coerente prima del delivery Foreste.
+coerente prima del delivery Foreste. Il preflight Copernicus controlla soltanto
+la signature del catalogo: le slice generate dal Process API presenti nel
+source-state non vengono trattate come URL statici né verificate con GET
+individuali. Un catalogo cambiato autorizza l'acquisizione delle slice correnti
+nel vero ingest e impedisce che una vecchia slice locale venga riusata come se
+fosse ancora autorevole.
 
 Uno scope `data` sostituisce solo entry source `data` e conserva entry
 `geospatial`; scope geospatial fa opposto. Le fonti con URL scoperto dalla
 landing vengono prima ri-risolte: URL nuovo è cambiamento anche se quello
 precedente risponde ancora.
 
-Anche gli artifact hanno ownership esplicita. `data` porta avanti soltanto gli
-artifact geospatial; `geospatial` porta avanti soltanto gli artifact data;
-`all` non esegue carry-forward. Gli artifact condivisi, incluse canonical dei
-territori e delivery `territory-insights`, devono essere dichiarati o rigenerati
-dal run corrente e non sopravvivono implicitamente. `all` sostituisce inoltre
+Anche gli artifact hanno ownership e famiglia di elaborazione esplicite. Nei run
+scoped gli artifact di famiglie non interessate, compresi quelli dello stesso
+scope, sopravvivono per riferimento immutabile senza hydration. Una famiglia
+interessata viene invece sostituita integralmente dagli artifact dichiarati dal
+run: file rimossi o obsoleti non possono essere carried-forward. Gli artifact
+condivisi seguono le loro dipendenze: `territory-insights` viene rigenerato solo
+se cambia un input semantico e, in quel caso, idrata soltanto le canonical
+invariate che consuma. `all` non esegue carry-forward e sostituisce inoltre
 l'intero source state: entry e raw obsoleti non restano nella nuova release.
 
 Foreste non è diviso tra scope: `infc-2015-forests`, `raw/infc-*`,
