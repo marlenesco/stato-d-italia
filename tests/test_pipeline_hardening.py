@@ -42,6 +42,19 @@ def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
     assert "data/raw/infc-2015-forests" in geospatial_workflow
 
 
+def test_incremental_data_report_serializes_delivery_paths(tmp_path: Path) -> None:
+    path = tmp_path / "delivery" / "territory-insights" / "index.json"
+
+    report = cli._json_safe_report({
+        "territory_insights_delivery": {"changed": True, "files": [path]},
+    })
+
+    assert report == {
+        "territory_insights_delivery": {"changed": True, "files": [str(path)]},
+    }
+    assert json.loads(json.dumps(report)) == report
+
+
 def test_data_scope_uses_carried_forest_input_without_fetch_or_infc_ingest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

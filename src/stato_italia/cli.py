@@ -63,6 +63,17 @@ def _release_id() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ") + "-local"
 
 
+def _json_safe_report(value: object) -> object:
+    """Convert filesystem paths in operational reports without relaxing JSON contracts."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_report(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_report(item) for item in value]
+    return value
+
+
 def _bytes_under(root: Path, suffixes: tuple[str, ...] | None = None) -> int:
     return sum(
         path.stat().st_size for path in root.rglob("*")
@@ -963,7 +974,7 @@ def _run_incremental_data(
         changed=any(report.get("changed", False) for report in [boundaries, soil, water, emissions, dissesto, analytics, *delivery_reports]),
         affected_families=affected_artifacts,
     )
-    report = {
+    report = _json_safe_report({
         "run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop",
         "changed": publication["changed"], "scope": "data", "affectedFamilies": sorted(affected_artifacts),
         "boundaries": boundaries, "soil": soil, "water": water, "emissions": emissions,
@@ -971,7 +982,7 @@ def _run_incremental_data(
         "operationalMetrics": metrics | {"pipelineDurationSeconds": round(time.monotonic() - started, 3)},
         "manifest": manifest, "carriedArtifacts": publication["carried"],
         "startedAt": started_at, "completedAt": now_iso(),
-    }
+    })
     json_dump(Path(args.report), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
