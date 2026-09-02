@@ -530,13 +530,16 @@ def _process_geospatial_forest_sources(
     copernicus_changed = source_family_changed("copernicus-") or planned_catalog_changed()
     process_infc = plan is None or infc_changed or args.force
     process_copernicus = plan is None or copernicus_changed or args.force
-    if plan is not None and args.offline and copernicus_changed:
-        raise RuntimeError("Offline geospatial run cannot acquire changed Copernicus Process API slices")
+    if plan is not None and args.offline and (copernicus_changed or args.force):
+        raise RuntimeError(
+            "Offline geospatial run cannot acquire changed Copernicus Process API slices "
+            "or perform a forced refresh"
+        )
     forest_fetch = fetch_forests(
         root,
         offline=args.offline,
         include_infc=process_infc,
-        check_geospatial=plan is None or copernicus_changed,
+        check_geospatial=plan is None or copernicus_changed or args.force,
     )
     infc_path = canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet"
     zonal_path = canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"

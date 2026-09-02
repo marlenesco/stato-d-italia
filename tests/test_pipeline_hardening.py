@@ -963,6 +963,57 @@ def test_offline_copernicus_change_fails_before_using_stale_process_slices(
         clear_ingestion_plan()
 
 
+def test_forced_geospatial_run_acquires_copernicus_when_catalog_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forest_plan(tmp_path, infc_status="unchanged", catalog_status="unchanged")
+    fetch_options: dict[str, object] = {}
+
+    def inspect_fetch(_root: Path, **kwargs: object) -> dict:
+        fetch_options.update(kwargs)
+        raise RuntimeError("fetch inspected")
+
+    monkeypatch.setattr(cli, "fetch_forests", inspect_fetch)
+    try:
+        with pytest.raises(RuntimeError, match="fetch inspected"):
+            _process_geospatial_forest_sources(
+                Namespace(offline=False, force=True), root=tmp_path / "data",
+                canonical=tmp_path / "data/canonical", previous_state=None,
+            )
+    finally:
+        clear_ingestion_plan()
+
+    assert fetch_options == {
+        "offline": False,
+        "include_infc": True,
+        "check_geospatial": True,
+    }
+
+
+def test_offline_forced_geospatial_refresh_fails_before_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forest_plan(tmp_path, infc_status="unchanged", catalog_status="unchanged")
+    fetch_called = False
+
+    def unexpected_fetch(*_args: object, **_kwargs: object) -> dict:
+        nonlocal fetch_called
+        fetch_called = True
+        return {}
+
+    monkeypatch.setattr(cli, "fetch_forests", unexpected_fetch)
+    try:
+        with pytest.raises(RuntimeError, match="forced refresh"):
+            _process_geospatial_forest_sources(
+                Namespace(offline=True, force=True), root=tmp_path / "data",
+                canonical=tmp_path / "data/canonical", previous_state=None,
+            )
+    finally:
+        clear_ingestion_plan()
+
+    assert fetch_called is False
+
+
 def test_geospatial_noop_contacts_neither_forest_source_family(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
