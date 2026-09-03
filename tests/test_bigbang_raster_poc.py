@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import zipfile
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 import rasterio
+import yaml
 from pyproj import Transformer
 from rasterio.transform import from_origin
 from shapely.geometry import MultiPolygon, box
@@ -15,16 +18,22 @@ from shapely.ops import transform
 
 from stato_italia.bigbang_raster_poc import (
     ALGORITHM_VERSION,
-    DERIVED_METRIC_ID,
+    EXPECTED_METRIC_BINDINGS,
+    METRIC_SPECS,
+    SOURCE,
     RasterMetadata,
+    RasterMetricSpec,
     _write_parquet_atomic,
     area_weighted_zonal_mean,
+    build_metric_specs,
     derive_territories,
     extract_raster,
     inspect_raster,
     municipality_area_feasibility,
     validate_archive_structure,
 )
+
+SOURCE_SYMBOLS = tuple(EXPECTED_METRIC_BINDINGS)
 
 
 def _write_raster(
@@ -53,16 +62,19 @@ def _write_raster(
     return path
 
 
-def _contract_for(archive: Path, raster: Path, **overrides) -> dict:
+def _contract_for(symbol: str, archive: Path, raster: Path, **overrides) -> dict:
     with rasterio.open(raster) as dataset:
         contract = {
+            "source_symbol": symbol,
             "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
             "archive_bytes": archive.stat().st_size,
+            "archive_member_count": 2,
             "archive_first_year": 2025,
             "archive_last_year": 2025,
             "archive_name": archive.name,
-            "raster_member": "tp_2025_yyc.asc",
-            "projection_member": "tp_2025_yyc.prj",
+            "member_prefix": symbol.lower(),
+            "raster_member": f"{symbol.lower()}_2025_yyc.asc",
+            "projection_member": f"{symbol.lower()}_2025_yyc.prj",
             "raster_sha256": hashlib.sha256(raster.read_bytes()).hexdigest(),
             "raster_bytes": raster.stat().st_size,
             "format": "AAIGrid",
@@ -71,61 +83,125 @@ def _contract_for(archive: Path, raster: Path, **overrides) -> dict:
             "height": dataset.height,
             "cell_size_m": abs(dataset.transform.a),
             "nodata": dataset.nodata,
-            "unit_ucum": "mm",
             "bounds": list(dataset.bounds),
         }
     contract.update(overrides)
     return contract
 
 
-def _archive(tmp_path: Path, values: np.ndarray | None = None) -> tuple[Path, Path, dict]:
-    source = tmp_path / "source"
+def _archive(
+    tmp_path: Path,
+    symbol: str,
+    values: np.ndarray | None = None,
+) -> tuple[Path, Path, RasterMetricSpec]:
+    source = tmp_path / f"source-{symbol.lower()}"
     source.mkdir()
-    raster = _write_raster(source / "tp_2025_yyc.asc", values if values is not None else np.array([[10, 20], [30, 40]]))
+    raster = _write_raster(
+        source / f"{symbol.lower()}_2025_yyc.asc",
+        values if values is not None else np.array([[10, 20], [30, 40]]),
+    )
     projection = raster.with_suffix(".prj")
-    archive = tmp_path / "TP_ANNUAL_2025-2025.zip"
+    archive = tmp_path / f"{symbol}_ANNUAL_2025-2025.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
         output.write(raster, raster.name)
         output.write(projection, projection.name)
-    return archive, raster, _contract_for(archive, raster)
+    source_spec = METRIC_SPECS[symbol]
+    spec = replace(source_spec, contract=_contract_for(symbol, archive, raster))
+    return archive, raster, spec
 
 
-def test_raster_contract_validates_header_nodata_and_unique_2025(tmp_path: Path) -> None:
-    archive, _, contract = _archive(tmp_path, np.array([[10, -9999], [30, 40]]))
-    extracted = extract_raster(archive, tmp_path / "extracted", contract)
-    metadata = inspect_raster(extracted, archive, contract)
+def _metadata(raster: Path, symbol: str, archive_sha: str, raster_sha: str) -> RasterMetadata:
+    return RasterMetadata(
+        archive_name=f"{symbol}_ANNUAL_2025-2025.zip",
+        archive_sha256=archive_sha,
+        archive_bytes=100,
+        archive_member_count=2,
+        available_annual_years=(2025,),
+        raster_sha256=raster_sha,
+        raster_bytes=raster.stat().st_size,
+        raster_member=f"{symbol.lower()}_2025_yyc.asc",
+        projection_member=f"{symbol.lower()}_2025_yyc.prj",
+        driver="AAIGrid",
+        crs="EPSG:3035",
+        width=1,
+        height=1,
+        cell_size_x_m=1,
+        cell_size_y_m=1,
+        nodata=-9999,
+        unit_ucum="mm",
+        bounds=(0, 0, 1, 1),
+    )
+
+
+def test_metric_specs_bind_all_five_source_symbols() -> None:
+    assert set(METRIC_SPECS) == set(SOURCE_SYMBOLS)
+    assert {
+        symbol: (spec.official_metric_id, spec.derived_metric_id)
+        for symbol, spec in METRIC_SPECS.items()
+    } == EXPECTED_METRIC_BINDINGS
+    assert {spec.reference_year for spec in METRIC_SPECS.values()} == {2025}
+    assert {spec.unit_ucum for spec in METRIC_SPECS.values()} == {"mm"}
+
+
+def test_metric_dictionary_marks_all_raster_aggregations_as_derived() -> None:
+    path = Path(__file__).resolve().parents[1] / "config/metrics/water.yaml"
+    metrics = {metric["id"]: metric for metric in yaml.safe_load(path.read_text())["metrics"]}
+    for spec in METRIC_SPECS.values():
+        assert metrics[spec.official_metric_id]["source_kind"] == "official_observation"
+        assert metrics[spec.derived_metric_id]["source_kind"] == "derived_metric"
+
+
+def test_metric_specs_fail_closed_on_grid_units_conflict() -> None:
+    source = deepcopy(SOURCE)
+    source["raster_products"]["AE"]["unit_ucum"] = "m"
+    with pytest.raises(ValueError, match="conflicts with GRID_UNITS"):
+        build_metric_specs(source)
+
+
+@pytest.mark.parametrize("symbol", SOURCE_SYMBOLS)
+def test_raster_contract_validates_header_unit_and_unique_2025(tmp_path: Path, symbol: str) -> None:
+    archive, _, spec = _archive(tmp_path, symbol, np.array([[10, -9999], [30, 40]]))
+    extracted = extract_raster(archive, tmp_path / "extracted", spec)
+    metadata = inspect_raster(extracted, archive, spec)
     assert metadata.driver == "AAIGrid"
     assert metadata.crs == "EPSG:3035"
     assert metadata.nodata == -9999
+    assert metadata.unit_ucum == "mm"
+    assert metadata.available_annual_years == (2025,)
+    with zipfile.ZipFile(archive) as source:
+        assert source.namelist().count(spec.contract["raster_member"]) == 1
+        assert source.namelist().count(spec.contract["projection_member"]) == 1
     with rasterio.open(extracted) as dataset:
         assert dataset.read(1, masked=True).mask.tolist() == [[False, True], [False, False]]
 
 
-def test_raster_contract_fails_closed_on_unexpected_structure(tmp_path: Path) -> None:
-    archive, raster, _ = _archive(tmp_path)
+@pytest.mark.parametrize("symbol", SOURCE_SYMBOLS)
+def test_raster_contract_fails_closed_on_unexpected_structure(tmp_path: Path, symbol: str) -> None:
+    archive, raster, spec = _archive(tmp_path, symbol)
     with zipfile.ZipFile(archive, "a") as output:
         output.writestr("unexpected.txt", "no")
-    contract = _contract_for(archive, raster)
-    with pytest.raises(ValueError, match="Unexpected BIGBANG TP archive structure"):
-        validate_archive_structure(archive, contract)
+    contract = _contract_for(symbol, archive, raster, archive_member_count=3)
+    with pytest.raises(ValueError, match=f"Unexpected BIGBANG {symbol} archive structure"):
+        validate_archive_structure(archive, replace(spec, contract=contract))
 
 
-def test_raster_contract_fails_closed_on_unexpected_header(tmp_path: Path) -> None:
-    archive, _, contract = _archive(tmp_path)
-    extracted = extract_raster(archive, tmp_path / "extracted", contract)
-    contract["width"] = 99
-    with pytest.raises(ValueError, match="Unexpected BIGBANG TP raster contract"):
-        inspect_raster(extracted, archive, contract)
+@pytest.mark.parametrize("symbol", SOURCE_SYMBOLS)
+def test_raster_contract_fails_closed_on_unexpected_header(tmp_path: Path, symbol: str) -> None:
+    archive, _, spec = _archive(tmp_path, symbol)
+    extracted = extract_raster(archive, tmp_path / "extracted", spec)
+    contract = dict(spec.contract, width=99)
+    with pytest.raises(ValueError, match=f"Unexpected BIGBANG {symbol} raster contract"):
+        inspect_raster(extracted, archive, replace(spec, contract=contract))
 
 
 def test_raster_contract_rejects_duplicate_2025_member(tmp_path: Path) -> None:
-    archive, raster, _ = _archive(tmp_path)
+    archive, raster, spec = _archive(tmp_path, "TP")
     with pytest.warns(UserWarning):
         with zipfile.ZipFile(archive, "a") as output:
             output.write(raster, raster.name)
-    contract = _contract_for(archive, raster)
+    contract = _contract_for("TP", archive, raster, archive_member_count=3)
     with pytest.raises(ValueError, match="duplicate member"):
-        validate_archive_structure(archive, contract)
+        validate_archive_structure(archive, replace(spec, contract=contract))
 
 
 @pytest.fixture
@@ -184,7 +260,7 @@ def test_zonal_handles_empty_intersection(zonal_raster: Path) -> None:
     assert result.quality_flags == ("empty_intersection",)
 
 
-def test_derived_artifact_keeps_provenance_and_does_not_touch_official_canonical(tmp_path: Path) -> None:
+def test_metric_specific_ids_and_provenance_remain_derived(tmp_path: Path) -> None:
     geometry_wgs84 = box(10, 45, 10.005, 45.005)
     project = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True).transform
     projected = transform(project, geometry_wgs84)
@@ -195,25 +271,6 @@ def test_derived_artifact_keeps_provenance_and_does_not_touch_official_canonical
         origin_y=projected.bounds[3] + 10,
         cell_size=max(projected.bounds[2] - projected.bounds[0], projected.bounds[3] - projected.bounds[1]) + 20,
     )
-    metadata = RasterMetadata(
-        archive_sha256="a" * 64,
-        archive_bytes=100,
-        archive_member_count=2,
-        archive_years=(2025, 2025),
-        raster_sha256="b" * 64,
-        raster_bytes=raster.stat().st_size,
-        raster_member="tp_2025_yyc.asc",
-        projection_member="tp_2025_yyc.prj",
-        driver="AAIGrid",
-        crs="EPSG:3035",
-        width=1,
-        height=1,
-        cell_size_x_m=1,
-        cell_size_y_m=1,
-        nodata=-9999,
-        unit_ucum="mm",
-        bounds=(0, 0, 1, 1),
-    )
     territories = pd.DataFrame([{
         "territory_id": "it:region:99",
         "territory_version_id": "it:region:99@2025-01-01",
@@ -222,20 +279,31 @@ def test_derived_artifact_keeps_provenance_and_does_not_touch_official_canonical
         "reference_date": "2025-01-01",
         "geometry_wkb": geometry_wgs84.wkb,
     }])
-    result = derive_territories(raster, territories, "region", metadata)
-    row = result.iloc[0]
-    assert row["derived_metric_id"] == DERIVED_METRIC_ID
-    assert row["algorithm_version"] == ALGORITHM_VERSION
-    assert row["source_asset_sha256"] == "a" * 64
-    assert row["source_raster_sha256"] == "b" * 64
-    assert row["territory_version_id"] == "it:region:99@2025-01-01"
-    assert row["territory_geometry_reference"].startswith("canonical/territories/reference_year=2025/")
-    assert len(row["territory_geometry_sha256"]) == 64
+    tp = derive_territories(raster, territories, "region", _metadata(raster, "TP", "a" * 64, "b" * 64), METRIC_SPECS["TP"])
+    ae = derive_territories(raster, territories, "region", _metadata(raster, "AE", "c" * 64, "d" * 64), METRIC_SPECS["AE"])
+    output = pd.concat([tp, ae], ignore_index=True)
+
+    assert set(output["derived_metric_id"]) == {
+        "water_total_precipitation_mm_zonal_mean",
+        "water_actual_evapotranspiration_mm_zonal_mean",
+    }
+    assert output["derived_observation_id"].is_unique
+    assert set(output["source_asset_sha256"]) == {"a" * 64, "c" * 64}
+    assert set(output["source_raster_sha256"]) == {"b" * 64, "d" * 64}
+    assert set(output["source_raster_locator"]) == {
+        "TP_ANNUAL_2025-2025.zip!tp_2025_yyc.asc",
+        "AE_ANNUAL_2025-2025.zip!ae_2025_yyc.asc",
+    }
+    assert set(output["algorithm_version"]) == {ALGORITHM_VERSION}
+    assert set(output["official_status"]) == {"derived_by_stato_italia"}
+    assert all(value.startswith("canonical/territories/reference_year=2025/") for value in output["territory_geometry_reference"])
+    assert all(len(value) == 64 for value in output["territory_geometry_sha256"])
+
     official = tmp_path / "canonical/water/observations.parquet"
     official.parent.mkdir(parents=True)
     official.write_bytes(b"official-unchanged")
     destination = tmp_path / f"derived/water/algorithm_version={ALGORITHM_VERSION}/observations.parquet"
-    _write_parquet_atomic(result, destination)
+    _write_parquet_atomic(output, destination)
     assert destination.exists()
     assert official.read_bytes() == b"official-unchanged"
 
