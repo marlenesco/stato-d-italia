@@ -1,0 +1,7 @@
+metrics:
+  - {id: water_total_precipitation_mm, label_it: Precipitazione totale, unit_ucum: mm, source_kind: official_observation, temporal_kind: annual, higher_is: context_dependent}
+  - {id: water_actual_evapotranspiration_mm, label_it: Evapotraspirazione reale, unit_ucum: mm, source_kind: official_observation, temporal_kind: annual, higher_is: context_dependent}
+  - {id: water_internal_flow_mm, label_it: Risorsa idrica rinnovabile, unit_ucum: mm, source_kind: official_observation, temporal_kind: annual, higher_is: context_dependent}
+  - {id: water_aquifer_recharge_mm, label_it: Ricarica degli acquiferi, unit_ucum: mm, source_kind: official_observation, temporal_kind: annual, higher_is: context_dependent}
+  - {id: water_surface_runoff_mm, label_it: Ruscellamento superficiale, unit_ucum: mm, source_kind: official_observation, temporal_kind: annual, higher_is: context_dependent}
+  - {id: water_total_precipitation_mm_zonal_mean, label_it: Precipitazione totale media zonale, unit_ucum: mm, source_kind: derived_metric, temporal_kind: annual, higher_is: context_dependent}

@@ -16,3 +16,30 @@ methodology_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG_ISPRA.ht
 known_limitations:
   - Model estimates are recalculated with each BIGBANG version; compare values only within same version.
   - No municipality or province data is supplied by selected tables.
+raster_poc:
+  product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025
+  download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025/download/en/1/TP_ANNUAL_1951-2025.zip
+  resolved_download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025/download/en/1/TP_ANNUAL_1951-2025.zip
+  archive_name: TP_ANNUAL_1951-2025.zip
+  archive_format: ZIP
+  content_type: application/zip
+  archive_sha256: af80b158d29190cb57dfae2204bded5dd6c3365e8579dc0c902863418242dbc9
+  archive_bytes: 91421884
+  archive_first_year: 1951
+  archive_last_year: 2025
+  raster_member: tp_2025_yyc.asc
+  projection_member: tp_2025_yyc.prj
+  raster_sha256: 52f1bffc413427b9694e883d7c18bd560d843b171b684c366a9c6781273e78d4
+  raster_bytes: 11809682
+  format: AAIGrid
+  crs: EPSG:3035
+  width: 1300
+  height: 1400
+  cell_size_m: 1000
+  nodata: -9999
+  unit_ucum: mm
+  bounds: [3900000, 1300000, 5200000, 2700000]
+  methodology_scope_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG/BRACA_MARIANI_CReIAMO_PA.pdf
+  methodology_scope_page: 3
+  methodology_min_area_km2: 100
+  methodology_min_area_operator: ">"
