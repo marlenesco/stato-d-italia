@@ -66,10 +66,6 @@ coste e intersezioni vuote sono gestiti esplicitamente. Il coverage ratio è il
 rapporto tra area valida intersecata e area della geometria territoriale nello
 stesso CRS.
 
-Il metodo basato soltanto sul centro del pixel non è quello autorevole del
-progetto, anche se viene usato come controllo diagnostico per comprendere le
-differenze rispetto alle tabelle ISPRA.
-
 ### Dipendenza territoriale
 
 Il PoC usa le geometrie canonical ISTAT con riferimento `2025-01-01`. La
@@ -79,10 +75,12 @@ trasferiti implicitamente a un'altra versione territoriale.
 
 ## Gate metodologico dei 100 km2
 
-Una presentazione metodologica ufficiale ISPRA del 2019, di Braca e Mariani, dichiara, tra i
-criteri del modello, la possibilità di ritagliare risultati su qualunque ambito
-territoriale `> 100 km2`. La stessa presentazione indica griglia di 1 km e scala
-temporale minima mensile.
+La [pagina ufficiale corrente del modello BIGBANG](https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG_ISPRA.html),
+aggiornata per BIGBANG 10.0, dichiara tra i criteri del modello la possibilità di
+ritagliare risultati su qualunque ambito territoriale `> 100 km2`. Lo stesso
+criterio è riportato nella presentazione metodologica ufficiale ISPRA del 2019 di
+Braca e Mariani, che indica inoltre griglia di 1 km e scala temporale minima
+mensile.
 
 La soglia è quindi interpretata come limite/raccomandazione di applicabilità
 metodologica dichiarata, non come limite tecnico del formato raster: il software
