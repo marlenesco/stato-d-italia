@@ -11,35 +11,169 @@ temporal_granularity: annual
 first_available_year: 1951
 latest_available_year: 2025
 publication_frequency: annual
+dataset_version: bigbang-10-1951-2025
 official_status: official national statistics; BIGBANG model estimate
 methodology_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG_ISPRA.html
 known_limitations:
   - Model estimates are recalculated with each BIGBANG version; compare values only within same version.
   - No municipality or province data is supplied by selected tables.
-raster_poc:
-  product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025
-  download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025/download/en/1/TP_ANNUAL_1951-2025.zip
-  resolved_download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025/download/en/1/TP_ANNUAL_1951-2025.zip
-  archive_name: TP_ANNUAL_1951-2025.zip
-  archive_format: ZIP
-  content_type: application/zip
-  archive_sha256: af80b158d29190cb57dfae2204bded5dd6c3365e8579dc0c902863418242dbc9
-  archive_bytes: 91421884
-  archive_first_year: 1951
-  archive_last_year: 2025
-  raster_member: tp_2025_yyc.asc
-  projection_member: tp_2025_yyc.prj
-  raster_sha256: 52f1bffc413427b9694e883d7c18bd560d843b171b684c366a9c6781273e78d4
-  raster_bytes: 11809682
-  format: AAIGrid
-  crs: EPSG:3035
-  width: 1300
-  height: 1400
-  cell_size_m: 1000
-  nodata: -9999
-  unit_ucum: mm
-  bounds: [3900000, 1300000, 5200000, 2700000]
-  methodology_scope_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG/BRACA_MARIANI_CReIAMO_PA.pdf
-  methodology_scope_page: 3
+raster_unit_evidence:
+  product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/grid_units
+  download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/grid_units/download/en/1/GRID_UNITS.txt
+  asset_name: GRID_UNITS.txt
+  asset_sha256: d56a9671b9cc508e85837a838f31a812b2fac4f2ff4300ba2aa9e6cc786855a4
+  asset_bytes: 596
+  verified_unit_ucum: mm
+  statement: All other balance component grids are expressed in mm.
+raster_methodology:
+  scope_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG_ISPRA.html
   methodology_min_area_km2: 100
   methodology_min_area_operator: ">"
+  supporting_presentation_url: https://www.isprambiente.gov.it/pre_meteo/idro/BIGBANG/BRACA_MARIANI_CReIAMO_PA.pdf
+  supporting_presentation_page: 3
+raster_products:
+  TP:
+    source_symbol: TP
+    official_metric_id: water_total_precipitation_mm
+    derived_metric_id: water_total_precipitation_mm_zonal_mean
+    reference_year: 2025
+    unit_ucum: mm
+    product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025
+    download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025/download/en/1/TP_ANNUAL_1951-2025.zip
+    resolved_download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/total_precipitation/tp_annual_1951-2025/download/en/1/TP_ANNUAL_1951-2025.zip
+    archive_name: TP_ANNUAL_1951-2025.zip
+    archive_format: ZIP
+    content_type: application/zip
+    archive_sha256: af80b158d29190cb57dfae2204bded5dd6c3365e8579dc0c902863418242dbc9
+    archive_bytes: 91421884
+    archive_member_count: 150
+    archive_first_year: 1951
+    archive_last_year: 2025
+    member_prefix: tp
+    raster_member: tp_2025_yyc.asc
+    projection_member: tp_2025_yyc.prj
+    raster_sha256: 52f1bffc413427b9694e883d7c18bd560d843b171b684c366a9c6781273e78d4
+    raster_bytes: 11809682
+    format: AAIGrid
+    crs: EPSG:3035
+    width: 1300
+    height: 1400
+    cell_size_m: 1000
+    nodata: -9999
+    bounds: [3900000, 1300000, 5200000, 2700000]
+  AE:
+    source_symbol: AE
+    official_metric_id: water_actual_evapotranspiration_mm
+    derived_metric_id: water_actual_evapotranspiration_mm_zonal_mean
+    reference_year: 2025
+    unit_ucum: mm
+    product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/actual_evapotranspiration/ae_annual_1951-2025
+    download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/actual_evapotranspiration/ae_annual_1951-2025/download/en/1/AE_ANNUAL_1951-2025.zip
+    resolved_download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/actual_evapotranspiration/ae_annual_1951-2025/download/en/1/AE_ANNUAL_1951-2025.zip
+    archive_name: AE_ANNUAL_1951-2025.zip
+    archive_format: ZIP
+    content_type: application/zip
+    archive_sha256: 860c3b7882aa78e9942b70590710aba116baea8ac4a6d0d5b6fc4095877f77a4
+    archive_bytes: 91808775
+    archive_member_count: 150
+    archive_first_year: 1951
+    archive_last_year: 2025
+    member_prefix: ae
+    raster_member: ae_2025_yyc.asc
+    projection_member: ae_2025_yyc.prj
+    raster_sha256: 24a973a44b449c38602269948befeec3b85906adbc7bbf143bb6f871d0a72fa8
+    raster_bytes: 11808129
+    format: AAIGrid
+    crs: EPSG:3035
+    width: 1300
+    height: 1400
+    cell_size_m: 1000
+    nodata: -9999
+    bounds: [3900000, 1300000, 5200000, 2700000]
+  IF:
+    source_symbol: IF
+    official_metric_id: water_internal_flow_mm
+    derived_metric_id: water_internal_flow_mm_zonal_mean
+    reference_year: 2025
+    unit_ucum: mm
+    product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/internal_flow/if_annual_1951-2025
+    download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/internal_flow/if_annual_1951-2025/download/en/1/IF_ANNUAL_1951-2025.zip
+    resolved_download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/internal_flow/if_annual_1951-2025/download/en/1/IF_ANNUAL_1951-2025.zip
+    archive_name: IF_ANNUAL_1951-2025.zip
+    archive_format: ZIP
+    content_type: application/zip
+    archive_sha256: 8d685396d554971402cc28e9af38bf66362fe6d863e19e0c06b04cba9a15962a
+    archive_bytes: 96183083
+    archive_member_count: 150
+    archive_first_year: 1951
+    archive_last_year: 2025
+    member_prefix: if
+    raster_member: if_2025_yyc.asc
+    projection_member: if_2025_yyc.prj
+    raster_sha256: 72663d78a197b7376606d56092051d35b8b69cfab358836aa65de8d232064d62
+    raster_bytes: 11809372
+    format: AAIGrid
+    crs: EPSG:3035
+    width: 1300
+    height: 1400
+    cell_size_m: 1000
+    nodata: -9999
+    bounds: [3900000, 1300000, 5200000, 2700000]
+  GR:
+    source_symbol: GR
+    official_metric_id: water_aquifer_recharge_mm
+    derived_metric_id: water_aquifer_recharge_mm_zonal_mean
+    reference_year: 2025
+    unit_ucum: mm
+    product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/groundwater-_recharge/gr_annual_1951-2025
+    download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/groundwater-_recharge/gr_annual_1951-2025/download/en/1/GR_ANNUAL_1951-2025.zip
+    resolved_download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/groundwater-_recharge/gr_annual_1951-2025/download/en/1/GR_ANNUAL_1951-2025.zip
+    archive_name: GR_ANNUAL_1951-2025.zip
+    archive_format: ZIP
+    content_type: application/zip
+    archive_sha256: eafc0a8e4206718b07cef7c1ab62028dfa963c2c3d7b81e1aaa31ed84b876219
+    archive_bytes: 94421130
+    archive_member_count: 150
+    archive_first_year: 1951
+    archive_last_year: 2025
+    member_prefix: gr
+    raster_member: gr_2025_yyc.asc
+    projection_member: gr_2025_yyc.prj
+    raster_sha256: 8d2e1c8079c5fd0dd026320db69031abe1acf4d05e9e8b813fb4ca476029f6bb
+    raster_bytes: 11768891
+    format: AAIGrid
+    crs: EPSG:3035
+    width: 1300
+    height: 1400
+    cell_size_m: 1000
+    nodata: -9999
+    bounds: [3900000, 1300000, 5200000, 2700000]
+  RF:
+    source_symbol: RF
+    official_metric_id: water_surface_runoff_mm
+    derived_metric_id: water_surface_runoff_mm_zonal_mean
+    reference_year: 2025
+    unit_ucum: mm
+    product_page_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/surface_runoff/rf_annual_1951-2025
+    download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/surface_runoff/rf_annual_1951-2025/download/en/1/RF_ANNUAL_1951-2025.zip
+    resolved_download_url: https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/surface_runoff/rf_annual_1951-2025/download/en/1/RF_ANNUAL_1951-2025.zip
+    archive_name: RF_ANNUAL_1951-2025.zip
+    archive_format: ZIP
+    content_type: application/zip
+    archive_sha256: 5adebbfe9c30fc4cb79d1b1aa19b339de09f636343d02e6853f31e962121a597
+    archive_bytes: 96267880
+    archive_member_count: 150
+    archive_first_year: 1951
+    archive_last_year: 2025
+    member_prefix: rf
+    raster_member: rf_2025_yyc.asc
+    projection_member: rf_2025_yyc.prj
+    raster_sha256: 29e604293730fbbec4dff4dcb04801215583c2df6d8d678b02e2dcff6a5364ba
+    raster_bytes: 11803495
+    format: AAIGrid
+    crs: EPSG:3035
+    width: 1300
+    height: 1400
+    cell_size_m: 1000
+    nodata: -9999
+    bounds: [3900000, 1300000, 5200000, 2700000]
