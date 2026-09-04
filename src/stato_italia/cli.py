@@ -273,21 +273,32 @@ def _validate_data_canonical_provenance(
 ) -> None:
     provenance_contracts = (
         ("soil", "canonical/soil/dataset_version=2025-2024-observations/observations.parquet", "ispra-soil-2025", None),
-        ("water", "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet", "ispra-bigbang-10", None),
-        ("dissesto", "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet", "ispra-idrogeo-risk-2024", "idrogeo-risk-api-responses.zip"),
+        (
+            "water", "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
+            "ispra-bigbang-10", frozenset({
+                "BIGBANG100_TABLES_ITALY_01.xlsx", "BIGBANG100_TABLES_REGIONS_02.xlsx",
+            }),
+        ),
+        ("dissesto", "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet", "ispra-idrogeo-risk-2024", frozenset({"idrogeo-risk-api-responses.zip"})),
         ("emissions", "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet", "ispra-emissions-provincial-2026", None),
         ("emissions", "canonical/emissions/national/greenhouse-gases/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-ghg-2026", None),
         ("emissions", "canonical/emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet", "ispra-emissions-nfr-2026", None),
     )
-    for family, logical_path, source_id, asset_name in provenance_contracts:
+    for family, logical_path, source_id, allowed_asset_names in provenance_contracts:
         if affected_families is not None and family not in affected_families:
             continue
         if logical_path not in logical_paths:
             raise ValueError(f"Data release lacks canonical artifact: {logical_path}")
+        source_entries = [
+            entry for entry in source_state["sources"] if entry.get("source_id") == source_id
+        ]
+        if allowed_asset_names is not None:
+            present_asset_names = {Path(str(entry.get("asset_path", ""))).name for entry in source_entries}
+            if present_asset_names & allowed_asset_names != allowed_asset_names:
+                raise ValueError(f"Source-state lacks canonical provenance asset: {logical_path}")
         expected_hashes = {
-            str(entry["sha256"]) for entry in source_state["sources"]
-            if entry.get("source_id") == source_id
-            and (asset_name is None or str(entry.get("asset_path", "")).endswith(f"/{asset_name}"))
+            str(entry["sha256"]) for entry in source_entries
+            if allowed_asset_names is None or Path(str(entry.get("asset_path", ""))).name in allowed_asset_names
         }
         table = pd.read_parquet(root / logical_path, columns=["source_asset_sha256"])
         canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
@@ -298,11 +309,9 @@ def _validate_data_canonical_provenance(
 def _validate_bigbang_historical_provenance(
     root: Path, source_state: dict, logical_paths: set[str], affected_families: set[str] | None,
 ) -> None:
-    if affected_families is not None and "water_historical" not in affected_families:
-        return
     if HISTORICAL_DERIVED_LOGICAL_PATH not in logical_paths:
-        if affected_families is not None:
-            raise ValueError("Release lacks BIGBANG historical derived artifact")
+        raise ValueError("Release lacks BIGBANG historical derived artifact")
+    if affected_families is not None and "water_historical" not in affected_families:
         return
     table = pd.read_parquet(root / HISTORICAL_DERIVED_LOGICAL_PATH)
     required = {
@@ -503,7 +512,8 @@ def _validate_release_coherence(
     if missing_shared:
         raise ValueError(f"Release lacks shared territory canonical artifacts: {sorted(missing_shared)}")
     _validate_data_canonical_provenance(root, source_state, logical_paths, affected_families)
-    _validate_bigbang_historical_provenance(root, source_state, logical_paths, affected_families)
+    if scope != "geospatial":
+        _validate_bigbang_historical_provenance(root, source_state, logical_paths, affected_families)
     if scope != "data":
         if affected_families is None or "infc" in affected_families:
             _validate_infc_canonical_provenance(root, source_state, logical_paths)
@@ -787,6 +797,22 @@ def _historical_water_affected(source_families: set[str]) -> bool:
     return bool({"water", "boundaries"} & source_families)
 
 
+def should_build_historical_water(
+    *, scope: str, incremental: bool, affected_source_families: set[str], active_release_has_historical: bool,
+) -> bool:
+    """Decide historical BIGBANG membership without depending on local artifacts."""
+    if scope == "all" or not incremental or not active_release_has_historical:
+        return True
+    return _historical_water_affected(affected_source_families)
+
+
+def _active_release_has_historical(store: LocalObjectStore | R2ObjectStore) -> bool:
+    release = active_release(store)
+    return bool(release and any(
+        item.get("logicalPath") == HISTORICAL_DERIVED_LOGICAL_PATH for item in release.get("objects", [])
+    ))
+
+
 def _boundary_reference_year(asset_path: str) -> int:
     matches = [int(part) for part in Path(asset_path).parts if part.isdigit()]
     configured = [year for year in matches if year in SOURCE_YEARS]
@@ -878,7 +904,10 @@ def _run_incremental_data(
         families = {"boundaries", "soil", "water", "dissesto", "emissions"}
         boundary_years = set(SOURCE_YEARS)
     delivery_families, geometry_families = _data_downstream_families(families, boundary_years)
-    historical_rebuild = _historical_water_affected(families)
+    historical_rebuild = should_build_historical_water(
+        scope="data", incremental=True, affected_source_families=families,
+        active_release_has_historical=_active_release_has_historical(store),
+    )
     # Historical BIGBANG uses all five archives even when only boundaries changed.
     _hydrate_planned_raw_dependencies(store, root, families | ({"water"} if historical_rebuild else set()))
 
@@ -1167,6 +1196,17 @@ def run(args: argparse.Namespace) -> int:
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
         force=args.force or soil["changed"],
     )
+    historical_rebuild = should_build_historical_water(
+        scope=args.scope, incremental=False, affected_source_families=set(),
+        active_release_has_historical=_active_release_has_historical(store),
+    )
+    historical = (
+        run_bigbang_historical_processing(
+            root / "raw" / "ispra-bigbang-10", canonical, derived,
+            output / "reports" / "bigbang-historical-processing.json",
+        ) | {"changed": True}
+        if historical_rebuild else {"changed": False, "carried": True}
+    )
     changed_boundary_years = {
         int(item["year"]) for item in boundaries.get("years", []) if not item.get("skipped", False)
     }
@@ -1175,7 +1215,7 @@ def run(args: argparse.Namespace) -> int:
         changed_boundary_years=changed_boundary_years,
     )
     forest_fetch = forests["fetch"]
-    changed = boundaries["changed"] or soil["changed"] or water["changed"] or emissions["changed"] or dissesto["changed"] or bool(dissesto_fetch and dissesto_fetch["changed"]) or analytics["changed"] or bool(forests.get("infc", {}).get("changed")) or bool(forests.get("zonal", {}).get("changed"))
+    changed = boundaries["changed"] or soil["changed"] or water["changed"] or emissions["changed"] or dissesto["changed"] or bool(dissesto_fetch and dissesto_fetch["changed"]) or analytics["changed"] or historical["changed"] or bool(forests.get("infc", {}).get("changed")) or bool(forests.get("zonal", {}).get("changed"))
     pmtiles: dict[str, dict] = {}
     for level in ("municipality", "province", "region"):
         pmtiles_path = delivery / "soil" / "geometry" / f"istat-{level}-2025.pmtiles"
@@ -1302,6 +1342,7 @@ def run(args: argparse.Namespace) -> int:
     declared_paths = [
         *raw_declarations, *canonical_declarations,
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
+        root / HISTORICAL_DERIVED_LOGICAL_PATH,
         *[path for report in reports_with_files for path in report.get("files", [])],
         *[Path(info["path"]) for info in [*pmtiles.values(), *dissesto_pmtiles.values(), *emissions_pmtiles.values(), *forests_pmtiles.values()]],
     ]
@@ -1336,6 +1377,7 @@ def run(args: argparse.Namespace) -> int:
         "forests_pmtiles": forests_pmtiles,
         "soil": soil,
         "water": water,
+        "historicalWater": historical,
         "emissions": emissions,
         "dissesto": dissesto,
         "dissesto_fetch": dissesto_fetch,
@@ -1362,7 +1404,10 @@ def run(args: argparse.Namespace) -> int:
             "sourcesUnverifiable": scoped_metrics["sourcesUnverifiable"],
             "rawBytesAcquired": scoped_metrics["rawBytesAcquired"],
             "canonicalBytesGenerated": sum(info.get("canonical_bytes", 0) for info in [soil, water, national_emissions, provincial_emissions, dissesto, forests.get("infc", {}), forests.get("zonal", {})] if info.get("changed")),
-            "derivedBytesGenerated": analytics.get("bytes", 0) if analytics.get("changed") else 0,
+            "derivedBytesGenerated": (
+                (analytics.get("bytes", 0) if analytics.get("changed") else 0)
+                + (Path(historical["derivedArtifact"]).stat().st_size if historical.get("changed") else 0)
+            ),
             "deliveryBytesGenerated": sum(report.get("bytes", 0) for report in reports_with_files if report.get("changed")),
             "objectsUploaded": scoped_metrics["objectsUploaded"],
             "objectsReused": scoped_metrics["objectsReused"],

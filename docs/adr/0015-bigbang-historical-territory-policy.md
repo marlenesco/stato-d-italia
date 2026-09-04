@@ -149,6 +149,9 @@ annuali e `GRID_UNITS.txt`, con raw deterministico e sidecar metadata. Il primo
 preflight dopo l'introduzione di questi asset rileva le entry assenti nello
 source state attivo e richiede il bootstrap senza `--force`; dopo una release
 completa, i controlli invariati sono un vero no-op e non avanzano il manifest.
+La provenance row-level del canonical ufficiale ammette esclusivamente i due
+workbook: i cinque ZIP e `GRID_UNITS.txt` restano asset metodologici/source-state
+e provenance del parquet raster-derived, non delle osservazioni ufficiali.
 
 Il derived dipende semanticamente da `water` e `boundaries`: una variazione di
 una delle due family lo ricostruisce; una variazione data non correlata lo porta
@@ -159,3 +162,6 @@ Prima del publish la coerenza di release verifica tutti i campi di provenance,
 i cinque SHA degli ZIP presenti nel source state, metriche/dataset/algoritmo e
 le geometry reference dichiarate. La vera acceptance R2 resta da eseguire dopo
 review; questa integrazione non l'ha avviata né ha pubblicato alcun oggetto.
+Un run data completo o `scope=all` rigenera sempre l'artifact storico e lo
+dichiara nella release; un incremental di una family non correlata lo conserva
+come oggetto carried identico.
