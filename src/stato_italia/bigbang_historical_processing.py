@@ -33,6 +33,12 @@ from .bigbang_raster_poc import (
 from .common import json_dump, sha256_file
 
 
+HISTORICAL_DERIVED_LOGICAL_PATH = (
+    f"derived/water/historical/dataset_version={SOURCE['dataset_version']}/"
+    f"algorithm_version={ALGORITHM_VERSION}/observations.parquet"
+)
+
+
 @dataclass(frozen=True)
 class HistoricalProcessingPlanEntry:
     reference_year: int
@@ -126,13 +132,7 @@ def _reject_structural_regional_mismatch(comparison: pd.DataFrame, symbol: str, 
 
 
 def _historical_destination(derived_root: Path) -> Path:
-    return (
-        derived_root
-        / "water/historical"
-        / f"dataset_version={SOURCE['dataset_version']}"
-        / f"algorithm_version={ALGORITHM_VERSION}"
-        / "observations.parquet"
-    )
+    return derived_root.parent / HISTORICAL_DERIVED_LOGICAL_PATH
 
 
 def run_bigbang_historical_processing(

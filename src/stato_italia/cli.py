@@ -11,6 +11,8 @@ from pathlib import Path
 import pandas as pd
 
 from .analytics import build_soil_analytics
+from .bigbang_historical_processing import HISTORICAL_DERIVED_LOGICAL_PATH, run_bigbang_historical_processing
+from .bigbang_raster_poc import ALGORITHM_VERSION as BIGBANG_ALGORITHM_VERSION, METRIC_SPECS as BIGBANG_METRIC_SPECS, SOURCE as BIGBANG_SOURCE
 from .common import json_dump, now_iso, sha256_file
 from .delivery import generate_soil_delivery
 from .emissions import fetch_emissions, ingest_emissions
@@ -33,7 +35,7 @@ from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseAr
 from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, comparable_state, merge_source_families, merge_source_states, scoped_source_state, source_family, source_state_changed, source_state_counts, source_state_entry
 from .soil import ingest_soil
 from .territories import SOURCE_YEARS, ingest_boundaries
-from .water import ingest_water
+from .water import bigbang_raw_assets, ingest_water
 from .water_delivery import generate_water_delivery
 from .tiles import build_pmtiles, is_readable_pmtiles
 from .territory_insights_delivery import generate_territory_insights_delivery
@@ -148,6 +150,25 @@ def _hydrate_planned_raw_dependencies(
         raw = f"raw/{entry['asset_path']}"
         logical_paths.extend((raw, f"{raw}.metadata.json"))
     _hydrate(store, root, sorted(set(logical_paths)))
+
+
+def _missing_bigbang_source_plan_entries(state: dict | None) -> list[dict]:
+    """Make new registry assets visible to preflight before their first release."""
+    existing = {
+        str(entry.get("asset_path"))
+        for entry in (state or {}).get("sources", [])
+        if entry.get("source_id") == "ispra-bigbang-10"
+    }
+    return [
+        {
+            "source_id": "ispra-bigbang-10",
+            "asset_path": f"ispra-bigbang-10/{name}",
+            "status": "changed",
+            "reason": "registered_asset_missing_from_persisted_source_state",
+        }
+        for name in bigbang_raw_assets()
+        if f"ispra-bigbang-10/{name}" not in existing
+    ]
 
 
 def _planned_noop_report(
@@ -272,6 +293,58 @@ def _validate_data_canonical_provenance(
         canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
         if not expected_hashes or canonical_hashes != expected_hashes:
             raise ValueError(f"Source-state and canonical provenance differ: {logical_path}")
+
+
+def _validate_bigbang_historical_provenance(
+    root: Path, source_state: dict, logical_paths: set[str], affected_families: set[str] | None,
+) -> None:
+    if affected_families is not None and "water_historical" not in affected_families:
+        return
+    if HISTORICAL_DERIVED_LOGICAL_PATH not in logical_paths:
+        if affected_families is not None:
+            raise ValueError("Release lacks BIGBANG historical derived artifact")
+        return
+    table = pd.read_parquet(root / HISTORICAL_DERIVED_LOGICAL_PATH)
+    required = {
+        "derived_observation_id", "derived_metric_id", "reference_year", "territory_id",
+        "territory_version_id", "source_asset_sha256", "source_raster_sha256",
+        "source_raster_locator", "territory_geometry_reference", "territory_geometry_sha256",
+        "source_dataset_id", "source_dataset_version", "unit_ucum", "algorithm_version",
+        "coverage_ratio", "valid_intersection_area_m2", "intersecting_cell_count",
+        "valid_cell_count", "quality_flags", "official_status", "territory_level",
+    }
+    if missing := required - set(table.columns):
+        raise ValueError(f"BIGBANG historical derived artifact lacks provenance fields: {sorted(missing)}")
+    expected_assets = {
+        str(entry["sha256"])
+        for entry in source_state["sources"]
+        if entry.get("source_id") == "ispra-bigbang-10"
+        and str(entry.get("asset_path", "")).endswith(".zip")
+    }
+    referenced_assets = set(table["source_asset_sha256"].dropna().astype(str))
+    if len(expected_assets) != 5 or referenced_assets != expected_assets:
+        raise ValueError("BIGBANG historical raster provenance does not match release source-state")
+    if set(table["source_dataset_id"].astype(str)) != {str(BIGBANG_SOURCE["source_id"])}:
+        raise ValueError("BIGBANG historical artifact has an unexpected source dataset")
+    if set(table["source_dataset_version"].astype(str)) != {str(BIGBANG_SOURCE["dataset_version"])}:
+        raise ValueError("BIGBANG historical artifact has an unexpected source dataset version")
+    if set(table["algorithm_version"].astype(str)) != {BIGBANG_ALGORITHM_VERSION}:
+        raise ValueError("BIGBANG historical artifact has an unexpected algorithm version")
+    expected_metrics = {spec.derived_metric_id for spec in BIGBANG_METRIC_SPECS.values()}
+    if set(table["derived_metric_id"].astype(str)) != expected_metrics:
+        raise ValueError("BIGBANG historical artifact has an unexpected derived metric")
+    expected_units = {spec.unit_ucum for spec in BIGBANG_METRIC_SPECS.values()}
+    if set(table["unit_ucum"].astype(str)) != expected_units:
+        raise ValueError("BIGBANG historical artifact has an unexpected unit")
+    if set(table["official_status"]) != {"derived_by_stato_italia"} or set(table["territory_level"]) != {"province"}:
+        raise ValueError("BIGBANG historical artifact mixes official observations or non-provincial outputs")
+    if table["derived_observation_id"].duplicated().any():
+        raise ValueError("BIGBANG historical artifact has duplicate derived observation IDs")
+    geometry_paths = {
+        str(value).split("#", 1)[0] for value in table["territory_geometry_reference"].dropna().astype(str)
+    }
+    if not geometry_paths or not geometry_paths <= logical_paths:
+        raise ValueError("BIGBANG historical artifact references geometry absent from release")
 
 
 def _validate_infc_canonical_provenance(root: Path, source_state: dict, logical_paths: set[str]) -> None:
@@ -430,6 +503,7 @@ def _validate_release_coherence(
     if missing_shared:
         raise ValueError(f"Release lacks shared territory canonical artifacts: {sorted(missing_shared)}")
     _validate_data_canonical_provenance(root, source_state, logical_paths, affected_families)
+    _validate_bigbang_historical_provenance(root, source_state, logical_paths, affected_families)
     if scope != "data":
         if affected_families is None or "infc" in affected_families:
             _validate_infc_canonical_provenance(root, source_state, logical_paths)
@@ -708,6 +782,11 @@ _DATA_DELIVERY_FAMILY = {
 _FOREST_BOUNDARY_REFERENCE_YEARS = frozenset({2015, 2023})
 
 
+def _historical_water_affected(source_families: set[str]) -> bool:
+    """Historical provincial zonals depend on both BIGBANG water and ISTAT boundaries."""
+    return bool({"water", "boundaries"} & source_families)
+
+
 def _boundary_reference_year(asset_path: str) -> int:
     matches = [int(part) for part in Path(asset_path).parts if part.isdigit()]
     configured = [year for year in matches if year in SOURCE_YEARS]
@@ -799,7 +878,9 @@ def _run_incremental_data(
         families = {"boundaries", "soil", "water", "dissesto", "emissions"}
         boundary_years = set(SOURCE_YEARS)
     delivery_families, geometry_families = _data_downstream_families(families, boundary_years)
-    _hydrate_planned_raw_dependencies(store, root, families)
+    historical_rebuild = _historical_water_affected(families)
+    # Historical BIGBANG uses all five archives even when only boundaries changed.
+    _hydrate_planned_raw_dependencies(store, root, families | ({"water"} if historical_rebuild else set()))
 
     territory_years: set[int] = set(SOURCE_YEARS) if "boundaries" in families else set()
     if "soil" in families or "water" in families:
@@ -808,12 +889,16 @@ def _run_incremental_data(
         territory_years.add(2024)
     if "emissions" in families:
         territory_years.update((2019, 2023))
+    if historical_rebuild:
+        territory_years.update(SOURCE_YEARS)
     if territory_years:
         _hydrate(store, root, _territory_logical_paths(sorted(territory_years)))
 
     boundaries = ingest_boundaries(root, canonical, SOURCE_YEARS, force=args.force, offline=args.offline) if "boundaries" in families else {"changed": False, "years": [], "carried": True}
     soil = ingest_soil(root, canonical, force=args.force, offline=args.offline) if "soil" in families else {"changed": False, "carried": True}
     water = ingest_water(root, canonical, force=args.force, offline=args.offline) if "water" in families else {"changed": False, "carried": True}
+    if historical_rebuild and "water" not in families:
+        _hydrate(store, root, ["canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet"])
     national_emissions = ingest_national_emissions(root, canonical, force=args.force, offline=args.offline) if "emissions" in families else {"changed": False, "carried": True}
     provincial_emissions = ingest_emissions(root, canonical, force=args.force, offline=args.offline) if "emissions" in families else {"changed": False, "carried": True}
     emissions = {
@@ -829,6 +914,13 @@ def _run_incremental_data(
             force=args.force or bool(soil["changed"]),
         )
         if "soil" in families else {"changed": False, "carried": True}
+    )
+    historical = (
+        run_bigbang_historical_processing(
+            root / "raw" / "ispra-bigbang-10", canonical, derived,
+            output / "reports" / "bigbang-historical-processing.json",
+        ) | {"changed": True}
+        if historical_rebuild else {"changed": False, "carried": True}
     )
 
     unchanged_delivery_dependencies: list[str] = []
@@ -964,20 +1056,23 @@ def _run_incremental_data(
         *[path for family in families for path in canonical_by_family[family]],
         *fresh_geometry,
         *[path for report in delivery_reports for path in report.get("files", [])],
+        *([root / HISTORICAL_DERIVED_LOGICAL_PATH] if historical_rebuild else []),
     ]
     affected_artifacts = {*families, *delivery_families, *geometry_families}
+    if historical_rebuild:
+        affected_artifacts.add("water_historical")
     if insights_changed:
         affected_artifacts.add("territory_insights")
     manifest, metrics, publication = _publish_scoped(
         store=store, root=root, output=output, release_id=release_id, scope="data",
         previous_state=previous_state, current_state=current_state, declared_paths=declared,
-        changed=any(report.get("changed", False) for report in [boundaries, soil, water, emissions, dissesto, analytics, *delivery_reports]),
+        changed=any(report.get("changed", False) for report in [boundaries, soil, water, emissions, dissesto, analytics, historical, *delivery_reports]),
         affected_families=affected_artifacts,
     )
     report = _json_safe_report({
         "run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop",
         "changed": publication["changed"], "scope": "data", "affectedFamilies": sorted(affected_artifacts),
-        "boundaries": boundaries, "soil": soil, "water": water, "emissions": emissions,
+        "boundaries": boundaries, "soil": soil, "water": water, "historicalWater": historical, "emissions": emissions,
         "dissesto": dissesto, "analytics": analytics, "territory_insights_delivery": insights,
         "operationalMetrics": metrics | {"pipelineDurationSeconds": round(time.monotonic() - started, 3)},
         "manifest": manifest, "carriedArtifacts": publication["carried"],
@@ -1340,6 +1435,14 @@ def main() -> int:
             scope=args.scope,
             stage_dir=Path(args.workdir) / ".preflight" / args.scope,
         )
+        if args.scope == "data":
+            missing_bigbang = _missing_bigbang_source_plan_entries(persisted)
+            if missing_bigbang:
+                result["sources"].extend(missing_bigbang)
+                result["sourceChecks"] += len(missing_bigbang)
+                result["sourcesChanged"] += len(missing_bigbang)
+                result["changed"] = True
+                result["reason"] = "registered_bigbang_assets_missing_from_persisted_source_state"
         result["schemaVersion"] = PLAN_SCHEMA_VERSION
         result["activeReleaseId"] = release.get("releaseId") if release else None
         if args.scope == "geospatial":

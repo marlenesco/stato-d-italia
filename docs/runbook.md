@@ -74,6 +74,33 @@ uv run stato-data run --publish r2
 Prima del publish verificare che le credenziali siano fornite dall'ambiente e non
 da file versionati.
 
+## Acceptance BIGBANG storico dopo review
+
+Non eseguire questi passi durante la review locale. Dopo il merge, avviare
+manualmente una prima esecuzione di `Ingest fast official data` e verificare nel
+report di preflight che il bootstrap BIGBANG sia `changed=true`. La release
+pubblicata deve contenere i raw
+`BIGBANG100_TABLES_ITALY_01.xlsx`, `BIGBANG100_TABLES_REGIONS_02.xlsx`,
+`GRID_UNITS.txt` e i cinque `*_ANNUAL_1951-2025.zip` con sidecar metadata,
+oltre a
+`derived/water/historical/dataset_version=bigbang-10-1951-2025/algorithm_version=bigbang-tp-zonal-area-weighted-v1/observations.parquet`.
+
+Con credenziali R2 autorizzate, i controlli manuali post-run sono:
+
+```sh
+uv run stato-data check-sources --scope data --publish r2 --report reports/data-source-check.json
+```
+
+Nel bucket verificare che `manifest.json` punti al nuovo release descriptor
+immutabile, che il descriptor non abbia logical path duplicati, che
+`metadata/source-state.json` includa gli otto asset BIGBANG e che le cinque
+provenance ZIP e le geometry reference del parquet derivato siano presenti. Il
+report storico deve mantenere il 2021 fra gli anni esclusi. Avviare poi una
+seconda esecuzione manuale dello stesso workflow: il preflight deve avere
+`changed=false`, lo step di ingestione deve essere saltato e `releaseId` del
+manifest deve restare invariato. Cache Actions può accelerare ma non sostituisce
+questa verifica né la release attiva come fonte di verità.
+
 ## Source state e workflow
 
 Ogni release contiene `metadata/source-state.json` content-addressed. È letto
