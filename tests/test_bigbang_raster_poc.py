@@ -260,7 +260,7 @@ def test_zonal_handles_empty_intersection(zonal_raster: Path) -> None:
     assert result.quality_flags == ("empty_intersection",)
 
 
-def test_metric_specific_ids_and_provenance_remain_derived(tmp_path: Path) -> None:
+def test_derived_ids_include_metric_and_provenance_remain_derived(tmp_path: Path) -> None:
     geometry_wgs84 = box(10, 45, 10.005, 45.005)
     project = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True).transform
     projected = transform(project, geometry_wgs84)
@@ -280,7 +280,7 @@ def test_metric_specific_ids_and_provenance_remain_derived(tmp_path: Path) -> No
         "geometry_wkb": geometry_wgs84.wkb,
     }])
     tp = derive_territories(raster, territories, "region", _metadata(raster, "TP", "a" * 64, "b" * 64), METRIC_SPECS["TP"])
-    ae = derive_territories(raster, territories, "region", _metadata(raster, "AE", "c" * 64, "d" * 64), METRIC_SPECS["AE"])
+    ae = derive_territories(raster, territories, "region", _metadata(raster, "AE", "c" * 64, "b" * 64), METRIC_SPECS["AE"])
     output = pd.concat([tp, ae], ignore_index=True)
 
     assert set(output["derived_metric_id"]) == {
@@ -288,8 +288,9 @@ def test_metric_specific_ids_and_provenance_remain_derived(tmp_path: Path) -> No
         "water_actual_evapotranspiration_mm_zonal_mean",
     }
     assert output["derived_observation_id"].is_unique
+    assert tp.iloc[0]["derived_observation_id"] != ae.iloc[0]["derived_observation_id"]
     assert set(output["source_asset_sha256"]) == {"a" * 64, "c" * 64}
-    assert set(output["source_raster_sha256"]) == {"b" * 64, "d" * 64}
+    assert set(output["source_raster_sha256"]) == {"b" * 64}
     assert set(output["source_raster_locator"]) == {
         "TP_ANNUAL_2025-2025.zip!tp_2025_yyc.asc",
         "AE_ANNUAL_2025-2025.zip!ae_2025_yyc.asc",
