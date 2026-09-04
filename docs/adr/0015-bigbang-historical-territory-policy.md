@@ -128,3 +128,9 @@ copertura regionale vuota interrompono la relativa derivazione provinciale.
 L'implementazione non modifica il significato del zonale area-weighted già
 accettato in ADR 0014, non re-ingesta il 2021 e non introduce geometrie,
 crosswalk, delivery, workflow o pubblicazione R2.
+
+L'identità di ogni osservazione raster-derived storica include algorithm
+version, derived metric ID, BIGBANG reference year, SHA-256 del raster e
+territory version ID. L'anno è esplicito per evitare collisioni quando una
+stessa geometry version è validamente riusata da più annualità mediante un
+intervallo ufficiale documentato.

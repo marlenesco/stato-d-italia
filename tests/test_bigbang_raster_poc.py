@@ -35,6 +35,10 @@ from stato_italia.bigbang_raster_poc import (
     resolve_raster_members,
     validate_archive_structure,
 )
+from stato_italia.bigbang_historical_territory_policy import (
+    TerritoryGeometryVersion,
+    resolve_bigbang_territory_policy,
+)
 
 SOURCE_SYMBOLS = tuple(EXPECTED_METRIC_BINDINGS)
 
@@ -333,6 +337,60 @@ def test_derived_ids_include_metric_and_provenance_remain_derived(tmp_path: Path
     _write_parquet_atomic(output, destination)
     assert destination.exists()
     assert official.read_bytes() == b"official-unchanged"
+
+
+def test_derived_ids_include_reference_year_for_documented_geometry_interval(tmp_path: Path) -> None:
+    geometry_wgs84 = box(10, 45, 10.005, 45.005)
+    project = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True).transform
+    projected = transform(project, geometry_wgs84)
+    raster = _write_raster(
+        tmp_path / "interval-grid.asc",
+        np.array([[123.4]]),
+        origin_x=projected.bounds[0] - 10,
+        origin_y=projected.bounds[3] + 10,
+        cell_size=max(projected.bounds[2] - projected.bounds[0], projected.bounds[3] - projected.bounds[1]) + 20,
+    )
+    interval = TerritoryGeometryVersion(
+        territory_level="province",
+        reference_year=1989,
+        territory_reference_date="1989-01-01",
+        territory_source="ISTAT SITUAS",
+        geometry_reference="canonical/territories/reference_year=1989/province.parquet",
+        documented_valid_from=1990,
+        documented_valid_to=1991,
+        documented_interval_source="ISTAT SITUAS official validity record",
+    )
+    decisions = [
+        resolve_bigbang_territory_policy(year, "province", [interval])
+        for year in (1990, 1991)
+    ]
+    assert all(decision.support_status == "derived_supported" for decision in decisions)
+    assert {decision.territory_reference_date for decision in decisions} == {"1989-01-01"}
+    territories = pd.DataFrame([{
+        "territory_id": "it:province:001",
+        "territory_version_id": "it:province:001@1989-01-01",
+        "level": "province",
+        "name": "Test",
+        "reference_date": "1989-01-01",
+        "geometry_wkb": geometry_wgs84.wkb,
+    }])
+    metadata = _metadata(raster, "TP", "a" * 64, "b" * 64)
+    observations = [
+        derive_territories(
+            raster,
+            territories,
+            "province",
+            metadata,
+            replace(METRIC_SPECS["TP"], reference_year=year),
+            territory_reference_date="1989-01-01",
+            territory_geometry_reference=interval.geometry_reference,
+        )
+        for year in (1990, 1991)
+    ]
+    assert observations[0].iloc[0]["derived_metric_id"] == observations[1].iloc[0]["derived_metric_id"]
+    assert observations[0].iloc[0]["source_raster_sha256"] == observations[1].iloc[0]["source_raster_sha256"]
+    assert observations[0].iloc[0]["territory_version_id"] == observations[1].iloc[0]["territory_version_id"]
+    assert observations[0].iloc[0]["derived_observation_id"] != observations[1].iloc[0]["derived_observation_id"]
 
 
 def test_municipality_feasibility_applies_documented_area_threshold() -> None:

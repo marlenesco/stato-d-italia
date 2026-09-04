@@ -457,6 +457,7 @@ def derive_territories(
                 "derived_observation_id": stable_id(
                     ALGORITHM_VERSION,
                     spec.derived_metric_id,
+                    spec.reference_year,
                     metadata.raster_sha256,
                     territory["territory_version_id"],
                 ),
@@ -534,7 +535,13 @@ def derive_prepared_territories(
             raise ValueError(f"Prepared zonal geometry is missing {territory_version_id}")
         zonal = area_weighted_zonal_mean_prepared(values, nodata, prepared[territory_version_id])
         rows.append({
-            "derived_observation_id": stable_id(ALGORITHM_VERSION, spec.derived_metric_id, metadata.raster_sha256, territory_version_id),
+            "derived_observation_id": stable_id(
+                ALGORITHM_VERSION,
+                spec.derived_metric_id,
+                spec.reference_year,
+                metadata.raster_sha256,
+                territory_version_id,
+            ),
             "derived_metric_id": spec.derived_metric_id,
             "territory_id": territory["territory_id"],
             "territory_version_id": territory_version_id,
@@ -787,7 +794,8 @@ def run_poc(
         },
         "algorithmVersion": ALGORITHM_VERSION,
         "algorithmCompatibility": (
-            "Task 1 identifier retained; TP algorithm and derived observation identity are unchanged"
+            "Task 1 identifier retained; the numerical algorithm is unchanged, while derived identity "
+            "explicitly includes metric ID and reference year before production publication"
         ),
         "derivedArtifact": str(destination),
         "derivedRecords": {
