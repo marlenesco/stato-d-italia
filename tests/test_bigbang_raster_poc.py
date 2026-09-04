@@ -25,11 +25,14 @@ from stato_italia.bigbang_raster_poc import (
     RasterMetricSpec,
     _write_parquet_atomic,
     area_weighted_zonal_mean,
+    area_weighted_zonal_mean_prepared,
     build_metric_specs,
     derive_territories,
     extract_raster,
     inspect_raster,
     municipality_area_feasibility,
+    prepare_area_weighted_zonal_geometry,
+    resolve_raster_members,
     validate_archive_structure,
 )
 
@@ -258,6 +261,29 @@ def test_zonal_handles_empty_intersection(zonal_raster: Path) -> None:
     assert result.intersecting_cell_count == 0
     assert result.valid_cell_count == 0
     assert result.quality_flags == ("empty_intersection",)
+
+
+def test_prepared_zonal_geometry_preserves_the_validated_algorithm(zonal_raster: Path) -> None:
+    territory = box(0, 0, 1.25, 2)
+    with rasterio.open(zonal_raster) as dataset:
+        direct = area_weighted_zonal_mean(dataset, territory)
+        prepared = prepare_area_weighted_zonal_geometry(dataset, territory)
+        reused = area_weighted_zonal_mean_prepared(dataset.read(1, masked=False), dataset.nodata, prepared)
+    assert reused == direct
+
+
+@pytest.mark.parametrize(("symbol", "year", "expected"), [
+    ("TP", 2006, ("tp_2006_yyc.asc", "tp_2006_yyc.prj")),
+    ("AE", 2018, ("ae_2018_yyc.asc", "ae_2018_yyc.prj")),
+    ("RF", 2024, ("rf_2024_yyc.asc", "rf_2024_yyc.prj")),
+])
+def test_historical_member_resolution_is_exact(symbol: str, year: int, expected: tuple[str, str]) -> None:
+    assert resolve_raster_members(METRIC_SPECS[symbol], year) == expected
+
+
+def test_historical_member_resolution_rejects_out_of_range_year() -> None:
+    with pytest.raises(ValueError, match="1951-2025"):
+        resolve_raster_members(METRIC_SPECS["TP"], 1950)
 
 
 def test_derived_ids_include_metric_and_provenance_remain_derived(tmp_path: Path) -> None:

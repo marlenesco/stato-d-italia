@@ -108,3 +108,23 @@ La matrice contiene 300 righe (75 anni × Italia, Regioni, Province e Comuni) co
 - Il riallineamento del metadata 2021 richiede un re-ingest esplicito e non una
   correzione retroattiva silenziosa dei risultati.
 - Non viene prodotto alcun dato BIGBANG comunale.
+
+## Implementazione locale Task 4
+
+Il Task 4 consuma questa policy senza modificarla: costruisce il piano
+deterministico per tutte le 75 annualità e processa le Province soltanto per le
+righe `derived_supported` che hanno data e geometry reference esplicite. Il
+risultato è un artifact locale separato dal PoC 2025, in
+`derived/water/historical/dataset_version=bigbang-10-1951-2025/`, e non scrive
+né Regioni derivate né Province nel canonical ufficiale.
+
+Per ogni coppia anno/metrica il processing verifica l'intero contratto ZIP,
+risolve il member annuale esatto e registra il suo SHA-256 runtime. Le Regioni
+sono calcolate solo temporaneamente come diagnostica contro il workbook
+ufficiale: una mancata geometry exact-year resta non eseguibile e non autorizza
+fallback. Un mismatch strutturale di scala/unità, un join incompleto o una
+copertura regionale vuota interrompono la relativa derivazione provinciale.
+
+L'implementazione non modifica il significato del zonale area-weighted già
+accettato in ADR 0014, non re-ingesta il 2021 e non introduce geometrie,
+crosswalk, delivery, workflow o pubblicazione R2.

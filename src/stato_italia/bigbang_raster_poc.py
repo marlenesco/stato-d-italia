@@ -81,6 +81,12 @@ class ZonalResult:
     quality_flags: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PreparedZonalGeometry:
+    geometry_area_m2: float
+    intersecting_cells: tuple[tuple[int, int, float], ...]
+
+
 def build_metric_specs(source: Mapping[str, object]) -> dict[str, RasterMetricSpec]:
     products = source.get("raster_products")
     if not isinstance(products, Mapping) or set(products) != set(EXPECTED_METRIC_BINDINGS):
@@ -139,9 +145,25 @@ def _expected_members(spec: RasterMetricSpec) -> set[str]:
     }
 
 
-def validate_archive_structure(archive: Path, spec: RasterMetricSpec = DEFAULT_SPEC) -> None:
+def resolve_raster_members(spec: RasterMetricSpec, reference_year: int) -> tuple[str, str]:
+    contract = spec.contract
+    first = int(contract["archive_first_year"])
+    last = int(contract["archive_last_year"])
+    if not first <= reference_year <= last:
+        raise ValueError(f"BIGBANG {spec.source_symbol} raster year must be {first}-{last}")
+    prefix = str(contract["member_prefix"])
+    return (f"{prefix}_{reference_year}_yyc.asc", f"{prefix}_{reference_year}_yyc.prj")
+
+
+def validate_archive_structure(
+    archive: Path,
+    spec: RasterMetricSpec = DEFAULT_SPEC,
+    reference_year: int | None = None,
+) -> None:
     contract = spec.contract
     context = f"BIGBANG {spec.source_symbol}"
+    requested_year = spec.reference_year if reference_year is None else reference_year
+    raster_member, projection_member = resolve_raster_members(spec, requested_year)
     if archive.name != contract["archive_name"]:
         raise ValueError(f"Unexpected {context} archive name")
     if sha256_file(archive) != contract["archive_sha256"]:
@@ -160,31 +182,37 @@ def validate_archive_structure(archive: Path, spec: RasterMetricSpec = DEFAULT_S
                 f"Unexpected {context} archive structure: "
                 f"missing={sorted(expected - set(names))}, unexpected={sorted(set(names) - expected)}"
             )
-        raster_member = str(contract["raster_member"])
-        projection_member = str(contract["projection_member"])
         if names.count(raster_member) != 1 or names.count(projection_member) != 1:
-            raise ValueError(f"{context} 2025 raster or projection is not unique")
+            raise ValueError(f"{context} {requested_year} raster or projection is not unique")
         raster_info = source.getinfo(raster_member)
-        if raster_info.file_size != int(contract["raster_bytes"]):
-            raise ValueError(f"Unexpected {context} 2025 raster byte size")
+        contract_reference_year = int(contract.get("reference_year", spec.reference_year))
+        if requested_year == contract_reference_year and raster_info.file_size != int(contract["raster_bytes"]):
+            raise ValueError(f"Unexpected {context} {requested_year} raster byte size")
 
 
 def extract_raster(
     archive: Path,
     destination: Path,
     spec: RasterMetricSpec = DEFAULT_SPEC,
+    reference_year: int | None = None,
+    *,
+    validate_archive: bool = True,
 ) -> Path:
     contract = spec.contract
-    validate_archive_structure(archive, spec)
+    requested_year = spec.reference_year if reference_year is None else reference_year
+    raster_member, projection_member = resolve_raster_members(spec, requested_year)
+    if validate_archive:
+        validate_archive_structure(archive, spec, requested_year)
     destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as source:
-        for member in (str(contract["raster_member"]), str(contract["projection_member"])):
+        for member in (raster_member, projection_member):
             target = destination / Path(member).name
             with source.open(member) as incoming, target.open("wb") as output:
                 shutil.copyfileobj(incoming, output)
-    raster = destination / Path(str(contract["raster_member"])).name
-    if sha256_file(raster) != contract["raster_sha256"]:
-        raise ValueError(f"Unexpected BIGBANG {spec.source_symbol} 2025 raster SHA-256")
+    raster = destination / Path(raster_member).name
+    contract_reference_year = int(contract.get("reference_year", spec.reference_year))
+    if requested_year == contract_reference_year and sha256_file(raster) != contract["raster_sha256"]:
+        raise ValueError(f"Unexpected BIGBANG {spec.source_symbol} {requested_year} raster SHA-256")
     return raster
 
 
@@ -192,9 +220,12 @@ def inspect_raster(
     raster: Path,
     archive: Path,
     spec: RasterMetricSpec = DEFAULT_SPEC,
+    reference_year: int | None = None,
 ) -> RasterMetadata:
     contract = spec.contract
     context = f"BIGBANG {spec.source_symbol}"
+    requested_year = spec.reference_year if reference_year is None else reference_year
+    raster_member, projection_member = resolve_raster_members(spec, requested_year)
     with rasterio.open(raster) as dataset:
         if dataset.crs is None:
             raise ValueError(f"{context} raster lacks CRS")
@@ -246,8 +277,8 @@ def inspect_raster(
         available_annual_years=tuple(range(first, last + 1)),
         raster_sha256=sha256_file(raster),
         raster_bytes=raster.stat().st_size,
-        raster_member=str(contract["raster_member"]),
-        projection_member=str(contract["projection_member"]),
+        raster_member=raster_member,
+        projection_member=projection_member,
         driver=str(actual["driver"]),
         crs=str(actual["crs"]),
         width=int(actual["width"]),
@@ -323,6 +354,68 @@ def area_weighted_zonal_mean(
     )
 
 
+def prepare_area_weighted_zonal_geometry(
+    dataset: rasterio.io.DatasetReader,
+    geometry,
+) -> PreparedZonalGeometry:
+    """Persist exact cell intersections for safely reusing one grid across raster metrics."""
+    if dataset.crs is None or not CRS.from_user_input(dataset.crs).is_projected:
+        raise ValueError("Area-weighted zonal statistics require projected metre units")
+    if geometry.is_empty:
+        return PreparedZonalGeometry(0.0, ())
+    if not geometry.is_valid or geometry.area <= 0:
+        raise ValueError("Territory geometry is invalid or has non-positive area")
+    raster_extent = box(*dataset.bounds)
+    if not geometry.intersects(raster_extent) or geometry.intersection(raster_extent).area <= 0:
+        return PreparedZonalGeometry(float(geometry.area), ())
+    try:
+        window = geometry_window(dataset, [mapping(geometry)])
+    except Exception as exc:
+        raise ValueError("Cannot determine raster window for territory geometry") from exc
+    window = window.intersection(Window(0, 0, dataset.width, dataset.height))
+    cell_transform = dataset.window_transform(window)
+    intersections = []
+    for row in range(int(window.height)):
+        top = cell_transform.f + row * cell_transform.e
+        bottom = top + cell_transform.e
+        for column in range(int(window.width)):
+            left = cell_transform.c + column * cell_transform.a
+            right = left + cell_transform.a
+            intersection_area = geometry.intersection(
+                box(min(left, right), min(bottom, top), max(left, right), max(bottom, top))
+            ).area
+            if intersection_area > 0:
+                intersections.append((int(window.row_off) + row, int(window.col_off) + column, intersection_area))
+    return PreparedZonalGeometry(float(geometry.area), tuple(intersections))
+
+
+def area_weighted_zonal_mean_prepared(
+    values,
+    nodata: float | None,
+    prepared: PreparedZonalGeometry,
+) -> ZonalResult:
+    intersecting = len(prepared.intersecting_cells)
+    if not intersecting:
+        return ZonalResult(None, 0.0, 0.0, 0, 0, ("empty_intersection",))
+    weighted_sum = 0.0
+    valid_area = 0.0
+    valid_cells = 0
+    for row, column, area in prepared.intersecting_cells:
+        value = float(values[row, column])
+        if not math.isfinite(value) or (nodata is not None and value == float(nodata)):
+            continue
+        valid_cells += 1
+        valid_area += area
+        weighted_sum += value * area
+    if valid_area <= 0:
+        return ZonalResult(None, 0.0, 0.0, intersecting, 0, ("no_valid_cells",))
+    coverage = valid_area / prepared.geometry_area_m2
+    if coverage > 1 and coverage < 1 + 1e-9:
+        coverage = 1.0
+    flags = ("partial_valid_coverage",) if coverage < 1 - 1e-9 else ()
+    return ZonalResult(weighted_sum / valid_area, coverage, valid_area, intersecting, valid_cells, flags)
+
+
 def _geometry_sha256(geometry_wkb: bytes) -> str:
     return hashlib.sha256(geometry_wkb).hexdigest()
 
@@ -333,6 +426,8 @@ def derive_territories(
     level: str,
     metadata: RasterMetadata,
     spec: RasterMetricSpec = DEFAULT_SPEC,
+    territory_reference_date: str | None = None,
+    territory_geometry_reference: str | None = None,
 ) -> pd.DataFrame:
     required = {
         "territory_id",
@@ -347,9 +442,11 @@ def derive_territories(
         raise ValueError(f"Territory canonical lacks fields: {sorted(missing)}")
     if set(territories["level"]) != {level}:
         raise ValueError(f"Territory canonical does not contain only {level}")
-    reference_date = f"{spec.reference_year}-01-01"
+    reference_date = territory_reference_date or f"{spec.reference_year}-01-01"
     if set(territories["reference_date"]) != {reference_date}:
-        raise ValueError(f"BIGBANG {spec.source_symbol} PoC requires ISTAT territory reference {reference_date}")
+        raise ValueError(f"BIGBANG {spec.source_symbol} requires ISTAT territory reference {reference_date}")
+    if not territories["territory_version_id"].astype(str).str.endswith(f"@{reference_date}").all():
+        raise ValueError(f"BIGBANG {spec.source_symbol} territory versions do not match {reference_date}")
     rows = []
     with rasterio.open(raster) as dataset:
         project = Transformer.from_crs("EPSG:4326", dataset.crs, always_xy=True).transform
@@ -377,7 +474,7 @@ def derive_territories(
                 "source_raster_sha256": metadata.raster_sha256,
                 "source_raster_locator": f"{metadata.archive_name}!{metadata.raster_member}",
                 "territory_geometry_reference": (
-                    f"canonical/territories/reference_year={spec.reference_year}/{level}.parquet#"
+                    f"{territory_geometry_reference or f'canonical/territories/reference_year={spec.reference_year}/{level}.parquet'}#"
                     f"{territory['territory_version_id']}"
                 ),
                 "territory_geometry_sha256": _geometry_sha256(territory["geometry_wkb"]),
@@ -389,6 +486,78 @@ def derive_territories(
                 "quality_flags": list(zonal.quality_flags),
                 "official_status": "derived_by_stato_italia",
             })
+    result = pd.DataFrame(rows)
+    if result["derived_observation_id"].duplicated().any():
+        raise ValueError(f"Duplicate BIGBANG {spec.source_symbol} derived observations")
+    return result
+
+
+def prepare_territories_for_zonal(raster: Path, territories: pd.DataFrame) -> dict[str, PreparedZonalGeometry]:
+    with rasterio.open(raster) as dataset:
+        project = Transformer.from_crs("EPSG:4326", dataset.crs, always_xy=True).transform
+        return {
+            str(territory["territory_version_id"]): prepare_area_weighted_zonal_geometry(
+                dataset, transform(project, wkb.loads(territory["geometry_wkb"]))
+            )
+            for territory in territories.sort_values("territory_id").to_dict("records")
+        }
+
+
+def derive_prepared_territories(
+    raster: Path,
+    territories: pd.DataFrame,
+    level: str,
+    metadata: RasterMetadata,
+    spec: RasterMetricSpec,
+    prepared: Mapping[str, PreparedZonalGeometry],
+    territory_reference_date: str,
+    territory_geometry_reference: str,
+) -> pd.DataFrame:
+    required = {
+        "territory_id", "territory_version_id", "level", "name", "reference_date", "geometry_wkb",
+    }
+    if missing := required - set(territories.columns):
+        raise ValueError(f"Territory canonical lacks fields: {sorted(missing)}")
+    if set(territories["level"]) != {level}:
+        raise ValueError(f"Territory canonical does not contain only {level}")
+    if set(territories["reference_date"].astype(str)) != {territory_reference_date}:
+        raise ValueError(f"BIGBANG {spec.source_symbol} requires ISTAT territory reference {territory_reference_date}")
+    if not territories["territory_version_id"].astype(str).str.endswith(f"@{territory_reference_date}").all():
+        raise ValueError(f"BIGBANG {spec.source_symbol} territory versions do not match {territory_reference_date}")
+    with rasterio.open(raster) as dataset:
+        values = dataset.read(1, masked=False)
+        nodata = dataset.nodata
+    rows = []
+    for territory in territories.sort_values("territory_id").to_dict("records"):
+        territory_version_id = str(territory["territory_version_id"])
+        if territory_version_id not in prepared:
+            raise ValueError(f"Prepared zonal geometry is missing {territory_version_id}")
+        zonal = area_weighted_zonal_mean_prepared(values, nodata, prepared[territory_version_id])
+        rows.append({
+            "derived_observation_id": stable_id(ALGORITHM_VERSION, spec.derived_metric_id, metadata.raster_sha256, territory_version_id),
+            "derived_metric_id": spec.derived_metric_id,
+            "territory_id": territory["territory_id"],
+            "territory_version_id": territory_version_id,
+            "territory_name": territory["name"],
+            "territory_level": level,
+            "reference_year": spec.reference_year,
+            "value_decimal": zonal.value_decimal,
+            "unit_ucum": metadata.unit_ucum,
+            "source_dataset_id": SOURCE["source_id"],
+            "source_dataset_version": SOURCE["dataset_version"],
+            "source_asset_sha256": metadata.archive_sha256,
+            "source_raster_sha256": metadata.raster_sha256,
+            "source_raster_locator": f"{metadata.archive_name}!{metadata.raster_member}",
+            "territory_geometry_reference": f"{territory_geometry_reference}#{territory_version_id}",
+            "territory_geometry_sha256": _geometry_sha256(territory["geometry_wkb"]),
+            "algorithm_version": ALGORITHM_VERSION,
+            "coverage_ratio": zonal.coverage_ratio,
+            "valid_intersection_area_m2": zonal.valid_intersection_area_m2,
+            "intersecting_cell_count": zonal.intersecting_cell_count,
+            "valid_cell_count": zonal.valid_cell_count,
+            "quality_flags": list(zonal.quality_flags),
+            "official_status": "derived_by_stato_italia",
+        })
     result = pd.DataFrame(rows)
     if result["derived_observation_id"].duplicated().any():
         raise ValueError(f"Duplicate BIGBANG {spec.source_symbol} derived observations")
@@ -408,7 +577,9 @@ def compare_official_regions(
         columns={"value_decimal": "official_value_mm"}
     )
     if len(expected) != 20 or expected["territory_id"].duplicated().any():
-        raise ValueError(f"Unexpected official BIGBANG {spec.source_symbol} 2025 regional canonical")
+        raise ValueError(
+            f"Unexpected official BIGBANG {spec.source_symbol} {spec.reference_year} regional canonical"
+        )
     if set(expected["unit_ucum"]) != {spec.unit_ucum}:
         raise ValueError(f"Official BIGBANG {spec.source_symbol} unit conflicts with raster contract")
     expected = expected.drop(columns="unit_ucum")
