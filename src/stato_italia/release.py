@@ -135,7 +135,7 @@ def artifact_scope(logical_path: str) -> ArtifactScope:
         return "geospatial"
     if logical_path.startswith((
         "canonical/soil/", "canonical/water/", "canonical/dissesto/", "canonical/emissions/",
-        "derived/soil/",
+        "derived/soil/", "derived/water/historical/",
     )):
         return "data"
     if logical_path.startswith("delivery/territory-insights/"):
@@ -186,6 +186,8 @@ def artifact_family(logical_path: str) -> str:
         return "boundaries"
     if logical_path.startswith(("raw/ispra-soil-", "canonical/soil/", "derived/soil/")):
         return "soil"
+    if logical_path.startswith("derived/water/historical/"):
+        return "water_historical"
     if logical_path.startswith(("raw/ispra-bigbang-", "canonical/water/")):
         return "water"
     if logical_path.startswith(("raw/ispra-idrogeo-", "canonical/dissesto/")):
@@ -310,6 +312,12 @@ def _verify_carried_artifact(store: ObjectStore, artifact: CarriedArtifact) -> N
 
 def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | ReleaseArtifact | CarriedArtifact]) -> dict:
     """Upload immutable content first, then atomically advance sole mutable pointer."""
+    declared_logical_paths = [
+        artifact.logical_path if isinstance(artifact, (ReleaseArtifact, CarriedArtifact)) else artifact.name
+        for artifact in artifacts
+    ]
+    if len(declared_logical_paths) != len(set(declared_logical_paths)):
+        raise ValueError("Release has duplicate logical paths")
     for artifact in artifacts:
         if isinstance(artifact, CarriedArtifact):
             _verify_carried_artifact(store, artifact)
@@ -332,9 +340,6 @@ def publish_release(store: ObjectStore, release_id: str, artifacts: list[Path | 
         else:
             reused_objects += 1
         objects.append({"key": key, "sha256": checksum, "bytes": record.path.stat().st_size, "name": record.path.name, "logicalPath": record.logical_path})
-    logical_paths = [item["logicalPath"] for item in objects]
-    if len(logical_paths) != len(set(logical_paths)):
-        raise ValueError("Release has duplicate logical paths")
     release_key = f"releases/{release_id}/release.json"
     release = {"schemaVersion": 2, "releaseId": release_id, "generatedAt": now_iso(), "objects": objects}
     store.put_json(release_key, release, immutable=True)

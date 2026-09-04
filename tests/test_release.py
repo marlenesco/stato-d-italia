@@ -106,6 +106,7 @@ def test_artifact_ownership_is_explicit() -> None:
     assert artifact_scope("canonical/forests/algorithm_version=v2/zonal_statistics.parquet") == "geospatial"
     assert artifact_scope("delivery/foreste/index.json") == "geospatial"
     assert artifact_scope("raw/ispra-soil-2025/new.xlsx") == "data"
+    assert artifact_scope("derived/water/historical/dataset_version=bigbang-10-1951-2025/algorithm_version=v1/observations.parquet") == "data"
     assert artifact_scope("canonical/forests/dataset_version=infc2015/observations.parquet") == "geospatial"
     assert artifact_scope("canonical/territories/reference_year=2025/region.parquet") == "shared"
     assert artifact_scope("delivery/territory-insights/index.json") == "shared"
@@ -118,6 +119,9 @@ def test_artifact_processing_family_is_explicit() -> None:
     assert artifact_family("delivery/soil/index.json") == "soil_delivery"
     assert artifact_family("delivery/soil/geometry/istat-region-2025.pmtiles") == "soil_geometry_2025"
     assert artifact_family("delivery/dissesto/geometry/istat-region-2024.pmtiles") == "dissesto_geometry_2024"
+    assert artifact_family("derived/water/historical/dataset_version=bigbang-10-1951-2025/algorithm_version=v1/observations.parquet") == "water_historical"
+    with pytest.raises(ValueError, match="no explicit scope ownership"):
+        artifact_family("derived/unknown/observations.parquet")
     assert artifact_family("delivery/emissions/geometry/istat-province-2023.pmtiles") == "emissions_geometry_2023"
     assert artifact_family("delivery/foreste/geometry/istat-region-2023.pmtiles") == "forest_geometry_2023"
     assert artifact_family("delivery/territory-insights/index.json") == "territory_insights"

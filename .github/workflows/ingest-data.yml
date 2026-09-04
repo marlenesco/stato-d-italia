@@ -39,6 +39,11 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
       - run: uv sync --all-groups --frozen
       - run: uv run pytest -q
+      - name: Restore verified BIGBANG raw cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: data/raw/ispra-bigbang-10
+          key: bigbang-raw-${{ runner.os }}-${{ hashFiles('config/sources/ispra-bigbang.yaml') }}
       - name: Restore reusable geospatial canonical cache
         uses: actions/cache@v6.1.0
         with:

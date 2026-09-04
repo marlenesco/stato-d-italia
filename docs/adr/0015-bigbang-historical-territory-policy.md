@@ -127,10 +127,35 @@ copertura regionale vuota interrompono la relativa derivazione provinciale.
 
 L'implementazione non modifica il significato del zonale area-weighted già
 accettato in ADR 0014, non re-ingesta il 2021 e non introduce geometrie,
-crosswalk, delivery, workflow o pubblicazione R2.
+crosswalk o delivery.
 
 L'identità di ogni osservazione raster-derived storica include algorithm
 version, derived metric ID, BIGBANG reference year, SHA-256 del raster e
 territory version ID. L'anno è esplicito per evitare collisioni quando una
 stessa geometry version è validamente riusata da più annualità mediante un
 intervallo ufficiale documentato.
+
+## Integrazione production Task 5
+
+Il derived storico è un artifact della scope `data`, con logical path stabile
+`derived/water/historical/dataset_version=bigbang-10-1951-2025/algorithm_version=bigbang-tp-zonal-area-weighted-v1/observations.parquet`
+e processing family esplicita `water_historical`. Le geometrie territoriali
+ISTAT restano shared. Il canonical ufficiale `canonical/water/...` conserva
+esclusivamente Italia e Regioni: le sole righe provinciali raster-derived sono
+nel parquet separato con `official_status=derived_by_stato_italia`.
+
+La stessa family `water` persiste nel source state i due workbook, i cinque ZIP
+annuali e `GRID_UNITS.txt`, con raw deterministico e sidecar metadata. Il primo
+preflight dopo l'introduzione di questi asset rileva le entry assenti nello
+source state attivo e richiede il bootstrap senza `--force`; dopo una release
+completa, i controlli invariati sono un vero no-op e non avanzano il manifest.
+
+Il derived dipende semanticamente da `water` e `boundaries`: una variazione di
+una delle due family lo ricostruisce; una variazione data non correlata lo porta
+avanti come oggetto immutabile identico. Per una ricostruzione da soli confini,
+o con un solo ZIP aggiornato, gli ZIP BIGBANG invariati e i loro sidecar sono
+idratati dalla release attiva verificando SHA-256, non dalla cache del runner.
+Prima del publish la coerenza di release verifica tutti i campi di provenance,
+i cinque SHA degli ZIP presenti nel source state, metriche/dataset/algoritmo e
+le geometry reference dichiarate. La vera acceptance R2 resta da eseguire dopo
+review; questa integrazione non l'ha avviata né ha pubblicato alcun oggetto.
