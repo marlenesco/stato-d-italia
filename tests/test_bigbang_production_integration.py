@@ -8,6 +8,8 @@ import pytest
 
 import stato_italia.cli as cli
 from stato_italia.bigbang_historical_processing import HISTORICAL_DERIVED_LOGICAL_PATH
+from stato_italia.bigbang_historical_processing import build_bigbang_historical_processing_plan
+from stato_italia.bigbang_historical_territory_policy import TerritoryGeometryVersion
 from stato_italia.bigbang_raster_poc import METRIC_SPECS
 from stato_italia.release import LocalObjectStore, ReleaseArtifact, active_release, carry_forward_active_artifacts, publish_release
 from stato_italia.ingestion_plan import clear_ingestion_plan, load_ingestion_plan
@@ -28,6 +30,33 @@ def _state_entry(asset_path: str, checksum: str) -> dict:
         "period": "annual",
         "checked_at": "2026-09-04T00:00:00Z",
     }
+
+
+def _bigbang_state() -> tuple[dict, dict[str, str]]:
+    checksums = {
+        "BIGBANG100_TABLES_ITALY_01.xlsx": "1" * 64,
+        "BIGBANG100_TABLES_REGIONS_02.xlsx": "2" * 64,
+        "GRID_UNITS.txt": "3" * 64,
+        "TP_ANNUAL_1951-2025.zip": "4" * 64,
+        "AE_ANNUAL_1951-2025.zip": "5" * 64,
+        "IF_ANNUAL_1951-2025.zip": "6" * 64,
+        "GR_ANNUAL_1951-2025.zip": "7" * 64,
+        "RF_ANNUAL_1951-2025.zip": "8" * 64,
+    }
+    return {
+        "schemaVersion": 1,
+        "sources": [
+            _state_entry(f"ispra-bigbang-10/{name}", checksum)
+            for name, checksum in checksums.items()
+        ],
+    }, checksums
+
+
+def _write_canonical_water(root: Path, hashes: list[str]) -> Path:
+    path = root / "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"source_asset_sha256": hashes}).to_parquet(path, index=False)
+    return path
 
 
 def test_bigbang_source_state_bootstrap_adds_only_missing_registered_assets() -> None:
@@ -71,6 +100,57 @@ def test_historical_rebuild_dependency_is_water_or_boundaries_only() -> None:
     assert cli._historical_water_affected({"boundaries"}) is True
     assert cli._historical_water_affected({"soil"}) is False
     assert cli._historical_water_affected({"dissesto", "emissions"}) is False
+
+
+def test_historical_rebuild_policy_covers_full_scope_all_and_legacy_bootstrap() -> None:
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"soil"}, active_release_has_historical=True,
+    ) is False
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"water"}, active_release_has_historical=True,
+    ) is True
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"boundaries"}, active_release_has_historical=True,
+    ) is True
+    assert cli.should_build_historical_water(
+        scope="data", incremental=False, affected_source_families=set(), active_release_has_historical=True,
+    ) is True
+    assert cli.should_build_historical_water(
+        scope="all", incremental=False, affected_source_families=set(), active_release_has_historical=True,
+    ) is True
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"soil"}, active_release_has_historical=False,
+    ) is True
+
+
+def test_canonical_water_provenance_accepts_only_the_two_workbooks(tmp_path: Path) -> None:
+    state, hashes = _bigbang_state()
+    canonical = _write_canonical_water(tmp_path, [
+        hashes["BIGBANG100_TABLES_ITALY_01.xlsx"], hashes["BIGBANG100_TABLES_REGIONS_02.xlsx"],
+    ])
+    cli._validate_data_canonical_provenance(
+        tmp_path, state, {str(canonical.relative_to(tmp_path))}, {"water"},
+    )
+
+
+def test_canonical_water_provenance_rejects_raster_and_missing_workbook(tmp_path: Path) -> None:
+    state, hashes = _bigbang_state()
+    canonical = _write_canonical_water(tmp_path, [
+        hashes["BIGBANG100_TABLES_ITALY_01.xlsx"], hashes["TP_ANNUAL_1951-2025.zip"],
+    ])
+    logical_path = str(canonical.relative_to(tmp_path))
+    with pytest.raises(ValueError, match="canonical provenance differ"):
+        cli._validate_data_canonical_provenance(tmp_path, state, {logical_path}, {"water"})
+
+    canonical = _write_canonical_water(tmp_path, [
+        hashes["BIGBANG100_TABLES_ITALY_01.xlsx"], hashes["BIGBANG100_TABLES_REGIONS_02.xlsx"],
+    ])
+    state["sources"] = [
+        entry for entry in state["sources"]
+        if not entry["asset_path"].endswith("BIGBANG100_TABLES_REGIONS_02.xlsx")
+    ]
+    with pytest.raises(ValueError, match="lacks canonical provenance asset"):
+        cli._validate_data_canonical_provenance(tmp_path, state, {logical_path}, {"water"})
 
 
 def test_boundary_rebuild_hydrates_all_unchanged_bigbang_raw_assets(
@@ -167,6 +247,87 @@ def test_historical_release_provenance_requires_all_release_raster_archives(tmp_
             },
             {"water_historical"},
         )
+
+
+def test_release_coherence_keeps_official_workbook_and_derived_raster_provenance_separate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    state, hashes = _bigbang_state()
+    raw_artifacts = []
+    for entry in state["sources"]:
+        raw = root / "raw" / entry["asset_path"]
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes(b"official")
+        sidecar = Path(f"{raw}.metadata.json")
+        sidecar.write_text("{}")
+        raw_artifacts.extend((
+            ReleaseArtifact(raw, str(raw.relative_to(root))),
+            ReleaseArtifact(sidecar, str(sidecar.relative_to(root))),
+        ))
+    canonical = _write_canonical_water(root, [
+        hashes["BIGBANG100_TABLES_ITALY_01.xlsx"], hashes["BIGBANG100_TABLES_REGIONS_02.xlsx"],
+    ])
+    historical = _write_historical_derived(root, [
+        hashes[name] for name in (
+            "TP_ANNUAL_1951-2025.zip", "AE_ANNUAL_1951-2025.zip", "IF_ANNUAL_1951-2025.zip",
+            "GR_ANNUAL_1951-2025.zip", "RF_ANNUAL_1951-2025.zip",
+        )
+    ])
+    territory = root / "canonical/territories/reference_year=2006/province.parquet"
+    territory.parent.mkdir(parents=True, exist_ok=True)
+    territory.write_bytes(b"territory")
+    state_path = root / "metadata/source-state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text("{}")
+    monkeypatch.setattr(cli, "_territory_paths", lambda _canonical: [territory])
+    monkeypatch.setattr(cli, "_validate_delivery_dependencies", lambda *_args, **_kwargs: None)
+
+    cli._validate_release_coherence(
+        root, state, [
+            *raw_artifacts,
+            ReleaseArtifact(canonical, str(canonical.relative_to(root))),
+            ReleaseArtifact(historical, HISTORICAL_DERIVED_LOGICAL_PATH),
+            ReleaseArtifact(territory, str(territory.relative_to(root))),
+            ReleaseArtifact(state_path, "metadata/source-state.json"),
+        ],
+        scope="data", affected_families={"water", "water_historical"},
+    )
+
+
+def test_full_release_missing_historical_fails_before_publish(tmp_path: Path) -> None:
+    state, _hashes = _bigbang_state()
+    with pytest.raises(ValueError, match="lacks BIGBANG historical"):
+        cli._validate_bigbang_historical_provenance(tmp_path, state, set(), None)
+
+
+def test_scope_all_rebuild_requires_a_fresh_historical_artifact(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    first = _write_historical_derived(tmp_path / "first", [f"{index:x}" * 64 for index in range(1, 6)])
+    publish_release(store, "r1", [ReleaseArtifact(first, HISTORICAL_DERIVED_LOGICAL_PATH)])
+    first_key = next(item for item in active_release(store)["objects"] if item["logicalPath"] == HISTORICAL_DERIVED_LOGICAL_PATH)["key"]
+    assert carry_forward_active_artifacts(store, set(), scope="all") == []
+
+    second = _write_historical_derived(tmp_path / "second", [f"{index:x}" * 64 for index in range(6, 11)])
+    publish_release(store, "r2", [ReleaseArtifact(second, HISTORICAL_DERIVED_LOGICAL_PATH)])
+    release = active_release(store)
+    historical = next(item for item in release["objects"] if item["logicalPath"] == HISTORICAL_DERIVED_LOGICAL_PATH)
+    assert historical["key"] != first_key
+
+
+def test_historical_policy_remains_without_2021_fallback() -> None:
+    versions = [
+        TerritoryGeometryVersion(
+            territory_level="province", reference_year=2020, territory_reference_date="2020-01-01",
+            territory_source="ISTAT", geometry_reference="canonical/territories/reference_year=2020/province.parquet",
+        ),
+        TerritoryGeometryVersion(
+            territory_level="province", reference_year=2022, territory_reference_date="2022-01-01",
+            territory_source="ISTAT", geometry_reference="canonical/territories/reference_year=2022/province.parquet",
+        ),
+    ]
+    plan = build_bigbang_historical_processing_plan(versions)
+    assert next(entry for entry in plan if entry.reference_year == 2021).process_provinces is False
 
 
 def test_local_release_bootstrap_noop_and_unrelated_carry_forward(tmp_path: Path) -> None:
