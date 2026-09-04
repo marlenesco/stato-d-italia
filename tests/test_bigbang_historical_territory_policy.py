@@ -16,11 +16,11 @@ from stato_italia.bigbang_historical_territory_policy import (
 )
 
 
-def _province_version(year: int, **kwargs: object) -> TerritoryGeometryVersion:
+def _province_version(year: int, reference_date: str | None = None, **kwargs: object) -> TerritoryGeometryVersion:
     return TerritoryGeometryVersion(
         territory_level="province",
         reference_year=year,
-        territory_reference_date=f"{year}-01-01",
+        territory_reference_date=reference_date or f"{year}-01-01",
         territory_source=ISTAT_BOUNDARIES_SOURCE,
         geometry_reference=f"canonical/territories/reference_year={year}/province.parquet",
         **kwargs,
@@ -32,6 +32,16 @@ def test_exact_province_geometry_is_derived_supported() -> None:
     assert result.support_status == "derived_supported"
     assert result.territory_reference_date == "2015-01-01"
     assert result.geometry_reference == "canonical/territories/reference_year=2015/province.parquet"
+
+
+def test_resolver_rejects_invalid_istat_2021_date_and_accepts_documented_date() -> None:
+    with pytest.raises(ValueError, match="documented ISTAT date 2021-12-31"):
+        resolve_bigbang_territory_policy(2021, "province", [_province_version(2021)])
+    result = resolve_bigbang_territory_policy(2021, "province", [
+        _province_version(2021, reference_date="2021-12-31"),
+    ])
+    assert result.support_status == "derived_supported"
+    assert result.territory_reference_date == "2021-12-31"
 
 
 def test_province_never_selects_nearest_or_current_geometry() -> None:
@@ -64,6 +74,19 @@ def test_documented_interval_is_explicitly_supported() -> None:
     assert result.support_status == "derived_supported"
     assert result.territory_reference_date == "1989-01-01"
     assert "Documented official validity interval" in result.reason
+
+
+def test_exact_geometry_and_documented_interval_are_ambiguous() -> None:
+    with pytest.raises(ValueError, match="Ambiguous exact territory version and documented interval"):
+        resolve_bigbang_territory_policy(2015, "province", [
+            _province_version(2015),
+            _province_version(
+                2014,
+                documented_valid_from=2014,
+                documented_valid_to=2016,
+                documented_interval_source="ISTAT SITUAS official validity record",
+            ),
+        ])
 
 
 def test_municipality_is_methodologically_unsupported_and_country_region_are_official() -> None:

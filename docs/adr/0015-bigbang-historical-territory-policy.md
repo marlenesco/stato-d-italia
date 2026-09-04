@@ -68,9 +68,16 @@ Non scarica raster, non calcola zonal statistics e non pubblica.
 | Province | `derived_supported` soltanto con snapshot canonical dello stesso anno o intervallo ufficiale documentato; altrimenti `unsupported_missing_exact_geometry`. |
 | Comuni | `unsupported_methodology`: fuori scope per il gate BIGBANG `> 100 km2` già accettato in ADR 0014. |
 
+Una versione exact-year è valida solo se `territory_reference_date` coincide con
+la data ISTAT ufficialmente attesa: per il 2021 è `2021-12-31`, negli snapshot
+annuali ordinari è `YYYY-01-01`. Una data diversa è un errore fail-closed, anche
+quando il `reference_year` coincide.
+
 Non esistono fallback nearest-year, current-boundary backfill o crosswalk
-inventati. Più versioni esatte o intervalli documentati sovrapposti sono errori,
-non una scelta arbitraria.
+inventati. Exact-year e intervallo documentato non hanno priorità reciproca:
+più versioni esatte, più intervalli sovrapposti oppure una versione exact-year
+insieme a un intervallo valido per lo stesso anno sono ambiguità e fanno fallire
+la policy, non una scelta arbitraria.
 
 Con l'inventario corrente risultano supportate per le Province 12 annualità:
 `2006`, `2012`, `2015`–`2020`, `2022`–`2025`. Restano non supportate 63
