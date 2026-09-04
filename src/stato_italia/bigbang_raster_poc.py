@@ -359,6 +359,7 @@ def derive_territories(
             rows.append({
                 "derived_observation_id": stable_id(
                     ALGORITHM_VERSION,
+                    spec.derived_metric_id,
                     metadata.raster_sha256,
                     territory["territory_version_id"],
                 ),

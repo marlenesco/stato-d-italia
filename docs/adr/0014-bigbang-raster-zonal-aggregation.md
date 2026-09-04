@@ -79,8 +79,14 @@ derivazione.
 
 La versione resta `bigbang-tp-zonal-area-weighted-v1`. Il nome nato nel Task 1 è
 mantenuto intenzionalmente: lo stesso algoritmo, senza cambi semantici, è ora
-applicato alle altre quattro metriche. Per TP restano quindi invariati versione,
-formula e identità delle osservazioni derivate già validate.
+applicato alle altre quattro metriche. Formula e semantica numerica restano
+invariate.
+
+L'identità di ogni osservazione derivata include esplicitamente
+`derived_metric_id`, oltre a versione dell'algoritmo, SHA-256 del raster e
+`territory_version_id`. La composizione è stata corretta prima di qualsiasi
+pubblicazione production/R2, quindi nessuna identità pubblicata richiede
+compatibilità retroattiva.
 
 L'unico algoritmo zonale usa l'intersezione geometrica esatta nel CRS equal-area
 EPSG:3035:
