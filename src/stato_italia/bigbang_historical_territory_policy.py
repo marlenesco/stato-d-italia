@@ -94,14 +94,20 @@ def _validated_versions(
             raise ValueError(f"Invalid territory reference date: {item.territory_reference_date}") from exc
         if reference_date.year != item.reference_year:
             raise ValueError("Territory reference year and date disagree")
+        expected_date = _expected_istat_reference_date(item.reference_year)
+        if item.territory_reference_date != expected_date:
+            raise ValueError(
+                f"Territory reference date {item.territory_reference_date} does not match "
+                f"the documented ISTAT date {expected_date}"
+            )
         output.append(item)
     return output
 
 
-def _documented_interval_match(
+def _documented_interval_candidates(
     versions: Iterable[TerritoryGeometryVersion], reference_year: int,
-) -> TerritoryGeometryVersion | None:
-    candidates = [
+) -> list[TerritoryGeometryVersion]:
+    return [
         version
         for version in versions
         if version.documented_interval_source
@@ -109,9 +115,6 @@ def _documented_interval_match(
         and version.documented_valid_to is not None
         and version.documented_valid_from <= reference_year <= version.documented_valid_to
     ]
-    if len(candidates) > 1:
-        raise ValueError(f"Ambiguous documented territory intervals for {reference_year}")
-    return candidates[0] if candidates else None
 
 
 def resolve_bigbang_territory_policy(
@@ -146,14 +149,20 @@ def resolve_bigbang_territory_policy(
         )
 
     versions = _validated_versions(available_territory_versions, territory_level)
-    exact = [version for version in versions if version.reference_year == reference_year]
-    if len(exact) > 1:
+    exact_candidates = [version for version in versions if version.reference_year == reference_year]
+    interval_candidates = _documented_interval_candidates(versions, reference_year)
+    if len(exact_candidates) > 1:
         raise ValueError(f"Ambiguous exact territory versions for {territory_level}/{reference_year}")
-    selected = exact[0] if exact else _documented_interval_match(versions, reference_year)
+    if len(interval_candidates) > 1:
+        raise ValueError(f"Ambiguous documented territory intervals for {reference_year}")
+    if exact_candidates and interval_candidates:
+        raise ValueError(f"Ambiguous exact territory version and documented interval for {territory_level}/{reference_year}")
+    candidates = exact_candidates + interval_candidates
+    selected = candidates[0] if candidates else None
     if selected:
         reason = (
             "Exact canonical territory version for the BIGBANG reference year."
-            if selected.reference_year == reference_year
+            if exact_candidates
             else f"Documented official validity interval: {selected.documented_interval_source}."
         )
         return TerritoryPolicyDecision(
