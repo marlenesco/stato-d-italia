@@ -46,7 +46,8 @@ def _validate_grid_units(path: Path) -> None:
     evidence = SOURCE["raster_unit_evidence"]
     if path.stat().st_size != int(evidence["asset_bytes"]) or sha256_file(path) != evidence["asset_sha256"]:
         raise ValueError("Unexpected BIGBANG GRID_UNITS contract")
-    if evidence["statement"] not in path.read_text(encoding="utf-8"):
+    statement = str(evidence["statement"]).encode("ascii")
+    if statement not in path.read_bytes():
         raise ValueError("BIGBANG GRID_UNITS does not verify the expected unit statement")
 
 
