@@ -15,11 +15,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: stato-d-italia-r2-publish
+  group: ${{ github.ref_name == 'diag-bigbang-user-agent' && 'stato-d-italia-diagnostic-bigbang-user-agent' || 'stato-d-italia-r2-publish' }}
   cancel-in-progress: false
 
 jobs:
   ingest-data:
+    if: github.ref_name != 'diag-bigbang-user-agent'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -61,3 +62,56 @@ jobs:
           uv run stato-data run --publish r2 --scope data
           --plan reports/data-source-check.json
           ${{ inputs.force && '--force' || '' }}
+  diagnostic-bigbang-user-agent:
+    if: github.ref_name == 'diag-bigbang-user-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report hosted runner context
+        shell: bash
+        run: |
+          echo "RUNNER_OS=${RUNNER_OS}"
+          echo "RUNNER_ARCH=${RUNNER_ARCH}"
+          echo "RUNNER_NAME=${RUNNER_NAME}"
+          echo "RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT}"
+          echo "RUNNER_REGION=${RUNNER_REGION:-unavailable}"
+      - name: Test A - stato-italia-data user agent
+        shell: bash
+        run: |
+          set +e
+          url='https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/actual_evapotranspiration/ae_annual_1951-2025/download/en/1/AE_ANNUAL_1951-2025.zip'
+          user_agent='stato-italia-data/0.1'
+          echo "USER_AGENT=${user_agent}"
+          curl -L \
+            --connect-timeout 20 \
+            --max-time 60 \
+            --range 0-1023 \
+            -A "${user_agent}" \
+            -D - \
+            -o /dev/null \
+            -sS \
+            -w '\nHTTP=%{http_code}\nREMOTE_IP=%{remote_ip}\nCONTENT_TYPE=%{content_type}\nSIZE_DOWNLOAD=%{size_download}\nTIME_CONNECT=%{time_connect}\nTIME_STARTTRANSFER=%{time_starttransfer}\n' \
+            "${url}"
+          curl_exit=$?
+          echo "CURL_EXIT=${curl_exit}"
+          exit 0
+      - name: Test B - browser-like user agent
+        shell: bash
+        run: |
+          set +e
+          url='https://groupware.sinanet.isprambiente.it/bigbang-data/library/bigbang100/ascii_grid/actual_evapotranspiration/ae_annual_1951-2025/download/en/1/AE_ANNUAL_1951-2025.zip'
+          user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36'
+          echo "USER_AGENT=${user_agent}"
+          curl -L \
+            --connect-timeout 20 \
+            --max-time 60 \
+            --range 0-1023 \
+            -A "${user_agent}" \
+            -D - \
+            -o /dev/null \
+            -sS \
+            -w '\nHTTP=%{http_code}\nREMOTE_IP=%{remote_ip}\nCONTENT_TYPE=%{content_type}\nSIZE_DOWNLOAD=%{size_download}\nTIME_CONNECT=%{time_connect}\nTIME_STARTTRANSFER=%{time_starttransfer}\n' \
+            "${url}"
+          curl_exit=$?
+          echo "CURL_EXIT=${curl_exit}"
+          exit 0
