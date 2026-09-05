@@ -1,8 +1,13 @@
+import gzip
 import json
-from pathlib import Path
+from hashlib import sha256
 from io import BytesIO
+from pathlib import Path
 
 import pytest
+import requests
+from requests.structures import CaseInsensitiveDict
+from urllib3.response import HTTPResponse
 
 from stato_italia.download import download
 import stato_italia.download as downloader
@@ -16,6 +21,7 @@ class _DownloadResponse:
         self.url = "https://official.example/asset.zip"
         self.raw = BytesIO(body)
         self.closed = False
+        self.iterated = False
 
     def __enter__(self) -> "_DownloadResponse":
         return self
@@ -29,6 +35,37 @@ class _DownloadResponse:
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise downloader.requests.HTTPError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size: int):
+        self.iterated = True
+        while chunk := self.raw.read(chunk_size):
+            yield chunk
+
+
+class _ResponseContext:
+    def __init__(self, response: requests.Response) -> None:
+        self.response = response
+
+    def __enter__(self) -> requests.Response:
+        return self.response
+
+    def __exit__(self, *_args: object) -> None:
+        self.response.close()
+
+
+def _streamed_response(body: bytes, *, content_encoding: str | None = None) -> _ResponseContext:
+    wire_body = gzip.compress(body) if content_encoding == "gzip" else body
+    headers = {"Content-Type": "text/plain", "ETag": '"asset-v1"'}
+    if content_encoding:
+        headers["Content-Encoding"] = content_encoding
+    response = requests.Response()
+    response.status_code = 200
+    response.url = "https://official.example/asset.zip"
+    response.headers = CaseInsensitiveDict(headers)
+    response.raw = HTTPResponse(
+        body=BytesIO(wire_body), headers=headers, preload_content=False,
+    )
+    return _ResponseContext(response)
 
 
 def test_offline_source_registers_local_raw_bytes(tmp_path: Path) -> None:
@@ -68,6 +105,10 @@ def test_online_download_retries_transport_failure_with_tls_verification_enabled
         def raise_for_status(self) -> None:
             return None
 
+        def iter_content(self, chunk_size: int):
+            while chunk := self.raw.read(chunk_size):
+                yield chunk
+
     calls: list[dict] = []
 
     def get(*_args: object, **kwargs: object) -> Response:
@@ -87,6 +128,88 @@ def test_online_download_retries_transport_failure_with_tls_verification_enabled
     assert len(calls) == 2
     assert all(call["verify"] is True for call in calls)
     assert all("proxies" not in call for call in calls)
+
+
+def test_online_download_persists_decoded_gzip_entity_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decoded = b"x" * 596
+    wire = gzip.compress(decoded)
+    assert len(wire) < len(decoded)
+    response = _streamed_response(decoded, content_encoding="gzip")
+    monkeypatch.setattr(downloader.requests, "get", lambda *_args, **_kwargs: response)
+    destination = tmp_path / "GRID_UNITS.txt"
+
+    metadata = download("https://official.example/GRID_UNITS.txt", destination, "ispra-bigbang-10")
+
+    assert destination.read_bytes() == decoded
+    assert destination.read_bytes() != wire
+    assert metadata["bytes"] == len(decoded)
+    assert metadata["sha256"] == sha256(decoded).hexdigest()
+    assert not destination.with_suffix(".txt.partial").exists()
+
+
+def test_online_download_persists_uncompressed_entity_body_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = b"official uncompressed body"
+    monkeypatch.setattr(
+        downloader.requests, "get", lambda *_args, **_kwargs: _streamed_response(body),
+    )
+    destination = tmp_path / "asset.txt"
+
+    metadata = download("https://official.example/asset.txt", destination, "official-source")
+
+    assert destination.read_bytes() == body
+    assert metadata["bytes"] == len(body)
+    assert metadata["sha256"] == sha256(body).hexdigest()
+
+
+def test_online_download_streams_multiple_decoded_chunks_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b"a" * (1024 * 1024)
+    second = b"b" * 17
+    body = first + second
+    monkeypatch.setattr(
+        downloader.requests, "get", lambda *_args, **_kwargs: _streamed_response(body),
+    )
+    destination = tmp_path / "asset.bin"
+
+    download("https://official.example/asset.bin", destination, "official-source")
+
+    assert destination.read_bytes() == body
+
+
+def test_online_download_removes_partial_after_stream_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingResponse(_DownloadResponse):
+        def iter_content(self, chunk_size: int):
+            del chunk_size
+            yield b"incomplete"
+            raise downloader.requests.exceptions.ChunkedEncodingError("stream interrupted")
+
+    destination = tmp_path / "asset.zip"
+    destination.write_bytes(b"trusted old bytes")
+    delays: list[int] = []
+    calls = 0
+
+    def get(*_args: object, **_kwargs: object) -> FailingResponse:
+        nonlocal calls
+        calls += 1
+        return FailingResponse(200)
+
+    monkeypatch.setattr(downloader.requests, "get", get)
+    monkeypatch.setattr(downloader, "sleep", delays.append)
+
+    with pytest.raises(downloader.requests.exceptions.ChunkedEncodingError, match="stream interrupted"):
+        download("https://official.example/asset.zip", destination, "official-source")
+
+    assert calls == 4
+    assert delays == [2, 4, 8]
+    assert destination.read_bytes() == b"trusted old bytes"
+    assert not destination.with_suffix(".zip.partial").exists()
 
 
 def test_online_download_retries_500_then_promotes_only_successful_response(
@@ -220,10 +343,11 @@ def test_online_download_keeps_matching_304_path_without_retry(
     }))
     calls: list[dict] = []
     delays: list[int] = []
+    response = _DownloadResponse(304)
 
     def get(*_args: object, **kwargs: object) -> _DownloadResponse:
         calls.append(kwargs)
-        return _DownloadResponse(304)
+        return response
 
     monkeypatch.setattr(downloader.requests, "get", get)
     monkeypatch.setattr(downloader, "sleep", delays.append)
@@ -236,6 +360,7 @@ def test_online_download_keeps_matching_304_path_without_retry(
     assert calls[0]["headers"]["If-None-Match"] == '"asset-v1"'
     assert calls[0]["headers"]["If-Modified-Since"] == "Mon, 01 Sep 2026 00:00:00 GMT"
     assert delays == []
+    assert response.iterated is False
 
 
 def test_infc_download_uses_prioritised_proxy_fallback_without_disabling_tls(
@@ -257,6 +382,10 @@ def test_infc_download_uses_prioritised_proxy_fallback_without_disabling_tls(
 
         def raise_for_status(self) -> None:
             return None
+
+        def iter_content(self, chunk_size: int):
+            while chunk := self.raw.read(chunk_size):
+                yield chunk
 
     proxies = ("http://proxy-one.example:3128", "http://proxy-two.example:8080")
     calls: list[dict] = []
