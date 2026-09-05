@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from io import BytesIO
 
@@ -6,6 +7,28 @@ import pytest
 from stato_italia.download import download
 import stato_italia.download as downloader
 from stato_italia.infc_transport import InfcTransportError
+
+
+class _DownloadResponse:
+    def __init__(self, status_code: int, body: bytes = b"official bytes") -> None:
+        self.status_code = status_code
+        self.headers = {"Content-Type": "application/zip", "ETag": '"asset-v1"'}
+        self.url = "https://official.example/asset.zip"
+        self.raw = BytesIO(body)
+        self.closed = False
+
+    def __enter__(self) -> "_DownloadResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.closed = True
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise downloader.requests.HTTPError(f"HTTP {self.status_code}")
 
 
 def test_offline_source_registers_local_raw_bytes(tmp_path: Path) -> None:
@@ -64,6 +87,155 @@ def test_online_download_retries_transport_failure_with_tls_verification_enabled
     assert len(calls) == 2
     assert all(call["verify"] is True for call in calls)
     assert all("proxies" not in call for call in calls)
+
+
+def test_online_download_retries_500_then_promotes_only_successful_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = _DownloadResponse(500)
+    successful = _DownloadResponse(200, b"new official bytes")
+    responses = iter((failed, successful))
+    calls: list[dict] = []
+    delays: list[int] = []
+
+    def get(*_args: object, **kwargs: object) -> _DownloadResponse:
+        calls.append(kwargs)
+        return next(responses)
+
+    monkeypatch.setattr(downloader.requests, "get", get)
+    monkeypatch.setattr(downloader, "sleep", delays.append)
+    destination = tmp_path / "asset.zip"
+
+    metadata = download("https://official.example/asset.zip", destination, "official-source")
+
+    assert len(calls) == 2
+    assert delays == [2]
+    assert failed.closed is True
+    assert destination.read_bytes() == b"new official bytes"
+    assert not destination.with_suffix(".zip.partial").exists()
+    assert metadata["sha256"]
+    assert metadata["requested_url"] == "https://official.example/asset.zip"
+    assert metadata["resolved_url"] == "https://official.example/asset.zip"
+    assert (destination.with_suffix(".zip.metadata.json")).exists()
+
+
+def test_online_download_retries_multiple_server_errors_with_bounded_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter((_DownloadResponse(503), _DownloadResponse(502), _DownloadResponse(200)))
+    calls = 0
+    delays: list[int] = []
+
+    def get(*_args: object, **_kwargs: object) -> _DownloadResponse:
+        nonlocal calls
+        calls += 1
+        return next(responses)
+
+    monkeypatch.setattr(downloader.requests, "get", get)
+    monkeypatch.setattr(downloader, "sleep", delays.append)
+
+    result = download("https://official.example/asset.zip", tmp_path / "asset.zip", "official-source")
+
+    assert calls == 3
+    assert delays == [2, 4]
+    assert result["bytes"] == len(b"official bytes")
+
+
+def test_online_download_raises_after_retryable_server_errors_without_replacing_existing_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter((_DownloadResponse(500), _DownloadResponse(500), _DownloadResponse(500), _DownloadResponse(500)))
+    calls = 0
+    delays: list[int] = []
+
+    def get(*_args: object, **_kwargs: object) -> _DownloadResponse:
+        nonlocal calls
+        calls += 1
+        return next(responses)
+
+    destination = tmp_path / "asset.zip"
+    destination.write_bytes(b"trusted old bytes")
+    partial = destination.with_suffix(".zip.partial")
+    partial.write_bytes(b"stale incomplete bytes")
+    monkeypatch.setattr(downloader.requests, "get", get)
+    monkeypatch.setattr(downloader, "sleep", delays.append)
+
+    with pytest.raises(downloader._RetryableHttpStatusError, match="HTTP 500"):
+        download("https://official.example/asset.zip", destination, "official-source")
+
+    assert calls == 4
+    assert delays == [2, 4, 8]
+    assert destination.read_bytes() == b"trusted old bytes"
+    assert not partial.exists()
+
+
+def test_online_download_fails_fast_for_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    delays: list[int] = []
+
+    def get(*_args: object, **_kwargs: object) -> _DownloadResponse:
+        nonlocal calls
+        calls += 1
+        return _DownloadResponse(404)
+
+    monkeypatch.setattr(downloader.requests, "get", get)
+    monkeypatch.setattr(downloader, "sleep", delays.append)
+
+    with pytest.raises(downloader.requests.HTTPError, match="HTTP 404"):
+        download("https://official.example/asset.zip", tmp_path / "asset.zip", "official-source")
+
+    assert calls == 1
+    assert delays == []
+
+
+def test_online_download_retries_connection_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    delays: list[int] = []
+
+    def get(*_args: object, **_kwargs: object) -> _DownloadResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise downloader.requests.Timeout("connection timed out")
+        return _DownloadResponse(200)
+
+    monkeypatch.setattr(downloader.requests, "get", get)
+    monkeypatch.setattr(downloader, "sleep", delays.append)
+
+    download("https://official.example/asset.zip", tmp_path / "asset.zip", "official-source")
+
+    assert calls == 2
+    assert delays == [2]
+
+
+def test_online_download_keeps_matching_304_path_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "asset.zip"
+    destination.write_bytes(b"cached official bytes")
+    metadata_path = destination.with_suffix(".zip.metadata.json")
+    metadata_path.write_text(json.dumps({
+        "source_id": "official-source", "requested_url": "https://official.example/asset.zip",
+        "etag": '"asset-v1"', "last_modified": "Mon, 01 Sep 2026 00:00:00 GMT",
+    }))
+    calls: list[dict] = []
+    delays: list[int] = []
+
+    def get(*_args: object, **kwargs: object) -> _DownloadResponse:
+        calls.append(kwargs)
+        return _DownloadResponse(304)
+
+    monkeypatch.setattr(downloader.requests, "get", get)
+    monkeypatch.setattr(downloader, "sleep", delays.append)
+
+    result = download("https://official.example/asset.zip", destination, "official-source")
+
+    assert result["unchanged"] is True
+    assert destination.read_bytes() == b"cached official bytes"
+    assert len(calls) == 1
+    assert calls[0]["headers"]["If-None-Match"] == '"asset-v1"'
+    assert calls[0]["headers"]["If-Modified-Since"] == "Mon, 01 Sep 2026 00:00:00 GMT"
+    assert delays == []
 
 
 def test_infc_download_uses_prioritised_proxy_fallback_without_disabling_tls(

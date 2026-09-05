@@ -15,6 +15,13 @@ from .common import json_dump, now_iso, sha256_file
 from .infc_transport import InfcTransportError, infc_proxy_candidates, is_infc_url, is_retryable_infc_status
 from .ingestion_plan import materialize_planned_asset, planned_asset_status
 
+RETRYABLE_HTTP_STATUSES = frozenset({500, 502, 503, 504})
+DIRECT_RETRY_DELAYS_SECONDS = (2, 4, 8)
+
+
+class _RetryableHttpStatusError(requests.HTTPError):
+    """A transient server response which can be retried on the same route."""
+
 
 class _LinkCollector(HTMLParser):
     def __init__(self) -> None:
@@ -133,9 +140,11 @@ def download(
     if conditional_prior and conditional_prior.get("last_modified"):
         headers["If-Modified-Since"] = conditional_prior["last_modified"]
     transport_errors = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError)
+    retryable_errors = transport_errors + (_RetryableHttpStatusError,)
     last_error: requests.RequestException | None = None
     direct_error: requests.RequestException | None = None
-    routes: list[tuple[str, str | None]] = [("direct", None)] * 4
+    direct_attempts = len(DIRECT_RETRY_DELAYS_SECONDS) + 1
+    routes: list[tuple[str, str | None]] = [("direct", None)] * direct_attempts
     route_index = 0
     while route_index < len(routes):
         transport, proxy = routes[route_index]
@@ -145,7 +154,13 @@ def download(
             request_kwargs["proxies"] = {"https": proxy}
         try:
             with requests.get(url, **request_kwargs) as response:
+                if response.status_code in RETRYABLE_HTTP_STATUSES:
+                    response.close()
+                    raise _RetryableHttpStatusError(
+                        f"Transient server response HTTP {response.status_code} for {url}"
+                    )
                 if is_retryable_infc_status(url, response.status_code):
+                    response.close()
                     raise requests.ConnectionError(f"INFC route returned HTTP {response.status_code}")
                 if response.status_code == 304:
                     if conditional_prior is None:
@@ -163,15 +178,18 @@ def download(
                 response_headers = {key.lower(): value for key, value in response.headers.items()}
                 resolved_url = str(response.url)
             break
-        except transport_errors as exc:
+        except retryable_errors as exc:
             temporary.unlink(missing_ok=True)
             last_error = exc
             if transport == "direct":
                 direct_error = exc
-            if transport == "direct" and route_index < 4:
-                sleep(2 ** (route_index - 1))
-            if route_index == 4 and is_infc_url(url):
+            if transport == "direct" and route_index < direct_attempts:
+                sleep(DIRECT_RETRY_DELAYS_SECONDS[route_index - 1])
+            if route_index == direct_attempts and is_infc_url(url):
                 routes.extend(("proxy", proxy_url) for proxy_url in infc_proxy_candidates(url))
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
     else:
         if is_infc_url(url):
             proxy_count = sum(proxy is not None for _, proxy in routes)
