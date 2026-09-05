@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import json
 import mimetypes
 import re
@@ -174,7 +173,9 @@ def download(
                     return conditional_prior | {"local_path": str(destination), "metadata_path": str(metadata_path)}
                 response.raise_for_status()
                 with temporary.open("wb") as target:
-                    shutil.copyfileobj(response.raw, target)
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            target.write(chunk)
                 response_headers = {key.lower(): value for key, value in response.headers.items()}
                 resolved_url = str(response.url)
             break
