@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import stato_italia.cli as cli
+import stato_italia.water as water
 from stato_italia.bigbang_historical_processing import HISTORICAL_DERIVED_LOGICAL_PATH
 from stato_italia.bigbang_historical_processing import build_bigbang_historical_processing_plan
 from stato_italia.bigbang_historical_territory_policy import TerritoryGeometryVersion
@@ -57,6 +59,41 @@ def _write_canonical_water(root: Path, hashes: list[str]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"source_asset_sha256": hashes}).to_parquet(path, index=False)
     return path
+
+
+def _grid_units_source(body: bytes) -> dict:
+    return {
+        **water.SOURCE,
+        "raster_unit_evidence": {
+            **water.SOURCE["raster_unit_evidence"],
+            "asset_bytes": len(body),
+            "asset_sha256": sha256(body).hexdigest(),
+        },
+    }
+
+
+def test_grid_units_validation_accepts_non_utf8_bytes_with_expected_ascii_statement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statement = str(water.SOURCE["raster_unit_evidence"]["statement"]).encode("ascii")
+    path = tmp_path / "GRID_UNITS.txt"
+    body = b"official evidence: \xe8\n" + statement + b"\n"
+    path.write_bytes(body)
+    monkeypatch.setattr(water, "SOURCE", _grid_units_source(body))
+
+    water._validate_grid_units(path)
+
+
+def test_grid_units_validation_rejects_missing_statement_after_contract_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "GRID_UNITS.txt"
+    body = b"official evidence: \xe8\nwithout expected unit declaration\n"
+    path.write_bytes(body)
+    monkeypatch.setattr(water, "SOURCE", _grid_units_source(body))
+
+    with pytest.raises(ValueError, match="BIGBANG GRID_UNITS does not verify the expected unit statement"):
+        water._validate_grid_units(path)
 
 
 def test_bigbang_source_state_bootstrap_adds_only_missing_registered_assets() -> None:
