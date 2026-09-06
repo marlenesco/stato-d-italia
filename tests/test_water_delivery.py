@@ -87,6 +87,13 @@ def test_water_delivery_keeps_official_regions_and_exposes_derived_provinces(tmp
     assert {path.name for path in report["files"] if path.suffix == ".pmtiles"} == {
         "istat-province-2006.pmtiles", "istat-province-2025.pmtiles",
     }
+    profile = json.loads((destination / "water/profiles/province/001.json").read_text())
+    series = next(item for item in profile["historicalSeries"] if item["metricId"] == "water_total_precipitation_mm_zonal_mean")
+    assert [point["referenceYear"] for point in series["points"]] == [2006, 2025]
+    assert [point["territoryGeometryReference"] for point in series["points"]] == [
+        "canonical/territories/reference_year=2006/province.parquet",
+        "canonical/territories/reference_year=2025/province.parquet",
+    ]
 
 
 def test_water_delivery_fails_closed_for_missing_or_ambiguous_derived_geometry(tmp_path: Path) -> None:

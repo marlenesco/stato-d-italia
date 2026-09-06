@@ -10,7 +10,7 @@ from .bigbang_raster_poc import METRIC_SPECS
 from .registry import load_source
 from .tiles import build_pmtiles, is_readable_pmtiles
 
-DELIVERY_ALGORITHM_VERSION = "water-delivery-v3"
+DELIVERY_ALGORITHM_VERSION = "water-delivery-v4"
 _PROVINCE_GEOMETRY_REFERENCE = re.compile(
     r"^canonical/territories/reference_year=(?P<year>\d{4})/province\.parquet$"
 )
@@ -134,7 +134,15 @@ def _profiles(table: pd.DataFrame, destination: Path, release_id: str, *, derive
             "schemaVersion": 1, "releaseId": release_id, "theme": "water",
             "territory": {"territoryId": territory_id, "territoryVersionId": territory.territory_version_id, "level": level},
             "latestObservations": [{"metricId": getattr(row, metric_column), "periodEnd": f"{row.reference_year}-12-31" if derived else row.period_end, "value": float(row.value_decimal), "unit": row.unit_ucum} for row in latest.itertuples()],
-            "historicalSeries": [{"metricId": metric, "values": [[int(row.reference_year), float(row.value_decimal)] for row in series.sort_values("reference_year").itertuples()]} for metric, series in rows.groupby(metric_column)],
+            "historicalSeries": [{
+                "metricId": metric,
+                "values": [[int(row.reference_year), float(row.value_decimal)] for row in series.sort_values("reference_year").itertuples()],
+                **({"points": [{
+                    "referenceYear": int(row.reference_year), "value": float(row.value_decimal),
+                    "territoryGeometryReference": _geometry_reference(row.territory_geometry_reference)[0],
+                    "territoryVersionId": row.territory_version_id,
+                } for row in series.sort_values("reference_year").itertuples()]} if derived else {}),
+            } for metric, series in rows.groupby(metric_column)],
             "provenanceRef": "delivery/water/provenance.json",
         }
         if derived:
