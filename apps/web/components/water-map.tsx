@@ -12,12 +12,15 @@ import { TerritoryMapSeries } from "./territory-map-series";
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
 type MapCamera = { center: [number, number]; zoom: number; bearing: number; pitch: number };
 
-const WATER_CAMERA_STORAGE_KEY = "stato-italia:map-camera:water:region";
 let protocol: import("pmtiles").Protocol | undefined;
 
-function savedWaterCamera(): MapCamera | undefined {
+function waterCameraStorageKey(territoryLevel: "region" | "province") {
+  return `stato-italia:map-camera:water:${territoryLevel}`;
+}
+
+function savedWaterCamera(territoryLevel: "region" | "province"): MapCamera | undefined {
   try {
-    const saved = JSON.parse(window.sessionStorage.getItem(WATER_CAMERA_STORAGE_KEY) ?? "null") as Partial<MapCamera> | null;
+    const saved = JSON.parse(window.sessionStorage.getItem(waterCameraStorageKey(territoryLevel)) ?? "null") as Partial<MapCamera> | null;
     const [longitude, latitude] = saved?.center ?? [];
     const { zoom, bearing, pitch } = saved ?? {};
     if (typeof longitude !== "number" || typeof latitude !== "number" || typeof zoom !== "number" || typeof bearing !== "number" || typeof pitch !== "number" || !Number.isFinite(longitude) || !Number.isFinite(latitude) || !Number.isFinite(zoom) || !Number.isFinite(bearing) || !Number.isFinite(pitch)) return undefined;
@@ -27,9 +30,9 @@ function savedWaterCamera(): MapCamera | undefined {
   }
 }
 
-function saveWaterCamera(map: import("maplibre-gl").Map) {
+function saveWaterCamera(map: import("maplibre-gl").Map, territoryLevel: "region" | "province") {
   const center = map.getCenter();
-  window.sessionStorage.setItem(WATER_CAMERA_STORAGE_KEY, JSON.stringify({ center: [center.lng, center.lat], zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch() } satisfies MapCamera));
+  window.sessionStorage.setItem(waterCameraStorageKey(territoryLevel), JSON.stringify({ center: [center.lng, center.lat], zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch() } satisfies MapCamera));
 }
 
 function colorExpression(min: number, max: number): import("maplibre-gl").ExpressionSpecification {
@@ -41,7 +44,7 @@ function display(value: number, unit: string) {
   return `${value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ${unit}`;
 }
 
-export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId, seriesOptions, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; selectedTerritoryId?: string; seriesOptions?: MapOption[]; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
+export function WaterMap({ option, metricLabel, geometryUrl, territoryLevel, derived, selectedTerritoryId, seriesOptions, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; territoryLevel: "region" | "province"; derived: boolean; selectedTerritoryId?: string; seriesOptions?: MapOption[]; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const featureIds = useRef<string[]>([]);
@@ -65,12 +68,12 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
     setError(null);
     const target = container.current;
     if (!geometryUrl || !target) {
-      setError("Geometria regionale non disponibile.");
+      setError(`Geometria ${territoryLevel === "province" ? "provinciale" : "regionale"} non disponibile.`);
       setLoading(false);
       return;
     }
     const pmtilesUrl = geometryUrl;
-    const initialCamera = savedWaterCamera() ?? italyMapCamera;
+    const initialCamera = savedWaterCamera(territoryLevel) ?? italyMapCamera;
     const mapTarget = target;
     let map: import("maplibre-gl").Map | undefined;
     let resizeObserver: ResizeObserver | undefined;
@@ -94,7 +97,7 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
           resizeObserver = new ResizeObserver(() => activeMap.resize());
           resizeObserver.observe(mapTarget);
           requestAnimationFrame(() => activeMap.resize());
-          activeMap.on("moveend", () => saveWaterCamera(activeMap));
+          activeMap.on("moveend", () => saveWaterCamera(activeMap, territoryLevel));
           setMapReady(true);
           activeMap.on("click", "water-fill", (event) => { const feature = event.features?.[0]; if (feature?.id !== undefined) { const id = String(feature.id); if (!Number.isFinite(activeMap.getFeatureState({ source: "territories", sourceLayer: "territories", id }).value)) return; const next = { id, name: typeof feature.properties?.name === "string" ? feature.properties.name : undefined }; setSelected(next); setSelectedHierarchy(hierarchyFromProperties(feature.properties) ?? null); focusMapForInspector(activeMap, event.lngLat, inspector); onTerritorySelectRef.current?.(next.id, next.name); } });
           const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
@@ -118,7 +121,7 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
     }
     void createMap();
     return () => { disposed = true; resizeObserver?.disconnect(); mapRef.current = null; featureIds.current = []; currentDataset.current = null; selectedFeatureId.current = null; map?.remove(); };
-  }, [geometryUrl]);
+  }, [geometryUrl, territoryLevel]);
 
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
@@ -179,5 +182,9 @@ export function WaterMap({ option, metricLabel, geometryUrl, selectedTerritoryId
   const selectedValue = selected && dataset?.values.find(([id]) => id === selected.id)?.[1];
   const selectedLabel = selected ? territoryLabel(selected.id, selected.name) : null;
 
-  return <section className="water-map-stage" aria-labelledby="water-map-title"><header className="map-heading"><div><p className="eyebrow">Atlante regionale</p><h2 id="water-map-title">{metricLabel}</h2><p>{dataset ? dataset.periodEnd.slice(0, 4) : option.periodKey} · valori annui</p></div><p className="map-status" aria-live="polite">{loading ? "Carico valori…" : error ? "Valori non disponibili" : selectedLabel ? selectedValue == null ? `Regione selezionata: dato non pubblicato` : `Regione selezionata: ${selectedLabel}` : "Seleziona regione"}</p></header><div className="map-wrap"><div ref={container} className="map water-map" role="img" aria-label="Mappa regionale interattiva. I colori mostrano valori ufficiali modellistici." />{min !== null && middle !== null && max !== null && <aside className="water-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore annuale stimato</strong><div className="water-legend-scale" aria-hidden="true" /><div className="legend-values"><span>{display(min, dataset?.unit ?? "mm")}</span><span>{display(middle, dataset?.unit ?? "mm")}</span><span>{display(max, dataset?.unit ?? "mm")}</span></div><p>Scala relativa a metrica e anno selezionati.</p></aside>}{selected && <aside ref={inspector} className="water-selection map-selection-drawer" aria-live="polite"><p className="eyebrow">Regione selezionata</p><h3>{selectedLabel}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selected.id)}</p><TerritoryContext level="region" hierarchy={selectedHierarchy ?? undefined} /><strong>{selectedValue == null ? "Dato non pubblicato per anno e metrica selezionati" : display(selectedValue, dataset?.unit ?? "mm")}</strong><p>Anno {dataset?.periodEnd.slice(0, 4) ?? option.periodKey} · stima ufficiale modellistica</p><Link href={`/territori/regioni/${territoryIstatCode(selected.id)}`}>Apri profilo regione</Link><TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selected.id} territoryName={selected.name} selectedPeriod={option.periodKey} statusNote="Stima ufficiale modellistica; nessuna interpolazione." /></aside>}</div>{error && <p className="map-message" role="alert">{error}</p>}</section>;
+  const territoryName = territoryLevel === "province" ? "Provincia" : "Regione";
+  const provenance = derived ? "Elaborazione Stato d’Italia su raster ISPRA BIGBANG 10.0 · media zonale pesata per area." : "Stima ufficiale modellistica; nessuna interpolazione.";
+  const territoryRoute = territoryLevel === "province" ? "province" : "regioni";
+
+  return <section className="water-map-stage" aria-labelledby="water-map-title"><header className="map-heading"><div><p className="eyebrow">Atlante {territoryLevel === "province" ? "provinciale" : "regionale"}</p><h2 id="water-map-title">{metricLabel}</h2><p>{dataset ? dataset.periodEnd.slice(0, 4) : option.periodKey} · valori annui</p></div><p className="map-status" aria-live="polite">{loading ? "Carico valori…" : error ? "Valori non disponibili" : selectedLabel ? selectedValue == null ? `${territoryName} selezionata: dato non pubblicato` : `${territoryName} selezionata: ${selectedLabel}` : `Seleziona ${territoryName.toLowerCase()}`}</p></header><div className="map-wrap"><div ref={container} className="map water-map" role="img" aria-label={`Mappa ${territoryLevel === "province" ? "provinciale" : "regionale"} interattiva. I colori mostrano ${derived ? "elaborazioni derivate" : "valori ufficiali modellistici"}.`} />{min !== null && middle !== null && max !== null && <aside className="water-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore annuale stimato</strong><div className="water-legend-scale" aria-hidden="true" /><div className="legend-values"><span>{display(min, dataset?.unit ?? "mm")}</span><span>{display(middle, dataset?.unit ?? "mm")}</span><span>{display(max, dataset?.unit ?? "mm")}</span></div><p>Scala relativa a metrica e anno selezionati.</p></aside>}{selected && <aside ref={inspector} className="water-selection map-selection-drawer" aria-live="polite"><p className="eyebrow">{territoryName} selezionata</p><h3>{selectedLabel}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selected.id)}</p><TerritoryContext level={territoryLevel} hierarchy={selectedHierarchy ?? undefined} /><strong>{selectedValue == null ? "Dato non pubblicato per anno e metrica selezionati" : display(selectedValue, dataset?.unit ?? "mm")}</strong><p>Anno {dataset?.periodEnd.slice(0, 4) ?? option.periodKey} · {derived ? "elaborazione derivata" : "stima ufficiale modellistica"}</p><Link href={`/territori/${territoryRoute}/${territoryIstatCode(selected.id)}`}>Apri profilo {territoryName.toLowerCase()}</Link><TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selected.id} territoryName={selected.name} selectedPeriod={option.periodKey} statusNote={provenance} /></aside>}</div>{derived && <p className="map-message">{provenance}</p>}{error && <p className="map-message" role="alert">{error}</p>}</section>;
 }

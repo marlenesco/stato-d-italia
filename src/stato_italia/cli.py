@@ -475,6 +475,12 @@ def _validate_delivery_dependencies(
         geometry = set(index.get("geometry", []))
         if not geometry or not geometry <= logical_paths:
             raise ValueError(f"{domain} delivery references missing geometry")
+        map_geometry = index.get("mapGeometry", {})
+        if domain == "water":
+            if not isinstance(map_geometry, dict) or set(map_geometry) != set(index.get("maps", [])):
+                raise ValueError("Water map geometry references are incomplete")
+            if not set(map_geometry.values()) <= geometry:
+                raise ValueError("Water delivery references missing mapped geometry")
         for logical_path in index.get("maps", []):
             if logical_path not in by_logical:
                 raise ValueError(f"{domain} delivery references missing map: {logical_path}")
@@ -487,6 +493,8 @@ def _validate_delivery_dependencies(
                 Path(path).name == f"istat-{level}-{reference[:4]}.pmtiles" for path in geometry
             ):
                 raise ValueError(f"{domain} map lacks compatible geometry: {logical_path}")
+            if domain == "water" and Path(map_geometry[logical_path]).name != f"istat-{level}-{reference[:4]}.pmtiles":
+                raise ValueError(f"Water map lacks its mapped compatible geometry: {logical_path}")
 
 
 def _validate_release_coherence(
@@ -908,6 +916,8 @@ def _run_incremental_data(
         scope="data", incremental=True, affected_source_families=families,
         active_release_has_historical=_active_release_has_historical(store),
     )
+    if historical_rebuild:
+        delivery_families.add("water_delivery")
     # Historical BIGBANG uses all five archives even when only boundaries changed.
     _hydrate_planned_raw_dependencies(store, root, families | ({"water"} if historical_rebuild else set()))
 
@@ -963,6 +973,8 @@ def _run_incremental_data(
         unchanged_delivery_dependencies.append(
             "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet"
         )
+    if "water_delivery" in delivery_families and not historical_rebuild:
+        unchanged_delivery_dependencies.append(HISTORICAL_DERIVED_LOGICAL_PATH)
     if "dissesto_delivery" in delivery_families and "dissesto" not in families:
         unchanged_delivery_dependencies.append(
             "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet"
@@ -975,6 +987,15 @@ def _run_incremental_data(
         ))
     if unchanged_delivery_dependencies:
         _hydrate(store, root, sorted(set(unchanged_delivery_dependencies)))
+    if "water_delivery" in delivery_families:
+        historical_path = root / HISTORICAL_DERIVED_LOGICAL_PATH
+        if not historical_path.is_file():
+            raise ValueError("Water delivery requires BIGBANG historical derived artifact")
+        geometry_references = {
+            str(value).split("#", 1)[0]
+            for value in pd.read_parquet(historical_path, columns=["territory_geometry_reference"])["territory_geometry_reference"].dropna()
+        }
+        _hydrate(store, root, sorted(reference for reference in geometry_references if not (root / reference).exists()))
 
     geometry_paths = _data_geometry_logical_paths()
     fresh_geometry: list[Path] = []
@@ -1016,7 +1037,8 @@ def _run_incremental_data(
         release_id, force=True,
     ) if "soil_delivery" in delivery_families else {"changed": False, "files": [], "carried": True}
     water_delivery = generate_water_delivery(
-        canonical / "water/dataset_version=bigbang-10-1951-2025/observations.parquet", delivery, release_id, force=True,
+        canonical / "water/dataset_version=bigbang-10-1951-2025/observations.parquet",
+        root / HISTORICAL_DERIVED_LOGICAL_PATH, canonical, delivery, release_id, force=True,
     ) if "water_delivery" in delivery_families else {"changed": False, "files": [], "carried": True}
     dissesto_delivery = generate_dissesto_delivery(
         canonical / "dissesto/dataset_version=idrogeo-risk-2024/observations.parquet", delivery, release_id,
@@ -1278,7 +1300,8 @@ def run(args: argparse.Namespace) -> int:
     )
     water_delivery = generate_water_delivery(
         canonical / "water" / "dataset_version=bigbang-10-1951-2025" / "observations.parquet",
-        delivery, release_id, force=args.force or water["changed"],
+        root / HISTORICAL_DERIVED_LOGICAL_PATH, canonical, delivery, release_id,
+        force=args.force or water["changed"] or historical["changed"],
     )
     dissesto_delivery = generate_dissesto_delivery(
         canonical / "dissesto" / "dataset_version=idrogeo-risk-2024" / "observations.parquet",
