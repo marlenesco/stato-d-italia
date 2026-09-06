@@ -361,7 +361,7 @@ export async function loadHomeDomainSignals(): Promise<HomeDomainSignal[]> {
       const option = data.maps.find((item) => item.metricId === "tree_cover_mean" && item.periodKey === "2023-2023" && item.level === "region");
       if (!option) throw new Error("Home forest signal unavailable");
       const dataset = await fetchJson<HomeMapDataset>(option.url, 300);
-      return { id: "forests", title: "Foreste", label: "Regioni nel campione pubblicato", displayValue: dataset.values.length.toLocaleString("it-IT"), unit: "regioni", period: dataset.periodEnd.slice(0, 4), note: "Elaborazione zonale su Copernicus; non dato nazionale.", href: "/foreste?metric=tree_cover_mean&level=region&period=2023-2023#mappa", status: "available", kind: "derived" };
+      return { id: "forests", title: "Foreste", label: "Regioni con valore pubblicato", displayValue: dataset.values.length.toLocaleString("it-IT"), unit: "regioni", period: dataset.periodEnd.slice(0, 4), note: "Elaborazione zonale nazionale su Copernicus; non statistica territoriale ufficiale.", href: "/foreste?metric=tree_cover_mean&level=region&period=2023-2023#mappa", status: "available", kind: "derived" };
     }),
     emissionsRelease().then(async ({ base, release, index }) => {
       const overview = await fetchJson<EmissionsOverview>(asset(base, release, index.overview), 300);
