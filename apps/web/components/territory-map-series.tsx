@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { MapOption } from "../lib/data";
 import { territoryLabel } from "../lib/territory-labels";
 
-type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
-type Point = { period: string; periodStart: string; periodEnd: string; value: number; unit: string };
+type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string; territoryGeometryReference?: string };
+type Point = { period: string; periodStart: string; periodEnd: string; value: number; unit: string; territoryGeometryReference?: string };
 type TrendGeometry = { paths: string[]; points: Array<{ x: number; y: number } | null> };
 type Comparison = { change: number; percent: number };
 const TEMPORAL_COMPARISON_UI_VERSION = "temporal-comparison-ui-v1";
@@ -22,6 +22,11 @@ function comparison(previous: Point, current: Point): Comparison | null {
   if (previous.unit !== current.unit || periodDurationYears(previous) !== periodDurationYears(current) || previous.value === 0) return null;
   const change = current.value - previous.value;
   return { change, percent: change / Math.abs(previous.value) * 100 };
+}
+
+function geometricallyComparable(previous: Point, current: Point) {
+  if (!previous.territoryGeometryReference && !current.territoryGeometryReference) return true;
+  return Boolean(previous.territoryGeometryReference) && previous.territoryGeometryReference === current.territoryGeometryReference;
 }
 
 function DeltaGauge({ result }: { result: Comparison | null }) {
@@ -41,9 +46,21 @@ function trendGeometry(samples: Array<Point | null>): TrendGeometry {
   const points = samples.map(pointAt);
   const paths: string[] = [];
   let segment: string[] = [];
-  points.forEach((point) => {
-    if (point) segment.push(`${point.x},${point.y}`);
-    else if (segment.length) { paths.push(segment.join(" ")); segment = []; }
+  let previous: Point | null = null;
+  points.forEach((point, index) => {
+    const sample = samples[index];
+    if (point && sample) {
+      if (previous && !geometricallyComparable(previous, sample) && segment.length) {
+        paths.push(segment.join(" "));
+        segment = [];
+      }
+      segment.push(`${point.x},${point.y}`);
+      previous = sample;
+    } else if (segment.length) {
+      paths.push(segment.join(" "));
+      segment = [];
+      previous = null;
+    }
   });
   if (segment.length) paths.push(segment.join(" "));
   return { paths, points };
@@ -69,7 +86,7 @@ export function TerritoryMapSeries({ options, territoryId, territoryName, select
         const snapshot = raw.snapshots?.find((item) => item.sourceDimensions.snap_code === snapshotCode);
         const dataset = snapshot ? { ...raw, unit: snapshot.unit, values: snapshot.values } : raw;
         const value = dataset.values.find(([id]) => id === territoryId)?.[1];
-        return typeof value === "number" ? { period: option.periodKey, periodStart: dataset.periodStart, periodEnd: dataset.periodEnd, value, unit: dataset.unit } : null;
+        return typeof value === "number" ? { period: option.periodKey, periodStart: dataset.periodStart, periodEnd: dataset.periodEnd, value, unit: dataset.unit, territoryGeometryReference: dataset.territoryGeometryReference } : null;
       }));
       if (!controller.signal.aborted) setSamples(next);
     }
@@ -85,12 +102,13 @@ export function TerritoryMapSeries({ options, territoryId, territoryName, select
   const current = selectedIndex >= 0 ? samples[selectedIndex] : null;
   const previous = selectedIndex >= 0 ? samples.slice(0, selectedIndex).filter((sample): sample is Point => sample !== null).at(-1) : undefined;
   const geometry = samples.some(Boolean) ? trendGeometry(samples) : null;
-  const result = current && previous ? comparison(previous, current) : null;
+  const sameGeometry = current && previous ? geometricallyComparable(previous, current) : true;
+  const result = current && previous && sameGeometry ? comparison(previous, current) : null;
   const direction = result ? result.change > 0 ? "Aumento" : result.change < 0 ? "Diminuzione" : "Invariato" : "Non comparabile";
 
   return <section className="territory-series territory-series--drawer" aria-live="polite">
     <h3>Andamento nel periodo disponibile</h3>
     {geometry && <figure className="territory-trend"><svg viewBox="0 0 280 88" role="img" aria-label={`Trend pubblicato di ${label}`}><path d="M12 72H268" className="chart-axis" />{geometry.paths.map((path, index) => <polyline key={index} points={path} className="territory-trend-line" />)}{geometry.points.map((point, index) => point && <circle key={index} cx={point.x} cy={point.y} r={index === selectedIndex ? 4.6 : 2.2} className={index === selectedIndex ? "territory-trend-point territory-trend-point--selected" : "territory-trend-point"} />)}</svg><figcaption><span>{options[0]?.periodKey}</span><span>{selectedPeriod ?? options.at(-1)?.periodKey}</span></figcaption></figure>}
-    {!current ? <p className="sidebar-context"><strong>{label}</strong> Dato non pubblicato per periodo selezionato. Territorio resta selezionato.</p> : <><dl className="territory-summary"><div><dt>Selezionato</dt><dd>{format(current.value, current.unit)}</dd></div><div><dt>Confronto precedente</dt><dd><DeltaGauge result={result} /></dd></div></dl><p className="sidebar-context"><strong>{direction}.</strong> {result ? `${result.change > 0 ? "+" : ""}${format(result.change, current.unit)} rispetto a ${previous?.period}.` : previous ? "Periodi non comparabili." : "Manca periodo precedente pubblicato."}</p><small className="territory-series-note">{statusNote} {result && `${TEMPORAL_COMPARISON_UI_VERSION}: valore ${current.period} − valore ${previous?.period}.`}</small></>}
+    {!current ? <p className="sidebar-context"><strong>{label}</strong> Dato non pubblicato per periodo selezionato. Territorio resta selezionato.</p> : <><dl className="territory-summary"><div><dt>Selezionato</dt><dd>{format(current.value, current.unit)}</dd></div><div><dt>Confronto precedente</dt><dd><DeltaGauge result={result} /></dd></div></dl><p className="sidebar-context"><strong>{direction}.</strong> {result ? `${result.change > 0 ? "+" : ""}${format(result.change, current.unit)} rispetto a ${previous?.period}.` : previous ? sameGeometry ? "Periodi non comparabili." : "Geometrie territoriali differenti: confronto non comparabile, senza interpolazione o crosswalk." : "Manca periodo precedente pubblicato."}</p><small className="territory-series-note">{statusNote} {result && `${TEMPORAL_COMPARISON_UI_VERSION}: valore ${current.period} − valore ${previous?.period}.`}</small></>}
   </section>;
 }
