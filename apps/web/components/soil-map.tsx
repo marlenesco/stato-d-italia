@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { MapOption } from "../lib/data";
 import { domainColorRamps, type DomainColorName, type DomainColorRamp } from "../lib/domain-colors";
 import { configureItalyMapControls, italyMapCamera } from "../lib/italy-map-bounds";
@@ -37,7 +37,7 @@ function territoryHref(level: string, istatCode: string) {
   return `/territori/${route}/${istatCode}`;
 }
 
-export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, seriesOptions, seriesStatusNote, colorRamp = "soil", comparisonNote, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; seriesOptions?: MapOption[]; seriesStatusNote?: string; colorRamp?: DomainColorName; comparisonNote?: string; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
+export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, seriesOptions, seriesStatusNote, colorRamp = "soil", comparisonNote, sharedTemporalScale = false, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; seriesOptions?: MapOption[]; seriesStatusNote?: string; colorRamp?: DomainColorName; comparisonNote?: string; sharedTemporalScale?: boolean; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
   const ramp = domainColorRamps[colorRamp];
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
@@ -56,6 +56,8 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const [selectedId, setSelectedId] = useState<string | null>(selectedTerritoryId ?? null);
   const [selectedName, setSelectedName] = useState<string | undefined>();
   const [selectedHierarchy, setSelectedHierarchy] = useState<TerritoryHierarchy | null | undefined>();
+  const temporalOptionsKey = (seriesOptions ?? []).map((item) => item.url).join("|");
+  const temporalOptions = useMemo(() => seriesOptions ?? [], [temporalOptionsKey]);
 
   useEffect(() => { onTerritorySelectRef.current = onTerritorySelect; }, [onTerritorySelect]);
 
@@ -146,12 +148,20 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
         const nextDataset = snapshot ? { values: snapshot.values, unit: snapshot.unit, periodStart: raw.periodStart, periodEnd: raw.periodEnd } : raw;
         const values = nextDataset.values.map((item) => item[1]).filter(Number.isFinite);
         if (!values.length) throw new Error("La mappa non contiene valori numerici pubblicati.");
+        const scaleValues = sharedTemporalScale && temporalOptions.length ? (await Promise.all(temporalOptions.map(async (seriesOption) => {
+          const [seriesUrl, seriesSnapshot] = seriesOption.url.split("#", 2);
+          const seriesResponse = await fetch(seriesUrl, { signal: controller.signal });
+          if (!seriesResponse.ok) throw new Error(`Scala temporale non disponibile (${seriesResponse.status}).`);
+          const seriesRaw = await seriesResponse.json() as MapDataset & { snapshots?: Array<{ sourceDimensions: { snap_code: string }; values: [string, number][] }> };
+          return (seriesRaw.snapshots?.find((item) => item.sourceDimensions.snap_code === seriesSnapshot)?.values ?? seriesRaw.values).map((item) => item[1]).filter(Number.isFinite);
+        }))).flat() : values;
+        if (!scaleValues.length) throw new Error("La scala temporale non contiene valori numerici pubblicati.");
         const activeMap = mapRef.current;
         if (controller.signal.aborted || !activeMap) return;
         featureIds.current.forEach((territoryId) => activeMap.removeFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }));
         nextDataset.values.forEach(([territoryId, value]) => activeMap.setFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }, { value }));
         featureIds.current = nextDataset.values.map(([territoryId]) => territoryId);
-        activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(Math.min(...values), Math.max(...values), ramp));
+        activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(Math.min(...scaleValues), Math.max(...scaleValues), ramp));
         currentDataset.current = nextDataset;
         setDataset(nextDataset);
       } catch (caught) {
@@ -162,7 +172,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     }
     void updateValues();
     return () => controller.abort();
-  }, [mapReady, option.url, ramp]);
+  }, [mapReady, option.url, ramp, temporalOptions, sharedTemporalScale]);
 
   useEffect(() => { setSelectedId(selectedTerritoryId ?? null); setSelectedName(undefined); setSelectedHierarchy(undefined); }, [selectedTerritoryId]);
 

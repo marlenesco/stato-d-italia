@@ -59,6 +59,8 @@ def test_check_sources_domain_forests_constrains_preflight_and_marks_plan(
 ) -> None:
     captured: dict[str, object] = {}
 
+    # CLI command tests must not read a developer's ignored local dotenv file.
+    monkeypatch.setattr(cli, "load_local_env", lambda: None)
     monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda _store: {"schemaVersion": 1, "sources": []})
     monkeypatch.setattr(cli, "active_release", lambda _store: {"releaseId": "r1"})
 
@@ -466,11 +468,13 @@ def test_data_release_coherence_rejects_new_state_with_old_canonical(
 def test_forest_delivery_signature_must_match_release_canonicals(tmp_path: Path) -> None:
     infc = tmp_path / "infc.parquet"
     zonal = tmp_path / "zonal.parquet"
+    coverage = tmp_path / "zonal.coverage.json"
     index = tmp_path / "forest-index.json"
     infc.write_bytes(b"infc-v2")
     zonal.write_bytes(b"zonal-v1")
+    coverage.write_text("{}")
     index.write_text(json.dumps({
-        "canonicalSignature": {"infc": "0" * 64, "zonal": "1" * 64},
+        "canonicalSignature": {"infc": "0" * 64, "zonal": "1" * 64, "coverage": "2" * 64},
         "geometry": [], "maps": [], "mapGeometry": {},
     }))
 
@@ -478,6 +482,7 @@ def test_forest_delivery_signature_must_match_release_canonicals(tmp_path: Path)
         _validate_delivery_dependencies([
             ReleaseArtifact(infc, "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"),
             ReleaseArtifact(zonal, f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"),
+            ReleaseArtifact(coverage, f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json"),
             ReleaseArtifact(index, "delivery/foreste/index.json"),
         ], store=None, affected_families={"forest_delivery"})
 

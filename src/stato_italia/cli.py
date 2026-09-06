@@ -485,6 +485,7 @@ def _validate_delivery_dependencies(
     forest_canonicals = {
         "infc": "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet",
         "zonal": f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
+        "coverage": f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json",
     }
     if all(path in logical_paths for path in forest_canonicals.values()):
         if forest_index_path not in by_logical:
@@ -508,6 +509,8 @@ def _validate_delivery_dependencies(
                 level = str(payload.get("territoryLevel", ""))
                 if Path(geometry_path).name != f"istat-{level}-{reference[:4]}.pmtiles":
                     raise ValueError(f"Forest map lacks compatible geometry: {map_path}")
+                if payload.get("territoryGeometryReference") != Path(geometry_path).name:
+                    raise ValueError(f"Forest map lacks its explicit geometry reference: {map_path}")
 
     insight_index_path = "delivery/territory-insights/index.json"
     insight_inputs = (
@@ -639,6 +642,12 @@ def _validate_release_coherence(
                     }
                 if not expected or "None" in expected or hashes != expected:
                     raise ValueError("Copernicus raster provenance and forest canonical signatures differ")
+            coverage_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json"
+            if coverage_logical not in logical_paths:
+                raise ValueError("Geospatial release lacks verified forest coverage")
+            coverage = _artifact_json(next(item for item in artifacts if item.logical_path == coverage_logical), store)
+            if coverage.get("coverageMode") != "national" or not isinstance(coverage.get("entries"), list):
+                raise ValueError("Geospatial release lacks national verified forest coverage")
     _validate_delivery_dependencies(
         artifacts, store=store, affected_families=affected_families,
     )
@@ -768,10 +777,11 @@ def _run_geospatial(
         _hydrate_planned_raw_dependencies(store, root, {"infc"})
     infc_logical = "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"
     zonal_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
+    zonal_coverage_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json"
     if "infc" not in families:
         _hydrate(store, root, [infc_logical])
     if "copernicus" not in families:
-        _hydrate(store, root, [zonal_logical])
+        _hydrate(store, root, [zonal_logical, zonal_coverage_logical])
     forest_fetch, infc, zonal = _process_geospatial_forest_sources(
         args, root=root, canonical=canonical, previous_state=previous_state,
     )
@@ -799,7 +809,7 @@ def _run_geospatial(
     forest_delivery = generate_forests_delivery(
         root / zonal_logical, root / infc_logical, canonical, delivery, release_id,
         {level: Path(info["path"]) for level, info in forests_pmtiles.items()},
-        force=True,
+        force=True, coverage_path=root / zonal_coverage_logical,
     )
     insights = {"changed": False, "files": [], "carried": True}
     if families & {"infc", "copernicus"}:
@@ -836,7 +846,7 @@ def _run_geospatial(
     if "infc" in families:
         declared.append(root / infc_logical)
     if "copernicus" in families:
-        declared.append(root / zonal_logical)
+        declared.extend((root / zonal_logical, root / zonal_coverage_logical))
     affected_artifacts = _geospatial_downstream_families(families)
     manifest, metrics, publication = _publish_scoped(
         store=store, root=root, output=output, release_id=release_id, scope="geospatial", previous_state=previous_state,
