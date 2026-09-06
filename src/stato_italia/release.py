@@ -140,6 +140,8 @@ def artifact_scope(logical_path: str) -> ArtifactScope:
         return "data"
     if logical_path.startswith("delivery/territory-insights/"):
         return "shared"
+    if logical_path.startswith("delivery/territories/"):
+        return "shared"
     if logical_path.startswith("delivery/foreste/"):
         return "geospatial"
     if logical_path.startswith((
@@ -158,6 +160,8 @@ def artifact_family(logical_path: str) -> str:
         return "source_state"
     if logical_path.startswith("delivery/territory-insights/"):
         return "territory_insights"
+    if logical_path.startswith("delivery/territories/"):
+        return "territory_identity"
     if logical_path.startswith("delivery/foreste/geometry/"):
         year = Path(logical_path).stem.rsplit("-", 1)[-1]
         return f"forest_geometry_{year}"

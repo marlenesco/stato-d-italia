@@ -39,6 +39,7 @@ from .water import bigbang_raw_assets, ingest_water
 from .water_delivery import generate_water_delivery
 from .tiles import build_pmtiles, is_readable_pmtiles
 from .territory_insights_delivery import generate_territory_insights_delivery
+from .territory_delivery import generate_territory_delivery
 
 
 def load_local_env(path: Path = Path(".env")) -> None:
@@ -394,7 +395,7 @@ def _validate_delivery_dependencies(
     logical_paths = set(by_logical)
     if affected_families is not None:
         required_downstream = {
-            "infc": {"forest_delivery", "forest_geometry_2015"},
+            "infc": {"forest_delivery", "forest_geometry_2015", "territory_insights"},
             "copernicus": {"forest_delivery", "forest_geometry_2023", "territory_insights"},
             "soil": {"soil_delivery", "territory_insights"},
             "water": {"water_delivery", "territory_insights"},
@@ -439,10 +440,12 @@ def _validate_delivery_dependencies(
     insight_index_path = "delivery/territory-insights/index.json"
     insight_inputs = (
         "canonical/soil/dataset_version=2025-2024-observations/observations.parquet",
+        f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
         "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
         "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
         "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
-        f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
+        HISTORICAL_DERIVED_LOGICAL_PATH,
+        "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet",
     )
     if (
         affected_families is not None
@@ -457,6 +460,15 @@ def _validate_delivery_dependencies(
         insights = _artifact_json(by_logical[insight_index_path], store)
         if insights.get("inputSignature") != expected:
             raise ValueError("Territory insights input signature does not match release canonicals")
+
+    territory_index_path = "delivery/territories/index.json"
+    if affected_families is not None and "territory_identity" in affected_families and territory_index_path not in by_logical:
+        raise ValueError("Release lacks regenerated territory identity index")
+    if territory_index_path in by_logical:
+        territory_index = _artifact_json(by_logical[territory_index_path], store)
+        shards = territory_index.get("shards", [])
+        if not isinstance(shards, list) or not shards or not set(shards) <= logical_paths:
+            raise ValueError("Territory identity delivery references missing shards")
 
     if affected_families is None:
         checked_delivery = {"soil_delivery", "water_delivery", "dissesto_delivery", "emissions_delivery", "forest_delivery"}
@@ -710,12 +722,13 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         force=True,
     )
     insights = {"changed": False, "files": [], "carried": True}
-    if "copernicus" in families:
+    if families & {"infc", "copernicus"}:
         _hydrate(store, root, [
             "canonical/soil/dataset_version=2025-2024-observations/observations.parquet",
             "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
             "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
             "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
+            HISTORICAL_DERIVED_LOGICAL_PATH,
             *_territory_logical_paths((2025,)),
         ])
         insights = generate_territory_insights_delivery(
@@ -725,6 +738,8 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
             canonical / "dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
             canonical / "emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
             canonical, delivery, release_id, force=True,
+            derived_water_path=root / HISTORICAL_DERIVED_LOGICAL_PATH,
+            infc_path=root / infc_logical,
         )
     fetched_raw_paths = _declared_raw_paths(forest_fetch)
     catalog_value = forest_fetch.get("catalog", {}).get("path")
@@ -759,8 +774,10 @@ def _geospatial_downstream_families(source_families: set[str]) -> set[str]:
     affected = {*source_families, "forest_delivery"}
     if "infc" in source_families:
         affected.add("forest_geometry_2015")
+    if source_families & {"infc", "copernicus"}:
+        affected.add("territory_insights")
     if "copernicus" in source_families:
-        affected.update(("forest_geometry_2023", "territory_insights"))
+        affected.add("forest_geometry_2023")
     return affected
 
 
@@ -888,7 +905,7 @@ def _data_downstream_families(
     }
     geometry_families: set[str] = set()
     if 2025 in boundary_years:
-        delivery_families.update(("soil_delivery", "water_delivery"))
+        delivery_families.update(("soil_delivery", "water_delivery", "territory_identity"))
         geometry_families.add("soil_geometry_2025")
     if 2024 in boundary_years:
         delivery_families.add("dissesto_delivery")
@@ -1051,6 +1068,9 @@ def _run_incremental_data(
         {year: Path(info["path"]) for year, info in geometry_reports["emissions"].items()},
         delivery, release_id, force=True,
     ) if "emissions_delivery" in delivery_families else {"changed": False, "files": [], "carried": True}
+    territory_delivery = generate_territory_delivery(
+        canonical, delivery, release_id, force=True,
+    ) if "territory_identity" in delivery_families else {"changed": False, "files": [], "carried": True}
 
     changed_source_ids = {
         str(entry["source_id"]) for entry in planned_entries() if entry.get("status") == "changed"
@@ -1070,7 +1090,12 @@ def _run_incremental_data(
         ):
             if family not in families:
                 insight_dependencies.append(logical)
-        insight_dependencies.append(f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet")
+        insight_dependencies.extend((
+            f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
+            "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet",
+        ))
+        if not historical_rebuild:
+            insight_dependencies.append(HISTORICAL_DERIVED_LOGICAL_PATH)
         if "boundaries" not in families:
             insight_dependencies.extend(_territory_logical_paths((2025,)))
         _hydrate(store, root, insight_dependencies)
@@ -1081,6 +1106,8 @@ def _run_incremental_data(
             canonical / "dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
             canonical / "emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
             canonical, delivery, release_id, force=True,
+            derived_water_path=root / HISTORICAL_DERIVED_LOGICAL_PATH,
+            infc_path=canonical / "forests/dataset_version=infc2015-published-tables/observations.parquet",
         )
 
     raw_declarations = _declared_raw_paths({
@@ -1101,7 +1128,7 @@ def _run_incremental_data(
             canonical / "emissions/national/air-pollutants-nfr/dataset_version=2026-1990-2024/observations.parquet",
         ],
     }
-    delivery_reports = [soil_delivery, water_delivery, dissesto_delivery, emissions_delivery, insights]
+    delivery_reports = [soil_delivery, water_delivery, dissesto_delivery, emissions_delivery, territory_delivery, insights]
     declared = [
         *raw_declarations,
         *[path for family in families for path in canonical_by_family[family]],
@@ -1114,6 +1141,8 @@ def _run_incremental_data(
         affected_artifacts.add("water_historical")
     if insights_changed:
         affected_artifacts.add("territory_insights")
+    if territory_delivery["changed"]:
+        affected_artifacts.add("territory_identity")
     manifest, metrics, publication = _publish_scoped(
         store=store, root=root, output=output, release_id=release_id, scope="data",
         previous_state=previous_state, current_state=current_state, declared_paths=declared,
@@ -1124,7 +1153,7 @@ def _run_incremental_data(
         "run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop",
         "changed": publication["changed"], "scope": "data", "affectedFamilies": sorted(affected_artifacts),
         "boundaries": boundaries, "soil": soil, "water": water, "historicalWater": historical, "emissions": emissions,
-        "dissesto": dissesto, "analytics": analytics, "territory_insights_delivery": insights,
+        "dissesto": dissesto, "analytics": analytics, "territory_delivery": territory_delivery, "territory_insights_delivery": insights,
         "operationalMetrics": metrics | {"pipelineDurationSeconds": round(time.monotonic() - started, 3)},
         "manifest": manifest, "carriedArtifacts": publication["carried"],
         "startedAt": started_at, "completedAt": now_iso(),
@@ -1323,6 +1352,9 @@ def run(args: argparse.Namespace) -> int:
             {level: Path(info["path"]) for level, info in forests_pmtiles.items()},
             force=args.force or forests["infc"]["changed"] or bool(forests.get("zonal", {}).get("changed")) or forests_geometry_changed,
         )
+    territory_delivery = generate_territory_delivery(
+        canonical, delivery, release_id, force=args.force or boundaries["changed"],
+    )
     territory_insights_delivery = generate_territory_insights_delivery(
         canonical / "soil" / "dataset_version=2025-2024-observations" / "observations.parquet",
         (canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet") if "zonal" in forests else None,
@@ -1331,6 +1363,8 @@ def run(args: argparse.Namespace) -> int:
         canonical / "emissions" / "dataset_version=2026-2023-disaggregation" / "observations.parquet",
         canonical, delivery, release_id,
         force=args.force or soil["changed"] or water["changed"] or dissesto["changed"] or emissions["changed"] or bool(forests.get("zonal", {}).get("changed")),
+        derived_water_path=root / HISTORICAL_DERIVED_LOGICAL_PATH,
+        infc_path=canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
     )
     changed = changed or soil_geometry_changed or dissesto_geometry_changed or emissions_geometry_changed or forests_geometry_changed
     changed = changed or water_delivery["changed"]
@@ -1338,8 +1372,9 @@ def run(args: argparse.Namespace) -> int:
     changed = changed or emissions_delivery["changed"]
     changed = changed or delivery_report["changed"]
     changed = changed or forests_delivery["changed"]
+    changed = changed or territory_delivery["changed"]
     changed = changed or territory_insights_delivery["changed"]
-    reports_with_files = [delivery_report, water_delivery, dissesto_delivery, emissions_delivery, forests_delivery, territory_insights_delivery]
+    reports_with_files = [delivery_report, water_delivery, dissesto_delivery, emissions_delivery, forests_delivery, territory_delivery, territory_insights_delivery]
     raw_declarations = _declared_raw_paths({
         "boundaries": boundaries, "soil": soil, "water": water,
         "national_emissions": national_emissions, "provincial_emissions": provincial_emissions,
@@ -1411,6 +1446,7 @@ def run(args: argparse.Namespace) -> int:
         "dissesto_delivery": {key: value for key, value in dissesto_delivery.items() if key != "files"},
         "emissions_delivery": {key: value for key, value in emissions_delivery.items() if key != "files"},
         "forests_delivery": {key: value for key, value in forests_delivery.items() if key != "files"},
+        "territory_delivery": {key: value for key, value in territory_delivery.items() if key != "files"},
         "territory_insights_delivery": {key: value for key, value in territory_insights_delivery.items() if key != "files"},
         "storage": {
             "raw_all_bytes": raw_all_bytes,

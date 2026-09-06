@@ -381,6 +381,8 @@ def test_territory_insights_signature_must_match_all_semantic_inputs(tmp_path: P
         "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
         "canonical/emissions/dataset_version=2026-2023-disaggregation/observations.parquet",
         f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet",
+        cli.HISTORICAL_DERIVED_LOGICAL_PATH,
+        "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet",
     )
     artifacts = []
     for number, logical_path in enumerate(logical_inputs):
@@ -390,6 +392,15 @@ def test_territory_insights_signature_must_match_all_semantic_inputs(tmp_path: P
     index = tmp_path / "insights-index.json"
     index.write_text(json.dumps({"inputSignature": "stale"}))
     artifacts.append(ReleaseArtifact(index, "delivery/territory-insights/index.json"))
+    hashes = {artifact.logical_path: cli.sha256_file(artifact.path) for artifact in artifacts}
+    forest_index = tmp_path / "forest-index.json"
+    forest_index.write_text(json.dumps({
+        "canonicalSignature": {
+            "infc": hashes["canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"],
+            "zonal": hashes[f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"],
+        }, "geometry": [], "maps": [], "mapGeometry": {},
+    }))
+    artifacts.append(ReleaseArtifact(forest_index, "delivery/foreste/index.json"))
 
     with pytest.raises(ValueError, match="Territory insights input signature"):
         _validate_delivery_dependencies(
@@ -462,7 +473,7 @@ def test_water_map_requires_its_declared_historical_geometry(tmp_path: Path) -> 
 
 def test_boundary_dependencies_are_reference_year_specific() -> None:
     current_delivery, current_geometry = _data_downstream_families({"boundaries"}, {2025})
-    assert current_delivery == {"soil_delivery", "water_delivery"}
+    assert current_delivery == {"soil_delivery", "water_delivery", "territory_identity"}
     assert current_geometry == {"soil_geometry_2025"}
 
     dissesto_delivery, dissesto_geometry = _data_downstream_families({"boundaries"}, {2024})
@@ -480,7 +491,7 @@ def test_boundary_dependencies_are_reference_year_specific() -> None:
 
 def test_forest_downstream_dependencies_distinguish_infc_and_copernicus() -> None:
     assert _geospatial_downstream_families({"infc"}) == {
-        "infc", "forest_delivery", "forest_geometry_2015",
+        "infc", "forest_delivery", "forest_geometry_2015", "territory_insights",
     }
     assert _geospatial_downstream_families({"copernicus"}) == {
         "copernicus", "forest_delivery", "forest_geometry_2023", "territory_insights",

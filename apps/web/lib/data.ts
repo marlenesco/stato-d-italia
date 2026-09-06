@@ -23,8 +23,18 @@ type DerivedMetric = {
   benchmarks?: Record<string, { percentile?: number | null; percentileStatus?: string | null; rank?: number | null; rankStatus?: string | null }>;
 };
 
+export type TerritoryIdentity = {
+  territoryId: string;
+  territoryVersionId: string;
+  name: string;
+  level: TerritoryLevel;
+  istatCode: string;
+  referenceDate: string;
+  parents: Array<{ territoryId: string; territoryVersionId?: string; name: string; level: string; istatCode: string }>;
+};
+
 export type SoilTerritoryProfile = {
-  territory: { territoryId: string; name: string; level: "country" | "municipality" | "province" | "region"; istatCode: string; referenceDate: string; parents: Array<{ territoryId: string; name: string; level: string; istatCode: string }> };
+  territory: TerritoryIdentity;
   latestObservations: Observation[];
   historicalSeries: Array<{ metricId: string; columns: string[]; values: Array<[string, string, string, number, string]> }>;
   derivedMetrics: DerivedMetric[];
@@ -51,7 +61,7 @@ export type WaterProfile = {
   kind?: "derived_metric_profile";
   officialStatus?: "derived_by_stato_italia";
   latestObservations: WaterObservation[];
-  historicalSeries: Array<{ metricId: string; values: Array<[number, number]>; points?: Array<{ referenceYear: number; value: number; territoryGeometryReference?: string; territoryVersionId?: string }> }>;
+  historicalSeries: Array<{ metricId: string; values: Array<[number, number]>; points?: Array<{ referenceYear: number; value: number; territoryGeometryReference?: string; territoryVersionId?: string; methodologyReference?: string }> ; comparison?: TerritoryComparison }>;
   territoryGeometryReferences?: string[];
 };
 
@@ -96,7 +106,17 @@ export type HomeDomainSignal = {
   kind: "official" | "modelled" | "derived";
 };
 
-export type TerritoryInsightPoint = { periodStart: string; periodEnd: string; value: number; unit: string };
+export type TerritoryInsightPoint = {
+  metricId?: string;
+  periodStart: string;
+  periodEnd: string;
+  value: number;
+  unit: string;
+  geometryReference?: string;
+  methodologyReference?: string;
+};
+export type ComparisonReason = "single_snapshot" | "missing_previous_period" | "geometry_changed" | "methodology_changed" | "unit_changed" | "comparison_not_supported" | "different_metric" | "not_in_published_coverage" | "source_not_published_at_this_level";
+export type TerritoryComparison = { status: "available" | "unavailable"; direction?: "improving" | "worsening" | "changed" | "stable"; delta?: number; percent?: number; from?: string; to?: string; reason?: ComparisonReason };
 type TerritoryInsightDomainId = DomainId;
 
 type TerritoryDomainInsightBase = {
@@ -115,8 +135,10 @@ export type TerritoryDomainInsight = TerritoryDomainInsightBase & ({
   kind: "official_observation" | "official_model" | "derived_metric";
   latest: TerritoryInsightPoint;
   series: TerritoryInsightPoint[];
-  comparison: { status: "available" | "unavailable"; direction?: "improving" | "worsening" | "changed" | "stable"; delta?: number; percent?: number; from?: string; to?: string; reason?: "single_snapshot" | "incomparable_period" };
+  comparison: TerritoryComparison;
   href: string;
+  groups?: Array<{ id: string; title: string; kind: DataKind; source: string; metrics: Array<{ label: string; series: TerritoryInsightPoint[] }> }>;
+  snapshots?: Array<{ family: "Alluvioni" | "Frane"; metricId: string; label: string; latest: TerritoryInsightPoint; series: TerritoryInsightPoint[] }>;
 });
 
 export type TerritoryDomainProfile = {
@@ -130,14 +152,16 @@ export type TerritoryDomainProfile = {
   label?: string;
   latest?: TerritoryInsightPoint;
   series?: TerritoryInsightPoint[];
-  comparison?: Extract<TerritoryDomainInsight, { availability: "available" }>["comparison"];
+  comparison?: TerritoryComparison;
   href: string;
   geometryReferences?: string[];
+  groups?: Extract<TerritoryDomainInsight, { availability: "available" }>["groups"];
+  snapshots?: Extract<TerritoryDomainInsight, { availability: "available" }>["snapshots"];
   detail?: { kind: "soil"; profile: SoilTerritoryProfile } | { kind: "water"; profile: WaterProfile };
 };
 
 export type TerritoryProfile = {
-  territory: SoilTerritoryProfile["territory"];
+  territory: TerritoryIdentity;
   domains: TerritoryDomainProfile[];
 };
 
@@ -231,6 +255,7 @@ type TerritoryInsightsShard = { profiles: Array<{ territoryId: string; domains: 
 async function loadTerritoryInsights(base: string, release: Release, level: "municipality" | "province" | "region", istatCode: string, territoryId: string) {
   const shard = level === "municipality" ? istatCode.slice(0, 3) : "all";
   const logicalPath = `delivery/territory-insights/${level}/${shard}.json`;
+  if (!release.objects.some((item) => item.logicalPath === logicalPath)) return [];
   const payload = await fetchJson<TerritoryInsightsShard>(asset(base, release, logicalPath), 300);
   return payload.profiles.find((profile) => profile.territoryId === territoryId)?.domains ?? [];
 }
@@ -356,15 +381,34 @@ export async function loadHomeDomainSignals(): Promise<HomeDomainSignal[]> {
   return results.map((result, index) => result.status === "fulfilled" ? result.value : fallbacks[index]);
 }
 
-async function loadTerritoryIdentity(base: string, release: Release, level: TerritoryLevel, istatCode: string) {
-  const index = await fetchJson<SoilIndex>(asset(base, release, "delivery/soil/index.json"), 300);
+type TerritoryIdentityIndex = { shards: string[] };
+type TerritoryIdentityShard = { territories: TerritoryIdentity[] };
+
+async function loadTerritoryIdentity(base: string, release: Release, level: TerritoryLevel, istatCode: string): Promise<TerritoryIdentity> {
+  const index = await fetchJson<TerritoryIdentityIndex>(asset(base, release, "delivery/territories/index.json"), 300);
   const territoryId = level === "country" ? `it:country:${istatCode}` : `it:${level}:${istatCode}`;
-  return level === "province"
-    ? profileFromShards(base, release, index.profileShards.filter((path) => path.startsWith("delivery/soil/profiles/province/")), territoryId)
-    : profileFromShard(base, release, `delivery/soil/profiles/${level}/${level === "municipality" ? istatCode.slice(0, 3) : "all"}.json`, territoryId);
+  const shard = level === "municipality" ? istatCode.slice(0, 3) : "all";
+  const logicalPath = `delivery/territories/${level}/${shard}.json`;
+  if (!index.shards.includes(logicalPath)) throw new Error(`Territory identity shard unavailable: ${logicalPath}`);
+  const payload = await fetchJson<TerritoryIdentityShard>(asset(base, release, logicalPath), 300);
+  const identity = payload.territories.find((candidate) => candidate.territoryId === territoryId);
+  if (!identity) throw new Error(`Territory identity absent from shard: ${territoryId}`);
+  return identity;
+}
+
+async function loadSoilTerritoryProfile(base: string, release: Release, level: TerritoryLevel, istatCode: string, territoryId: string): Promise<SoilTerritoryProfile | null> {
+  if (!release.objects.some((item) => item.logicalPath === "delivery/soil/index.json")) return null;
+  const index = await fetchJson<SoilIndex>(asset(base, release, "delivery/soil/index.json"), 300);
+  if (level === "province") {
+    const paths = index.profileShards.filter((path) => path.startsWith("delivery/soil/profiles/province/"));
+    return paths.length ? profileFromShards(base, release, paths, territoryId) : null;
+  }
+  const logicalPath = `delivery/soil/profiles/${level}/${level === "municipality" ? istatCode.slice(0, 3) : "all"}.json`;
+  return index.profileShards.includes(logicalPath) ? profileFromShard(base, release, logicalPath, territoryId) : null;
 }
 
 async function loadWaterTerritoryProfile(base: string, release: Release, level: TerritoryLevel, istatCode: string) {
+  if (!release.objects.some((item) => item.logicalPath === "delivery/water/index.json")) return null;
   const index = await fetchJson<{ profiles?: string[] }>(asset(base, release, "delivery/water/index.json"), 300);
   const logicalPath = `delivery/water/profiles/${level}/${istatCode}.json`;
   return index.profiles?.includes(logicalPath)
@@ -385,12 +429,11 @@ function profileDomainFromInsight(insight: TerritoryDomainInsight, level: Territ
     temporal: levelCapability?.temporal ?? "snapshot", source: insight.source, label: insight.label,
     latest: capability.summary === "numeric" ? insight.latest : undefined,
     series: capability.summary === "numeric" ? insight.series : undefined,
-    comparison: capability.comparison === "not_available" ? { status: "unavailable", reason: "single_snapshot" } : insight.comparison,
-    href: insight.href,
+    comparison: insight.comparison, href: insight.href, groups: insight.groups, snapshots: insight.snapshots,
   };
 }
 
-function waterDomain(profile: WaterProfile | null, level: TerritoryLevel, territoryId: string): TerritoryDomainProfile | null {
+function waterDomain(profile: WaterProfile | null, level: TerritoryLevel, territoryId: string, insight?: TerritoryDomainInsight): TerritoryDomainProfile | null {
   if (!profile) return null;
   const metric = level === "province" ? "water_total_precipitation_mm_zonal_mean" : "water_total_precipitation_mm";
   const latest = profile.latestObservations.find((item) => item.metricId === metric);
@@ -398,13 +441,17 @@ function waterDomain(profile: WaterProfile | null, level: TerritoryLevel, territ
   const capability = DOMAIN_CAPABILITIES.water.levels[level];
   if (!capability) return null;
   const series = profile.historicalSeries.find((item) => item.metricId === metric);
-  const points = series?.values.map(([year, value]) => ({ periodStart: `${year}-01-01`, periodEnd: `${year}-12-31`, value, unit: latest.unit })) ?? [];
+  const points = series?.values.map(([year, value], index) => ({
+    metricId: metric, periodStart: `${year}-01-01`, periodEnd: `${year}-12-31`, value, unit: latest.unit,
+    geometryReference: series?.points?.[index]?.territoryGeometryReference,
+    methodologyReference: series?.points?.[index]?.methodologyReference,
+  })) ?? [];
   const geometryReferences = profile.territoryGeometryReferences ?? series?.points?.flatMap((point) => point.territoryGeometryReference ? [point.territoryGeometryReference] : []) ?? [];
   return {
     id: "water", title: "Acqua", availability: "available", dataKind: capability.dataKind, temporal: capability.temporal,
     source: level === "province" ? "Elaborazione Stato d’Italia su raster ISPRA BIGBANG 10.0" : "Stima modellistica ufficiale ISPRA BIGBANG 10.0",
     label: "Precipitazione totale", latest: { periodStart: `${latest.periodEnd.slice(0, 4)}-01-01`, periodEnd: latest.periodEnd, value: latest.value, unit: latest.unit },
-    series: points, comparison: { status: "unavailable", reason: level === "province" ? "incomparable_period" : "single_snapshot" },
+    series: points, comparison: insight?.availability === "available" ? insight.comparison : series?.comparison ?? { status: "unavailable", reason: "comparison_not_supported" },
     geometryReferences: [...new Set(geometryReferences)],
     href: `/acqua?level=${level === "province" ? "province" : "region"}&metric=${metric}&period=${latest.periodEnd.slice(0, 4)}&territory=${territoryId}#atlante`,
     detail: { kind: "water", profile },
@@ -415,14 +462,15 @@ export async function loadTerritoryProfile(level: TerritoryLevel, istatCode: str
   if (!/^[0-9A-Z]{2,6}$/.test(istatCode)) throw new Error("Codice ISTAT non valido");
   const { base, release } = await activeRelease();
   const identity = await loadTerritoryIdentity(base, release, level, istatCode);
-  const territoryId = identity.territory.territoryId;
-  const [insights, water, provenanceEntries] = await Promise.all([
+  const territoryId = identity.territoryId;
+  const [insights, water, soilProfile, provenanceEntries] = await Promise.all([
     level === "country" ? Promise.resolve([]) : loadTerritoryInsights(base, release, level, istatCode, territoryId),
     loadWaterTerritoryProfile(base, release, level, istatCode),
+    loadSoilTerritoryProfile(base, release, level, istatCode, territoryId),
     Promise.all(["soil", "water", "dissesto", "emissions", "foreste"].map(async (domain) => [domain, await optionalAssetJson(base, release, `delivery/${domain}/provenance.json`)] as const)),
   ]);
   const byId = new Map(insights.map((insight) => [insight.id, profileDomainFromInsight(insight, level)]));
-  const waterDomainProfile = waterDomain(water, level, territoryId);
+  const waterDomainProfile = waterDomain(water, level, territoryId, insights.find((item) => item.id === "water"));
   if (waterDomainProfile) byId.set("water", waterDomainProfile);
   const domains = (Object.keys(DOMAIN_CAPABILITIES) as DomainId[]).map((id) => byId.get(id) ?? {
     id, title: DOMAIN_CAPABILITIES[id].title, availability: "unavailable" as const,
@@ -430,9 +478,9 @@ export async function loadTerritoryProfile(level: TerritoryLevel, istatCode: str
     temporal: DOMAIN_CAPABILITIES[id].levels[level]?.temporal ?? "snapshot", source: DOMAIN_CAPABILITIES[id].primarySource,
     href: `/${id === "risk" ? "dissesto" : id}`,
   });
-  const soil = byId.get("soil");
-  if (soil?.availability === "available") soil.detail = { kind: "soil", profile: identity };
-  return { releaseId: release.releaseId, profile: { territory: identity.territory, domains }, provenance: Object.fromEntries(provenanceEntries) };
+  const soilDomain = byId.get("soil");
+  if (soilDomain?.availability === "available" && soilProfile) soilDomain.detail = { kind: "soil", profile: soilProfile };
+  return { releaseId: release.releaseId, profile: { territory: identity, domains }, provenance: Object.fromEntries(provenanceEntries) };
 }
 
 export async function loadRomeProfile() {
