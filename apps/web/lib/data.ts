@@ -153,7 +153,7 @@ async function soilRelease() {
 
 async function waterRelease() {
   const { base, release } = await activeRelease();
-  const index = await fetchJson<{ maps: string[]; geometry: string[]; provenance: string; profiles?: string[] }>(asset(base, release, "delivery/water/index.json"), 300);
+  const index = await fetchJson<{ maps: string[]; geometry: string[]; mapGeometry?: Record<string, string>; provenance: string; profiles?: string[] }>(asset(base, release, "delivery/water/index.json"), 300);
   return { base, release, index };
 }
 
@@ -259,7 +259,8 @@ export async function loadWaterData(): Promise<WaterData> {
     provenance,
     maps: index.maps.map((path) => parseMap(path, asset(base, release, path))),
     rankings: {},
-    geometry: { region: `${asset(base, release, index.geometry[0])}?release=${release.releaseId}` },
+    geometry: geometryUrls(base, release, index.geometry),
+    mapGeometry: Object.fromEntries(Object.entries(index.mapGeometry ?? {}).map(([mapPath, geometryPath]) => [mapPath, `${asset(base, release, geometryPath)}?release=${release.releaseId}`])),
     profileUrls: Object.fromEntries((index.profiles ?? []).map((path) => [path.replace("delivery/water/profiles/", "").replace(".json", ""), asset(base, release, path)])),
   };
 }

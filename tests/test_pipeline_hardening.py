@@ -418,6 +418,48 @@ def test_map_reference_year_must_have_matching_geometry(tmp_path: Path) -> None:
         ], store=None, affected_families={"soil_delivery"})
 
 
+def test_water_map_requires_its_declared_historical_geometry(tmp_path: Path) -> None:
+    index = tmp_path / "water-index.json"
+    values = tmp_path / "water-map.json"
+    geometry = tmp_path / "istat-province-2006.pmtiles"
+    index.write_text(json.dumps({
+        "geometry": ["delivery/water/geometry/istat-province-2006.pmtiles"],
+        "maps": ["delivery/water/maps/water_total_precipitation_mm_zonal_mean/2006/province.json"],
+        "mapGeometry": {
+            "delivery/water/maps/water_total_precipitation_mm_zonal_mean/2006/province.json": "delivery/water/geometry/istat-province-2006.pmtiles",
+        },
+    }))
+    values.write_text(json.dumps({
+        "territoryLevel": "province", "territoryReferenceDate": "2006-01-01",
+        "territoryGeometryReference": "canonical/territories/reference_year=2006/province.parquet",
+    }))
+    geometry.write_bytes(b"pmtiles")
+    artifacts = [
+        ReleaseArtifact(index, "delivery/water/index.json"),
+        ReleaseArtifact(values, "delivery/water/maps/water_total_precipitation_mm_zonal_mean/2006/province.json"),
+        ReleaseArtifact(geometry, "delivery/water/geometry/istat-province-2006.pmtiles"),
+    ]
+    _validate_delivery_dependencies(artifacts, store=None, affected_families={"water_delivery"})
+
+    other_geometry = tmp_path / "istat-province-2025.pmtiles"
+    other_geometry.write_bytes(b"other-pmtiles")
+    index.write_text(json.dumps({
+        **json.loads(index.read_text()),
+        "geometry": [
+            "delivery/water/geometry/istat-province-2006.pmtiles",
+            "delivery/water/geometry/istat-province-2025.pmtiles",
+        ],
+        "mapGeometry": {
+            "delivery/water/maps/water_total_precipitation_mm_zonal_mean/2006/province.json": "delivery/water/geometry/istat-province-2025.pmtiles",
+        },
+    }))
+    with pytest.raises(ValueError, match="mapped compatible geometry"):
+        _validate_delivery_dependencies([
+            *artifacts,
+            ReleaseArtifact(other_geometry, "delivery/water/geometry/istat-province-2025.pmtiles"),
+        ], store=None, affected_families={"water_delivery"})
+
+
 def test_boundary_dependencies_are_reference_year_specific() -> None:
     current_delivery, current_geometry = _data_downstream_families({"boundaries"}, {2025})
     assert current_delivery == {"soil_delivery", "water_delivery"}
