@@ -1,109 +1,41 @@
 import Link from "next/link";
-import type { Observation, TerritoryDomainInsight, TerritoryProfileData } from "../lib/data";
-import { PageSidebar } from "./page-sidebar";
+import type { Observation, SoilTerritoryProfile, TerritoryDomainProfile, TerritoryProfile, WaterProfile } from "../lib/data";
 
 const labels: Record<string, string> = {
-  soil_net_consumption_hectares: "Incremento netto di suolo consumato",
-  soil_gross_consumption_hectares: "Incremento lordo di suolo consumato",
-  soil_restoration_hectares: "Ripristino di suolo",
-  soil_consumed_hectares: "Suolo consumato",
-  soil_consumed_share: "Suolo consumato",
+  soil_net_consumption_hectares: "Incremento netto di suolo consumato", soil_gross_consumption_hectares: "Incremento lordo di suolo consumato", soil_restoration_hectares: "Ripristino di suolo", soil_consumed_hectares: "Suolo consumato", soil_consumed_share: "Quota di suolo consumato",
+  water_total_precipitation_mm: "Precipitazione totale", water_total_precipitation_mm_zonal_mean: "Precipitazione totale", water_actual_evapotranspiration_mm: "Evapotraspirazione effettiva", water_actual_evapotranspiration_mm_zonal_mean: "Evapotraspirazione effettiva", water_internal_flow_mm: "Risorsa idrica rinnovabile", water_internal_flow_mm_zonal_mean: "Risorsa idrica rinnovabile", water_aquifer_recharge_mm: "Ricarica acquiferi", water_aquifer_recharge_mm_zonal_mean: "Ricarica acquiferi", water_surface_runoff_mm: "Ruscellamento superficiale", water_surface_runoff_mm_zonal_mean: "Ruscellamento superficiale",
 };
-
 const levelLabels: Record<string, string> = { municipality: "Comune", province: "Provincia", region: "Regione", country: "Italia" };
-type Analytics = { changes?: Record<string, { value?: number | null; status?: string | null; reason?: string | null }>; trend?: { status?: string | null; direction?: string | null; slope_per_year?: number | null; reason?: string | null }; benchmarks?: Record<string, { percentile?: number | null; percentileStatus?: string | null; rank?: number | null; rankStatus?: string | null }> };
+type Analytics = { changes?: Record<string, { value?: number | null; status?: string | null }>; trend?: { status?: string | null; direction?: string | null }; benchmarks?: Record<string, { percentileStatus?: string | null; rankStatus?: string | null }> };
 
-function period(start: string, end: string) {
-  const from = start.slice(0, 4);
-  const to = end.slice(0, 4);
-  return from === to ? from : `${from}–${to}`;
-}
+function value(observation: Observation | { value: number; unit: string }) { return `${observation.value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ${observation.unit}`; }
+function period(start: string, end: string) { return start.slice(0, 4) === end.slice(0, 4) ? start.slice(0, 4) : `${start.slice(0, 4)}–${end.slice(0, 4)}`; }
+function kind(domain: TerritoryDomainProfile) { return domain.dataKind === "official_model" ? "Stima modellistica ufficiale" : domain.dataKind === "derived_metric" ? "Elaborazione derivata" : domain.dataKind === "mixed" ? "Fonti e metodi distinti" : "Osservazione ufficiale"; }
+function temporal(domain: TerritoryDomainProfile) { return ({ annual_series: "Serie annuale", interval_series: "Serie per intervalli pubblicati", sparse_series: "Annualità pubblicate non continue", snapshot: "Snapshot", change_period: "Periodo di cambiamento", mixed: "Prodotti distinti" } as const)[domain.temporal]; }
+function unavailable(domain: TerritoryDomainProfile) { return domain.reason === "not_in_published_coverage" ? "Territorio fuori dalla copertura pubblicata" : "Fonte non pubblicata a questo livello"; }
 
-function value(observation: Observation) {
-  return `${observation.value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ${observation.unit}`;
-}
-
-function availability(change?: { value?: number | null; status?: string | null; reason?: string | null }) {
-  if (change?.status === "available" && change.value !== undefined && change.value !== null) return `${change.value > 0 ? "+" : ""}${change.value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ha`;
-  if (change?.reason === "missing_required_period") return "Non disponibile: manca il periodo necessario per il confronto";
-  return "Non disponibile";
-}
-
-function trendLabel(direction?: string | null) {
-  if (direction === "increasing") return "in aumento";
-  if (direction === "decreasing") return "in diminuzione";
-  if (direction === "flat") return "stabile";
-  return "non stimabile";
-}
-
-function isAvailable(domain: TerritoryDomainInsight): domain is Extract<TerritoryDomainInsight, { availability: "available" }> {
-  return domain.availability === "available";
-}
-
-function insightPeriod(start: string, end: string) {
-  return start.slice(0, 4) === end.slice(0, 4) ? start.slice(0, 4) : `${start.slice(0, 4)}–${end.slice(0, 4)}`;
-}
-
-function insightStatus(domain: TerritoryDomainInsight) {
-  if (!isAvailable(domain) || domain.comparison.status !== "available") return "Trend non disponibile";
-  if (domain.comparison.direction === "improving") return "Pressione in diminuzione";
-  if (domain.comparison.direction === "worsening") return "Pressione in aumento";
-  if (domain.comparison.direction === "changed") return "Variazione osservata";
-  return "Stabile";
-}
-
-function InsightChart({ domain }: { domain: TerritoryDomainInsight }) {
-  if (!isAvailable(domain) || domain.series.length < 2) return <p className="territory-domain-chart-empty">Snapshot: nessuna serie comparabile.</p>;
-  const values = domain.series.map((point) => point.value);
-  const minimum = Math.min(...values);
-  const span = Math.max(...values) - minimum || 1;
-  const points = domain.series.map((point, index) => `${8 + index / Math.max(1, domain.series.length - 1) * 152},${58 - (point.value - minimum) / span * 46}`).join(" ");
-  return <figure className="territory-domain-chart"><svg viewBox="0 0 168 66" role="img" aria-label={`Andamento disponibile: ${domain.series.map((point) => `${insightPeriod(point.periodStart, point.periodEnd)} ${point.value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ${point.unit}`).join(", ")}`}><path d="M8 58H160" className="chart-axis" /><polyline points={points} /><circle cx={points.split(" ").at(-1)?.split(",")[0]} cy={points.split(" ").at(-1)?.split(",")[1]} r="3.5" /></svg><figcaption><span>{insightPeriod(domain.series[0].periodStart, domain.series[0].periodEnd)}</span><span>{insightPeriod(domain.latest.periodStart, domain.latest.periodEnd)}</span></figcaption></figure>;
-}
-
-export function TerritoryProfile({ profile, insights }: { profile: TerritoryProfileData; insights: TerritoryDomainInsight[] }) {
+function SoilDetail({ profile }: { profile: SoilTerritoryProfile }) {
   const net = profile.latestObservations.find((item) => item.metricId === "soil_net_consumption_hectares");
-  const netSeries = profile.historicalSeries.find((item) => item.metricId === "soil_net_consumption_hectares");
+  const history = profile.historicalSeries.find((item) => item.metricId === "soil_net_consumption_hectares");
   const analytics = profile.derivedMetrics.find((item) => item.metricId === "soil_net_consumption_hectares") as Analytics | undefined;
+  return <div className="territory-domain-detail-grid"><section><p className="eyebrow">Indicatore principale</p><h3>Incremento netto</h3>{net ? <><strong>{value(net)}</strong><p>{period(net.periodStart, net.periodEnd)} · osservazione ufficiale.</p></> : <p>Non pubblicato per questo territorio.</p>}</section><section><p className="eyebrow">Analytics pubblicate</p><h3>Confronti ammessi</h3><dl>{[["previous", "Periodo precedente"], ["fiveYears", "Cinque anni"], ["tenYears", "Dieci anni"]].map(([id, label]) => <div key={id}><dt>{label}</dt><dd>{analytics?.changes?.[id]?.status === "available" ? `${analytics.changes[id].value?.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ha` : "Non disponibile"}</dd></div>)}<div><dt>Trend</dt><dd>{analytics?.trend?.status === "available" ? analytics.trend.direction : "Non stimabile"}</dd></div></dl></section><section className="territory-domain-series"><p className="eyebrow">Serie ufficiale</p><h3>Storico pubblicato</h3>{history ? <div className="table-scroll"><table><caption>Incremento netto di suolo consumato</caption><thead><tr><th>Periodo</th><th>Valore</th></tr></thead><tbody>{history.values.map(([id, start, end, amount, unit]) => <tr key={id}><th scope="row">{period(start, end)}</th><td>{amount.toLocaleString("it-IT", { maximumFractionDigits: 1 })} {unit}</td></tr>)}</tbody></table></div> : <p>Nessuna serie pubblicata.</p>}</section></div>;
+}
+
+function WaterDetail({ profile, province }: { profile: WaterProfile; province: boolean }) {
+  return <div className="territory-water-detail"><p>{province ? "Elaborazione Stato d’Italia su raster ISPRA BIGBANG 10.0 · media zonale pesata per area. Non è un dato provinciale ufficiale ISPRA." : "Stime modellistiche annuali ufficiali ISPRA BIGBANG 10.0."}</p>{province && <p className="territory-detail-note">Nessun delta, trend, interpolazione o crosswalk è calcolato fra geometry reference differenti.</p>}<div className="table-scroll"><table><caption>Metriche idriche disponibili</caption><thead><tr><th>Indicatore</th><th>Periodo</th><th>Valore</th></tr></thead><tbody>{profile.latestObservations.map((item) => <tr key={item.metricId}><th scope="row">{labels[item.metricId] ?? item.metricId}</th><td>{item.periodEnd.slice(0, 4)}</td><td>{value(item)}</td></tr>)}</tbody></table></div><details><summary>Annualità pubblicate e geometrie</summary>{profile.historicalSeries.map((series) => <section key={series.metricId}><h4>{labels[series.metricId] ?? series.metricId}</h4><div className="table-scroll"><table><thead><tr><th>Anno</th><th>Valore</th>{province && <th>Geometria</th>}</tr></thead><tbody>{series.values.map(([year, amount], index) => <tr key={year}><th scope="row">{year}</th><td>{amount.toLocaleString("it-IT", { maximumFractionDigits: 1 })} mm</td>{province && <td>{series.points?.[index]?.territoryGeometryReference ?? "Non dichiarata"}</td>}</tr>)}</tbody></table></div></section>)}</details></div>;
+}
+
+function DomainDetail({ domain, level }: { domain: TerritoryDomainProfile; level: string }) {
+  if (domain.detail?.kind === "soil") return <SoilDetail profile={domain.detail.profile} />;
+  if (domain.detail?.kind === "water") return <WaterDetail profile={domain.detail.profile} province={level === "province"} />;
+  if (domain.id === "emissions") return <p>La disaggregazione ISPRA è per inquinante e attività SNAP: questo profilo non somma combinazioni, non crea un totale provinciale e non rappresenta qualità dell’aria.</p>;
+  if (domain.id === "risk") return <p>Snapshot ISPRA IdroGEO: alluvioni 2020 e frane 2024 sono letture distinte. Non viene calcolato un trend tra indicatori o anni diversi.</p>;
+  if (domain.id === "forests") return <p>INFC ufficiale e prodotti Copernicus derivati restano separati per fonte, metrica e geometria. Un confronto è ammesso solo dentro lo stesso prodotto compatibile.</p>;
+  return <p>Consulta l’esploratore per il dettaglio pubblicato.</p>;
+}
+
+export function TerritoryProfile({ profile }: { profile: TerritoryProfile }) {
   const parents = profile.territory.parents.map((parent) => parent.name).join(" · ");
-  const national = analytics?.benchmarks?.national;
-
-  return <section className="territory-site-layout">
-    <PageSidebar eyebrow={levelLabels[profile.territory.level] ?? profile.territory.level} title={profile.territory.name}>
-      <nav className="page-sidebar-nav" aria-label="Sezioni profilo"><a href="#domini">Domini</a><a href="#indicatore">Approfondimento Suolo</a><a href="#storico">Storico Suolo</a><a href="#osservazioni">Osservazioni Suolo</a><Link href="/suolo#mappa">Torna alla mappa →</Link></nav>
-      {parents && <section className="sidebar-section"><h3>Contesto</h3><p className="sidebar-context"><strong>{parents}</strong>Confini: {profile.territory.referenceDate}.</p></section>}
-    </PageSidebar>
-    <div className="territory-site-content">
-    <section className="profile-head">
-      <p className="eyebrow">{levelLabels[profile.territory.level] ?? profile.territory.level} · ISTAT {profile.territory.istatCode}</p>
-      <h1>{profile.territory.name}</h1>
-      {parents && <p className="profile-parent">{parents}</p>}
-      <p className="muted">Confini di riferimento: {profile.territory.referenceDate}</p>
-    </section>
-
-    <section id="domini" className="territory-domain-summary" tabIndex={-1} aria-labelledby="territory-domains-title">
-      <header><div><p className="eyebrow">Quadro del territorio</p><h2 id="territory-domains-title">Dati disponibili per questa zona</h2></div><p>Stessa entità territoriale. Nessuna somma, conversione di scala o dato assente trasformato in zero.</p></header>
-      <div className="territory-domain-list">{insights.map((domain) => isAvailable(domain) ? <Link key={domain.id} href={domain.href} className={`territory-domain-signal territory-domain-signal--${domain.id}`}><header><span>{domain.title}</span><b>{insightStatus(domain)}</b></header><strong>{domain.latest.value.toLocaleString("it-IT", { maximumFractionDigits: 1 })} <small>{domain.latest.unit}</small></strong><p>{domain.label}</p><InsightChart domain={domain} /><small>{insightPeriod(domain.latest.periodStart, domain.latest.periodEnd)} · {domain.source}</small><em>{domain.comparison.status === "available" && domain.comparison.delta !== undefined ? `${domain.comparison.delta > 0 ? "+" : ""}${domain.comparison.delta.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ${domain.latest.unit}${domain.comparison.percent !== undefined ? ` (${domain.comparison.percent > 0 ? "+" : ""}${domain.comparison.percent.toLocaleString("it-IT", { maximumFractionDigits: 1 })}%)` : ""} rispetto al rilievo precedente` : "Nessun confronto automatico"}</em><b className="territory-domain-open">Apri dominio <span aria-hidden="true">→</span></b></Link> : <article key={domain.id} className={`territory-domain-signal territory-domain-signal--${domain.id} is-unavailable`}><header><span>{domain.title}</span></header><h3>Dato non pubblicato</h3><p>{domain.reason === "source_not_published_at_this_level" ? "La fonte non pubblica questo dominio a questa scala." : "Nessun dato per questa zona nella copertura pubblicata."}</p></article>)}</div>
-    </section>
-
-    {net ? <section id="indicatore" className="profile-lead" aria-label="Approfondimento Suolo" tabIndex={-1}><div><p className="eyebrow">Approfondimento Suolo · dato ufficiale ISPRA / SNPA</p><h2>Ultimo incremento netto disponibile</h2><strong>{value(net)}</strong><span>{period(net.periodStart, net.periodEnd)}</span></div><p>È un valore osservato. Cause, responsabilità e valutazioni richiedono contesto ulteriore.</p></section> : <section id="indicatore" className="profile-lead" tabIndex={-1}><p className="eyebrow">Approfondimento Suolo · dato ufficiale</p><h2>Incremento netto non pubblicato per questo territorio</h2></section>}
-
-    <section className="profile-grid">
-      <div className="profile-card"><p className="eyebrow">Lettura della serie</p><h2>Variazioni e trend</h2>{analytics ? <dl>
-        <dt>Rispetto al periodo precedente</dt><dd>{availability(analytics.changes?.previous)}</dd>
-        <dt>Rispetto a 5 anni</dt><dd>{availability(analytics.changes?.fiveYears)}</dd>
-        <dt>Rispetto a 10 anni</dt><dd>{availability(analytics.changes?.tenYears)}</dd>
-        <dt>Trend stimato</dt><dd>{trendLabel(analytics.trend?.direction)}{analytics.trend?.status === "available" && analytics.trend.slope_per_year !== undefined && analytics.trend.slope_per_year !== null ? ` · ${analytics.trend.slope_per_year.toLocaleString("it-IT", { maximumFractionDigits: 1 })} ha/anno` : ""}</dd>
-      </dl> : <p className="state-copy">Elaborazioni non pubblicate per questo profilo.</p>}</div>
-      <div className="profile-card"><p className="eyebrow">Confronto nazionale</p><h2>Posizione nel periodo</h2>{national?.rankStatus === "available" || national?.percentileStatus === "available" ? <dl>
-        <dt>Posizione</dt><dd>{national.rankStatus === "available" ? national.rank ?? "—" : "Non disponibile"}</dd>
-        <dt>Percentile</dt><dd>{national.percentileStatus === "available" && national.percentile !== undefined && national.percentile !== null ? national.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : "Non disponibile"}</dd>
-      </dl> : <p className="state-copy">Confronto non pubblicato per questo territorio o livello.</p>}<p className="card-note">Posizione e percentile confrontano solo territori nello stesso livello e periodo.</p></div>
-    </section>
-
-    <section id="storico" className="history" tabIndex={-1}><div className="section-heading"><div><p className="eyebrow">Serie ufficiale</p><h2>Storico dell’incremento netto</h2></div><p>Ogni riga è un periodo pubblicato; non vengono stimati anni mancanti.</p></div>{netSeries ? <div className="table-scroll"><table><thead><tr><th>Periodo</th><th>Valore</th><th>Unità</th></tr></thead><tbody>{netSeries.values.map(([id, start, end, amount, unit]) => <tr key={id}><th scope="row">{period(start, end)}</th><td>{amount.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td><td>{unit}</td></tr>)}</tbody></table></div> : <p className="state-copy">Nessuna serie ufficiale pubblicata.</p>}</section>
-
-    <section id="osservazioni" className="history" tabIndex={-1}><div className="section-heading"><div><p className="eyebrow">Ultime osservazioni</p><h2>Altri indicatori ufficiali</h2></div></div><div className="table-scroll"><table><thead><tr><th>Indicatore</th><th>Periodo</th><th>Valore</th></tr></thead><tbody>{profile.latestObservations.map((item) => <tr key={item.metricId}><th scope="row">{labels[item.metricId] ?? item.metricId}</th><td>{period(item.periodStart, item.periodEnd)}</td><td>{value(item)}</td></tr>)}</tbody></table></div></section>
-    </div>
-  </section>;
+  const available = profile.domains.filter((domain) => domain.availability === "available");
+  return <section className="territory-site-layout"><div className="territory-site-content"><header className="profile-head"><p className="eyebrow">{levelLabels[profile.territory.level]} · ISTAT {profile.territory.istatCode}</p><h1>{profile.territory.name}</h1>{parents && <p className="profile-parent">{parents}</p>}<p className="muted">Confini di riferimento: {profile.territory.referenceDate}</p></header><nav className="territory-profile-nav" aria-label="Sezioni del profilo"><a href="#domini">Quadro</a><a href="#dettagli">Dettagli</a>{available.map((domain) => <Link key={domain.id} href={domain.href}>Apri {domain.title}</Link>)}</nav><section id="domini" className="territory-domain-summary" tabIndex={-1} aria-labelledby="territory-domains-title"><header><div><p className="eyebrow">Quadro del territorio</p><h2 id="territory-domains-title">Copertura e natura dei dati</h2></div><p>I domini restano indipendenti: nessuna somma tra fonti, periodo inventato o valore assente trasformato in zero.</p></header><div className="territory-domain-list">{profile.domains.map((domain) => <article key={domain.id} className={`territory-domain-signal territory-domain-signal--${domain.id}${domain.availability === "unavailable" ? " is-unavailable" : ""}`}><header><span>{domain.title}</span><b>{temporal(domain)}</b></header>{domain.availability === "available" ? <><p className="territory-domain-kind">{kind(domain)}</p>{domain.latest ? <strong>{value(domain.latest)}</strong> : <h3>Disponibile nell’esploratore</h3>}<p>{domain.label ?? domain.source}</p><small>{domain.latest ? period(domain.latest.periodStart, domain.latest.periodEnd) : "Copertura pubblicata"} · {domain.source}</small><Link className="territory-domain-open" href={domain.href}>Apri {domain.title} <span aria-hidden="true">→</span></Link></> : <><h3>Non disponibile</h3><p>{unavailable(domain)}</p><small>{domain.source}</small></>}</article>)}</div></section><section id="dettagli" className="territory-domain-details" tabIndex={-1} aria-labelledby="territory-details-title"><header><p className="eyebrow">Dettagli</p><h2 id="territory-details-title">Letture per dominio</h2></header>{available.map((domain) => <details key={domain.id} className={`territory-domain-disclosure territory-domain-disclosure--${domain.id}`} open={domain.id === "soil" || domain.id === "water"}><summary><span>{domain.title}</span><small>{kind(domain)} · {temporal(domain)}</small></summary><div><DomainDetail domain={domain} level={profile.territory.level} /><Link href={domain.href}>Apri esploratore {domain.title} →</Link></div></details>)}</section></div></section>;
 }
