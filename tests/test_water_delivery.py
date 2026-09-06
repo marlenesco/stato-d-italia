@@ -75,6 +75,10 @@ def test_water_delivery_keeps_official_regions_and_exposes_derived_provinces(tmp
     assert "2021" not in {payload["periodEnd"][:4] for payload in province}
     assert all(payload["officialStatus"] == "derived_by_stato_italia" for payload in province)
     assert {payload["territoryReferenceDate"] for payload in province if payload["periodEnd"].startswith("2006")} == {"2006-01-01"}
+    assert {payload["territoryGeometryReference"] for payload in province} == {
+        "canonical/territories/reference_year=2006/province.parquet",
+        "canonical/territories/reference_year=2025/province.parquet",
+    }
     assert all(index["mapGeometry"][logical] in index["geometry"] for logical in index["maps"])
     assert {index["mapGeometry"][logical] for logical in index["maps"] if "/province.json" in logical} == {
         "delivery/water/geometry/istat-province-2006.pmtiles",

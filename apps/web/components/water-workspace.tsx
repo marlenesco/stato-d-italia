@@ -73,13 +73,18 @@ export function WaterWorkspace({ data, overview }: { data: WaterData; overview: 
 
   const levelLabel = level === "province" ? "Province" : "Regioni";
   const derived = level === "province";
+  const geometryUrl = selected
+    ? level === "region"
+      ? data.mapGeometry?.[selected.logicalPath] ?? data.geometry.region
+      : data.mapGeometry?.[selected.logicalPath]
+    : undefined;
   return <section className="water-site-layout explorer-layout" aria-label="Atlante idrico">
     <div className="water-site-content">
       <WaterOverview overview={overview} />
       <ExplorerToolbar label="Misura" value={metric} onChange={changeMetric} items={metrics.map((item) => ({ id: level === "region" ? item.official : item.derived, label: item.label, meta: "mm" }))} levels={[{ id: "region", label: "Regioni" }, { id: "province", label: "Province" }]} level={level} onLevelChange={changeLevel} context={`${selected?.periodKey ?? "—"} · ${levelLabel} italiane`} />
       <section id="atlante" className="water-workspace map-workspace-v2" tabIndex={-1} aria-label={`Mappa ${level === "province" ? "provinciale" : "regionale"}`}>
         {selected && <TimelineControl periods={years} value={selected.periodKey} onChange={(period) => update(level, metric, period, territory?.id)} />}
-        {selected ? <WaterMap option={selected} metricLabel={labelForMetric(metric)} geometryUrl={data.mapGeometry?.[selected.logicalPath]} territoryLevel={level} derived={derived} selectedTerritoryId={territory?.id} seriesOptions={available} onTerritorySelect={selectTerritory} /> : <p role="alert">Metrica o anno non presenti nella release attiva.</p>}
+        {selected ? <WaterMap option={selected} metricLabel={labelForMetric(metric)} geometryUrl={geometryUrl} territoryLevel={level} derived={derived} selectedTerritoryId={territory?.id} seriesOptions={available} onTerritorySelect={selectTerritory} /> : <p role="alert">Metrica o anno non presenti nella release attiva.</p>}
         <div className="map-reading-panel"><p>{derived ? "Elaborazione Stato d’Italia su raster ISPRA BIGBANG 10.0 · media zonale pesata per area. Non è dato ufficiale ISPRA." : "Stime ufficiali modellistiche BIGBANG 10.0. Nessun ranking “migliore/peggiore”."}</p></div>
         <section className="water-limit"><p className="eyebrow">Come leggere</p><p>{derived ? "Valori provinciali derivati da Stato d’Italia. Timeline con sole annualità e geometrie territoriali effettivamente disponibili." : "Valori BIGBANG 10.0: stime modellistiche annuali ufficiali. Scala colori relativa a metrica e anno selezionati."}</p></section>
         <details className="provenance"><summary>Fonte e metodo · release {data.releaseId}</summary><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
