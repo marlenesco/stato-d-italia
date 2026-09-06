@@ -22,13 +22,24 @@ def test_water_frontend_distinguishes_official_regions_and_derived_provinces() -
     assert "function geometricallyComparable" in series
     assert "Geometrie territoriali differenti: confronto non comparabile" in series
     assert "DOMAIN_CAPABILITIES" in capabilities
-    assert "same_metric_unit_geometry" in capabilities
+    assert "same_metric_unit_method_geometry" in capabilities
+    assert 'rankingPolicy: "allowed_when_published"' in capabilities
     assert 'province: { dataKind: "derived_metric", temporal: "sparse_series" }' in capabilities
     assert all(f"{domain}: {{" in capabilities for domain in ("soil", "water", "forests", "emissions", "risk"))
     assert all(mode in capabilities for mode in ("annual_series", "interval_series", "sparse_series", "snapshot", "mixed"))
     assert "Copertura e natura dei dati" in profile
     assert "Elaborazione Stato d’Italia su raster ISPRA BIGBANG 10.0" in profile
-    assert "alluvioni 2020 e frane 2024 sono letture distinte" in profile
+    assert "Alluvioni 2020 e Frane 2024 non sono una serie" in profile
     assert "async function loadTerritoryIdentity" in loader
+    assert '"delivery/territories/index.json"' in loader
+    assert "TerritoryIdentity" in loader
+    identity_loader = loader.split("async function loadTerritoryIdentity", 1)[1].split("async function loadSoilTerritoryProfile", 1)[0]
+    assert "delivery/soil" not in identity_loader
+    assert "loadSoilTerritoryProfile" in loader
     assert "loadWaterTerritoryProfile" in loader
     assert "TerritoryProfile" in loader
+    assert "Alluvioni" in profile
+    assert "Frane" in profile
+    assert "function ForestDetail" in profile
+    assert "group.metrics.map" in profile
+    assert "Confronti, delta e trend sono ammessi solo" in profile

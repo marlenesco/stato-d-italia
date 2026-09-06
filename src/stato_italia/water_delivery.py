@@ -9,6 +9,7 @@ import pandas as pd
 from .bigbang_raster_poc import METRIC_SPECS
 from .registry import load_source
 from .tiles import build_pmtiles, is_readable_pmtiles
+from .territory_insights_delivery import comparison_for_series
 
 DELIVERY_ALGORITHM_VERSION = "water-delivery-v4"
 _PROVINCE_GEOMETRY_REFERENCE = re.compile(
@@ -130,19 +131,42 @@ def _profiles(table: pd.DataFrame, destination: Path, release_id: str, *, derive
         territory = latest.iloc[0]
         level = str(territory.territory_level)
         logical = f"delivery/water/profiles/{level}/{territory_id.rsplit(':', 1)[-1]}.json"
+        historical_series = []
+        for metric, series in rows.groupby(metric_column):
+            sorted_series = series.sort_values("reference_year")
+            points = []
+            comparison_points = []
+            for row in sorted_series.itertuples():
+                year = int(row.reference_year)
+                geometry_reference = _geometry_reference(row.territory_geometry_reference)[0] if derived else f"canonical/territories/reference_year={str(row.territory_version_id).rsplit('@', 1)[-1][:4]}/{row.territory_level}.parquet"
+                methodology = "|".join(
+                    str(value) for value in (
+                        getattr(row, "methodology_version", None), getattr(row, "algorithm_version", None),
+                    ) if value is not None and str(value) != "nan"
+                ) or None
+                points.append({
+                    "referenceYear": year, "value": float(row.value_decimal),
+                    "territoryGeometryReference": geometry_reference,
+                    "territoryVersionId": row.territory_version_id,
+                    **({"methodologyReference": methodology} if methodology else {}),
+                })
+                comparison_points.append({
+                    "metricId": getattr(row, metric_column), "periodStart": f"{year}-01-01", "periodEnd": f"{year}-12-31",
+                    "value": float(row.value_decimal), "unit": row.unit_ucum,
+                    "geometryReference": geometry_reference,
+                    **({"methodologyReference": methodology} if methodology else {}),
+                })
+            historical_series.append({
+                "metricId": metric,
+                "values": [[int(row.reference_year), float(row.value_decimal)] for row in sorted_series.itertuples()],
+                "points": points,
+                "comparison": comparison_for_series(comparison_points, "context_only", "same_metric_unit_method_geometry"),
+            })
         payload = {
             "schemaVersion": 1, "releaseId": release_id, "theme": "water",
             "territory": {"territoryId": territory_id, "territoryVersionId": territory.territory_version_id, "level": level},
             "latestObservations": [{"metricId": getattr(row, metric_column), "periodEnd": f"{row.reference_year}-12-31" if derived else row.period_end, "value": float(row.value_decimal), "unit": row.unit_ucum} for row in latest.itertuples()],
-            "historicalSeries": [{
-                "metricId": metric,
-                "values": [[int(row.reference_year), float(row.value_decimal)] for row in series.sort_values("reference_year").itertuples()],
-                **({"points": [{
-                    "referenceYear": int(row.reference_year), "value": float(row.value_decimal),
-                    "territoryGeometryReference": _geometry_reference(row.territory_geometry_reference)[0],
-                    "territoryVersionId": row.territory_version_id,
-                } for row in series.sort_values("reference_year").itertuples()]} if derived else {}),
-            } for metric, series in rows.groupby(metric_column)],
+            "historicalSeries": historical_series,
             "provenanceRef": "delivery/water/provenance.json",
         }
         if derived:
