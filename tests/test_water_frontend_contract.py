@@ -6,6 +6,8 @@ def test_water_frontend_distinguishes_official_regions_and_derived_provinces() -
     workspace = (repository / "apps/web/components/water-workspace.tsx").read_text()
     loader = (repository / "apps/web/lib/data.ts").read_text()
     series = (repository / "apps/web/components/territory-map-series.tsx").read_text()
+    capabilities = (repository / "apps/web/lib/domain-capabilities.ts").read_text()
+    profile = (repository / "apps/web/components/territory-profile.tsx").read_text()
 
     assert 'type WaterLevel = "region" | "province"' in workspace
     assert 'official: "water_total_precipitation_mm"' in workspace
@@ -19,3 +21,14 @@ def test_water_frontend_distinguishes_official_regions_and_derived_provinces() -
     assert "territoryGeometryReference?: string" in series
     assert "function geometricallyComparable" in series
     assert "Geometrie territoriali differenti: confronto non comparabile" in series
+    assert "DOMAIN_CAPABILITIES" in capabilities
+    assert "same_metric_unit_geometry" in capabilities
+    assert 'province: { dataKind: "derived_metric", temporal: "sparse_series" }' in capabilities
+    assert all(f"{domain}: {{" in capabilities for domain in ("soil", "water", "forests", "emissions", "risk"))
+    assert all(mode in capabilities for mode in ("annual_series", "interval_series", "sparse_series", "snapshot", "mixed"))
+    assert "Copertura e natura dei dati" in profile
+    assert "Elaborazione Stato d’Italia su raster ISPRA BIGBANG 10.0" in profile
+    assert "alluvioni 2020 e frane 2024 sono letture distinte" in profile
+    assert "async function loadTerritoryIdentity" in loader
+    assert "loadWaterTerritoryProfile" in loader
+    assert "TerritoryProfile" in loader

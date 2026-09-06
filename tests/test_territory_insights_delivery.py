@@ -41,6 +41,18 @@ def test_delivery_keeps_domain_series_and_declares_snapshot(tmp_path) -> None:
     assert domains["risk"]["comparison"]["reason"] == "single_snapshot"
     assert domains["emissions"]["comparison"]["percent"] == -20
 
+    municipality = json.loads((tmp_path / "delivery" / "territory-insights" / "municipality" / "057.json").read_text())["profiles"][0]
+    municipality_domains = {item["id"]: item for item in municipality["domains"]}
+    assert municipality_domains["water"] == {
+        "id": "water", "title": "Acqua", "availability": "unavailable", "reason": "source_not_published_at_this_level",
+    }
+    assert municipality_domains["emissions"]["reason"] == "source_not_published_at_this_level"
+
+    region = json.loads((tmp_path / "delivery" / "territory-insights" / "region" / "all.json").read_text())["profiles"][0]
+    region_domains = {item["id"]: item for item in region["domains"]}
+    assert region_domains["emissions"]["reason"] == "source_not_published_at_this_level"
+    assert region_domains["water"]["reason"] == "not_in_published_coverage"
+
     for path in paths.values():
         path.touch()
     reused = generate_territory_insights_delivery(
