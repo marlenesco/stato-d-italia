@@ -240,6 +240,7 @@ def scoped_source_state(state: dict[str, Any] | None, scope: str) -> dict[str, A
 
 def check_persisted_sources(
     state: dict[str, Any] | None, *, scope: str, stage_dir: Path | None = None,
+    families: set[str] | None = None,
 ) -> dict[str, Any]:
     """GET-check active source state without relying on HEAD or local cache.
 
@@ -253,7 +254,11 @@ def check_persisted_sources(
             "reason": "no_persisted_source_state", "sources": [],
         }
     state = _normalised_state(state)
-    entries = [entry for entry in state["sources"] if source_scope(str(entry["source_id"])) == scope]
+    entries = [
+        entry for entry in state["sources"]
+        if source_scope(str(entry["source_id"])) == scope
+        and (families is None or source_family(str(entry["source_id"])) in families)
+    ]
     if not entries:
         return {
             "scope": scope, "sourceChecks": 0, "sourcesChanged": 0,

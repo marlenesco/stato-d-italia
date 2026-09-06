@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,6 +42,74 @@ from .water_delivery import generate_water_delivery
 from .tiles import build_pmtiles, is_readable_pmtiles
 from .territory_insights_delivery import generate_territory_insights_delivery
 from .territory_delivery import generate_territory_delivery
+
+
+@dataclass(frozen=True)
+class DomainProcessing:
+    """Ownership and release dependencies for an independently processable domain."""
+
+    name: str
+    scope: str
+    source_families: frozenset[str]
+    shared_downstream: frozenset[str]
+    processor: str
+
+
+# This is intentionally a registry rather than five pipeline implementations.
+# Only Forests is enabled in D1.2; the remaining entries reserve the same
+# contract for later domain processors without allowing an unsafe broad run.
+DOMAIN_PROCESSING: dict[str, DomainProcessing] = {
+    "soil": DomainProcessing("soil", "data", frozenset({"soil"}), frozenset({"territory_insights"}), "pending"),
+    "water": DomainProcessing("water", "data", frozenset({"water"}), frozenset({"territory_insights"}), "pending"),
+    "emissions": DomainProcessing("emissions", "data", frozenset({"emissions"}), frozenset({"territory_insights"}), "pending"),
+    "dissesto": DomainProcessing("dissesto", "data", frozenset({"dissesto"}), frozenset({"territory_insights"}), "pending"),
+    "forests": DomainProcessing(
+        "forests", "geospatial", frozenset({"infc", "copernicus"}),
+        frozenset({"territory_insights"}), "geospatial_forests",
+    ),
+}
+
+
+def _domain_processing(args: argparse.Namespace) -> DomainProcessing | None:
+    domain = getattr(args, "domain", None)
+    if domain is None:
+        return None
+    spec = DOMAIN_PROCESSING[domain]
+    requested_scope = getattr(args, "scope", None)
+    if requested_scope not in {None, "all", spec.scope}:
+        raise ValueError(f"Domain {domain} belongs to {spec.scope} scope, not {requested_scope}")
+    if spec.processor == "pending":
+        raise ValueError(f"Domain-scoped processing for {domain} is not implemented yet")
+    return spec
+
+
+def _execution_scope(args: argparse.Namespace, domain: DomainProcessing | None) -> str:
+    return domain.scope if domain is not None else str(args.scope)
+
+
+def _validate_domain_plan(domain: DomainProcessing) -> None:
+    unexpected = {
+        source_family(str(entry["source_id"]))
+        for entry in planned_entries()
+    } - set(domain.source_families)
+    if unexpected:
+        raise ValueError(f"Ingestion plan contains sources outside {domain.name}: {sorted(unexpected)}")
+
+
+def _current_ref_name() -> str | None:
+    """Return an explicit CI ref first; detached local execution fails closed."""
+    if ref := os.getenv("GITHUB_REF_NAME"):
+        return ref
+    completed = subprocess.run(
+        ["git", "branch", "--show-current"], check=False, capture_output=True, text=True,
+    )
+    branch = completed.stdout.strip()
+    return branch or None
+
+
+def _require_main_for_production_activation(publish: str) -> None:
+    if publish == "r2" and _current_ref_name() != "main":
+        raise RuntimeError("Production release activation is permitted only from main")
 
 
 def load_local_env(path: Path = Path(".env")) -> None:
@@ -189,6 +259,8 @@ def _planned_noop_report(
         },
         "manifest": manifest, "startedAt": started_at, "completedAt": now_iso(),
     }
+    if domain := getattr(args, "domain", None):
+        report["domain"] = domain
     json_dump(Path(args.report), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
@@ -400,7 +472,7 @@ def _validate_delivery_dependencies(
             "soil": {"soil_delivery", "territory_insights"},
             "water": {"water_delivery", "territory_insights"},
             "dissesto": {"dissesto_delivery", "territory_insights"},
-            "emissions": {"emissions_delivery"},
+            "emissions": {"emissions_delivery", "territory_insights"},
         }
         required = set().union(*(
             required_downstream.get(family, set()) for family in affected_families
@@ -675,14 +747,22 @@ def _process_geospatial_forest_sources(
     return forest_fetch, infc, zonal
 
 
-def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canonical: Path, delivery: Path, store: LocalObjectStore | R2ObjectStore, previous_state: dict | None, release_id: str, started: float, started_at: str) -> int:
+def _run_geospatial(
+    args: argparse.Namespace, *, root: Path, output: Path, canonical: Path, delivery: Path,
+    store: LocalObjectStore | R2ObjectStore, previous_state: dict | None, release_id: str,
+    started: float, started_at: str, domain: DomainProcessing | None = None,
+) -> int:
     plan = active_ingestion_plan()
+    allowed_families = set(domain.source_families) if domain else {"infc", "copernicus"}
     families = _changed_source_families()
+    unexpected_families = families - allowed_families
+    if unexpected_families:
+        raise ValueError(f"Geospatial plan contains sources outside its domain: {sorted(unexpected_families)}")
     if plan is None:
-        families = {"infc", "copernicus"}
+        families = allowed_families
         _hydrate(store, root, _active_infc_logical_paths(previous_state))
     if args.force:
-        families = {"infc", "copernicus"}
+        families = allowed_families
     _hydrate(store, root, _territory_logical_paths((2015, 2023)))
     if "infc" in families:
         _hydrate_planned_raw_dependencies(store, root, {"infc"})
@@ -764,7 +844,7 @@ def _run_geospatial(args: argparse.Namespace, *, root: Path, output: Path, canon
         changed=infc["changed"] or zonal["changed"] or forest_delivery["changed"] or insights["changed"],
         affected_families=affected_artifacts,
     )
-    report = {"run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop", "changed": publication["changed"], "scope": "geospatial", "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal}, "operationalMetrics": metrics | {"canonicalBytesGenerated": sum(item.get("canonical_bytes", 0) for item in (infc, zonal) if item["changed"]), "derivedBytesGenerated": 0, "deliveryBytesGenerated": sum(item.get("bytes", 0) for item in (forest_delivery, insights) if item.get("changed")), "pipelineDurationSeconds": round(time.monotonic() - started, 3)}, "manifest": manifest, "carriedArtifacts": publication["carried"], "startedAt": started_at, "completedAt": now_iso()}
+    report = {"run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop", "changed": publication["changed"], "scope": "geospatial", "domain": domain.name if domain else None, "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal}, "operationalMetrics": metrics | {"canonicalBytesGenerated": sum(item.get("canonical_bytes", 0) for item in (infc, zonal) if item["changed"]), "derivedBytesGenerated": 0, "deliveryBytesGenerated": sum(item.get("bytes", 0) for item in (forest_delivery, insights) if item.get("changed")), "pipelineDurationSeconds": round(time.monotonic() - started, 3)}, "manifest": manifest, "carriedArtifacts": publication["carried"], "startedAt": started_at, "completedAt": now_iso()}
     json_dump(Path(args.report), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
@@ -1194,6 +1274,9 @@ def _run_combined_scope_forests(
 
 def run(args: argparse.Namespace) -> int:
     clear_ingestion_plan()
+    _require_main_for_production_activation(args.publish)
+    domain = _domain_processing(args)
+    args.scope = _execution_scope(args, domain)
     started = time.monotonic()
     started_at = now_iso()
     root = Path(args.workdir)
@@ -1213,13 +1296,17 @@ def run(args: argparse.Namespace) -> int:
             raise FileNotFoundError("Incremental ingestion plan requires an active release")
         load_ingestion_plan(
             Path(plan_path), scope=args.scope, active_release_id=str(release["releaseId"]), raw_root=root / "raw",
+            domain=domain.name if domain else None,
         )
+        if domain is not None:
+            _validate_domain_plan(domain)
         if not active_ingestion_plan().get("changed") and not args.force:
             return _planned_noop_report(args, store, started=started, started_at=started_at)
     if args.scope == "geospatial":
         return _run_geospatial(
             args, root=root, output=output, canonical=canonical, delivery=delivery, store=store,
             previous_state=previous_source_state, release_id=release_id, started=started, started_at=started_at,
+            domain=domain,
         )
     if args.scope == "data" and plan_path:
         return _run_incremental_data(
@@ -1499,12 +1586,14 @@ def main() -> int:
     run_parser.add_argument("--force", action="store_true", help="reprocess unchanged source assets; manual recovery only")
     run_parser.add_argument("--offline", action="store_true", help="use only pre-existing official raw assets; never make HTTP requests")
     run_parser.add_argument("--scope", choices=("all", "data", "geospatial"), default="all", help="workflow ownership; data reuses validated geospatial canonical")
+    run_parser.add_argument("--domain", choices=tuple(DOMAIN_PROCESSING), help="process one domain without widening to its whole scope")
     run_parser.add_argument("--plan", help="ephemeral check-sources report tied to the active release")
     fetch_parser = sub.add_parser("fetch", help="acquire official raw assets for one domain")
     fetch_parser.add_argument("domain", choices=("dissesto", "emissions", "foreste"))
     fetch_parser.add_argument("--workdir", default="data")
     state_parser = sub.add_parser("check-sources", help="GET-check persisted source state before a scoped workflow")
-    state_parser.add_argument("--scope", choices=("data", "geospatial"), required=True)
+    state_parser.add_argument("--scope", choices=("data", "geospatial"), help="workflow ownership; inferred by --domain")
+    state_parser.add_argument("--domain", choices=tuple(DOMAIN_PROCESSING), help="check one domain only")
     state_parser.add_argument("--output", default="artifacts")
     state_parser.add_argument("--workdir", default="data")
     state_parser.add_argument("--publish", choices=("local", "r2"), default="local")
@@ -1531,14 +1620,21 @@ def main() -> int:
         print(json.dumps(fetch_dissesto(Path(args.workdir)), ensure_ascii=False, indent=2))
         return 0
     if args.command == "check-sources":
+        domain = _domain_processing(args)
+        if domain is None and args.scope is None:
+            parser.error("check-sources requires --scope or --domain")
+        args.scope = _execution_scope(args, domain)
         store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(Path(args.output) / "object-store")
         persisted = _active_source_state_with_legacy_bootstrap(store)
         release = active_release(store)
         result = check_persisted_sources(
             persisted,
             scope=args.scope,
-            stage_dir=Path(args.workdir) / ".preflight" / args.scope,
+            stage_dir=Path(args.workdir) / ".preflight" / (domain.name if domain else args.scope),
+            families=set(domain.source_families) if domain else None,
         )
+        if domain is not None:
+            result["domain"] = domain.name
         if args.scope == "data":
             missing_bigbang = _missing_bigbang_source_plan_entries(persisted)
             if missing_bigbang:
@@ -1565,7 +1661,7 @@ def main() -> int:
                     "signature": catalog["signature"],
                 }
                 if catalog_changed:
-                    staged_catalog = Path(args.workdir) / ".preflight" / args.scope / "copernicus-catalog.json"
+                    staged_catalog = Path(args.workdir) / ".preflight" / (domain.name if domain else args.scope) / "copernicus-catalog.json"
                     json_dump(staged_catalog, catalog)
                     result["catalog"]["stagedPath"] = str(staged_catalog)
                 result["changed"] = bool(result["changed"] or catalog_changed)
@@ -1593,6 +1689,7 @@ def main() -> int:
             json_dump(Path(args.report), result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
+    _require_main_for_production_activation(args.publish)
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(Path(args.output) / "object-store")
     print(json.dumps(rollback(store, args.release_id), ensure_ascii=False, indent=2))
     return 0

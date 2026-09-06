@@ -191,6 +191,13 @@ cataloghi/raw Copernicus, canonical INFC e zonali, PMTiles e delivery Foreste
 avanzano nello stesso scope. L'ownership è policy della pipeline e non entra
 nell'identità content-addressed della sorgente.
 
+Il processing può inoltre essere ristretto a un dominio dichiarato. In D1.2
+`forests` include soltanto le famiglie `infc` e `copernicus`: rigenera le sue
+canonical e il suo delivery e, se necessario, `territory-insights` shared con
+le canonical attive degli altri domini. Il registry delle dipendenze prepara
+la stessa estensione per Suolo, Acqua, Emissioni e Dissesto senza duplicare
+l'orchestrazione; la release finale resta comunque unica e globale.
+
 Le geometrie delivery sono dipendenze versionate per dominio e reference year.
 La release risolve ogni logical path verso un object SHA immutabile; indici e
 mappe dichiarano livello e data territoriale compatibili. INFC usa la geometria
