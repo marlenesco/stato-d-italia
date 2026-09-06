@@ -1,4 +1,5 @@
 import json
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -40,6 +41,113 @@ def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
     assert "if: inputs.bootstrap_all || steps.preflight.outputs.changed == 'true' || inputs.force" in geospatial_workflow
     assert "data/canonical/forests/algorithm_version=forests-zonal-statistics-v2" in data_workflow
     assert "data/raw/infc-2015-forests" in geospatial_workflow
+
+
+def test_forest_domain_registry_is_scoped_to_its_sources_and_shared_downstream() -> None:
+    spec = cli.DOMAIN_PROCESSING["forests"]
+
+    assert spec.scope == "geospatial"
+    assert spec.source_families == frozenset({"infc", "copernicus"})
+    assert spec.shared_downstream == frozenset({"territory_insights"})
+    assert {name for name, item in cli.DOMAIN_PROCESSING.items() if item.processor == "pending"} == {
+        "soil", "water", "emissions", "dissesto",
+    }
+
+
+def test_check_sources_domain_forests_constrains_preflight_and_marks_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda _store: {"schemaVersion": 1, "sources": []})
+    monkeypatch.setattr(cli, "active_release", lambda _store: {"releaseId": "r1"})
+
+    def check(_state: dict, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return {
+            "scope": "geospatial", "sourceChecks": 0, "sourcesChanged": 0,
+            "sourcesUnchanged": 0, "sourcesUnverifiable": 0, "changed": False, "sources": [],
+        }
+
+    monkeypatch.setattr(cli, "check_persisted_sources", check)
+    import stato_italia.forests as forests
+
+    monkeypatch.setattr(forests, "_cdse_token", lambda _source: "token")
+    monkeypatch.setattr(forests, "_check_catalog", lambda _source, _token: {
+        "products": [], "signature": "a" * 64,
+    })
+    monkeypatch.setattr(sys, "argv", ["stato-data", "check-sources", "--domain", "forests", "--workdir", str(tmp_path)])
+
+    assert cli.main() == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert captured["scope"] == "geospatial"
+    assert captured["families"] == {"infc", "copernicus"}
+    assert report["domain"] == "forests"
+    assert report["scope"] == "geospatial"
+    assert Path(str(captured["stage_dir"])).name == "forests"
+
+
+def test_forest_domain_run_does_not_widen_force_to_data_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def run_geospatial(args: Namespace, **kwargs: object) -> int:
+        captured["scope"] = args.scope
+        captured["force"] = args.force
+        captured["domain"] = kwargs["domain"]
+        return 0
+
+    monkeypatch.setattr(cli, "_run_geospatial", run_geospatial)
+
+    assert cli.run(Namespace(
+        workdir=str(tmp_path / "data"), output=str(tmp_path / "artifacts"), report=str(tmp_path / "report.json"),
+        release_id="r2", publish="local", scope="all", domain="forests", plan=None, force=True, offline=False,
+    )) == 0
+
+    domain = captured["domain"]
+    assert captured["scope"] == "geospatial"
+    assert captured["force"] is True
+    assert isinstance(domain, cli.DomainProcessing)
+    assert domain.source_families == frozenset({"infc", "copernicus"})
+
+
+def test_production_activation_is_refused_outside_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_current_ref_name", lambda: "phase-d1")
+
+    with pytest.raises(RuntimeError, match="only from main"):
+        cli._require_main_for_production_activation("r2")
+
+
+def test_forest_domain_rejects_a_plan_from_another_domain(tmp_path: Path) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schemaVersion": 1, "scope": "geospatial", "domain": "water", "activeReleaseId": "r1",
+        "sources": [],
+    }))
+
+    with pytest.raises(ValueError, match="domain mismatch"):
+        load_ingestion_plan(
+            plan, scope="geospatial", domain="forests", active_release_id="r1", raw_root=tmp_path / "raw",
+        )
+
+
+def test_forest_domain_rejects_nonforest_source_entries_in_its_plan(tmp_path: Path) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schemaVersion": 1, "scope": "geospatial", "domain": "forests", "activeReleaseId": "r1",
+        "sources": [_planned_entry("ispra-soil-2025", "ispra-soil-2025/soil.xlsx", "unchanged")],
+    }))
+    load_ingestion_plan(
+        plan, scope="geospatial", domain="forests", active_release_id="r1", raw_root=tmp_path / "raw",
+    )
+
+    try:
+        with pytest.raises(ValueError, match="outside forests"):
+            cli._validate_domain_plan(cli.DOMAIN_PROCESSING["forests"])
+    finally:
+        clear_ingestion_plan()
 
 
 def test_incremental_data_report_serializes_delivery_paths(tmp_path: Path) -> None:

@@ -24,7 +24,9 @@ class PlanContext:
 _ACTIVE_PLAN: PlanContext | None = None
 
 
-def load_ingestion_plan(path: Path, *, scope: str, active_release_id: str, raw_root: Path) -> dict[str, Any]:
+def load_ingestion_plan(
+    path: Path, *, scope: str, active_release_id: str, raw_root: Path, domain: str | None = None,
+) -> dict[str, Any]:
     payload = json.loads(path.read_text())
     if payload.get("schemaVersion") != PLAN_SCHEMA_VERSION:
         raise ValueError("Unsupported ingestion-plan schema")
@@ -32,6 +34,8 @@ def load_ingestion_plan(path: Path, *, scope: str, active_release_id: str, raw_r
         raise ValueError(f"Ingestion plan scope mismatch: expected {scope}")
     if payload.get("activeReleaseId") != active_release_id:
         raise ValueError("Ingestion plan does not reference the active release")
+    if domain is not None and payload.get("domain") != domain:
+        raise ValueError(f"Ingestion plan domain mismatch: expected {domain}")
     sources = payload.get("sources")
     if not isinstance(sources, list):
         raise ValueError("Ingestion plan sources must be an array")

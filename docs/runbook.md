@@ -112,6 +112,26 @@ uv run stato-data check-sources --scope data --publish r2
 uv run stato-data check-sources --scope geospatial --publish r2
 ```
 
+Per rigenerare il solo dominio Foreste, senza acquisire i domini tabellari:
+
+```sh
+uv run stato-data check-sources --domain forests --publish local --report reports/forests-source-check.json
+uv run stato-data run --domain forests --plan reports/forests-source-check.json
+uv run stato-data run --domain forests --force
+```
+
+Il comando limita le sorgenti a INFC e Copernicus, rigenera canonical, PMTiles
+e delivery Foreste, quindi ricrea `territory-insights` usando la canonical
+Foreste nuova e le canonical immutabili della release attiva per Suolo, Acqua,
+Dissesto ed Emissioni. Non acquisisce né ricalcola questi ultimi domini.
+`--force` riguarda solo INFC e Copernicus: non è un alias di `scope=all`.
+Un piano di un altro dominio o una dipendenza shared mancante interrompono la
+run prima della pubblicazione. Per ora Foreste è il solo processor abilitato;
+il registry prepara l'estensione agli altri domini senza introdurre manifest
+separati. La produzione R2 può essere attivata solo da `main`; le elaborazioni
+di dominio future potranno essere parallele, ma composizione e update del solo
+`manifest.json` globale restano serializzati.
+
 Il controllo usa `GET` condizionale quando possibile, mai solo `HEAD`. I due
 workflow sono `ingest-data.yml` (domini tabellari non forestali e delivery) e
 `ingest-geospatial.yml` (intero dominio Foreste: INFC, catalogo Copernicus,
