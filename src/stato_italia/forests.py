@@ -35,6 +35,36 @@ ZONAL_ALGORITHM_VERSION = "forests-zonal-statistics-v2"
 MAPPABLE_LEVELS = ("municipality", "province", "region")
 
 
+def forest_coverage_mode() -> str:
+    """Return an explicit coverage policy; national is the safe default."""
+    mode = os.getenv(HRL["coverage_mode_environment"], HRL["coverage_default"])
+    if mode not in HRL["coverage_modes"]:
+        raise ValueError(f"Unsupported {HRL['coverage_mode_environment']}: {mode}")
+    return mode
+
+
+def _territory_reference_year() -> int:
+    return int(HRL["territory_reference_year"])
+
+
+def forest_coverage_report_path(destination: Path) -> Path:
+    """Sidecar for the complete expected/published/valid-nodata population."""
+    return destination.with_suffix(".coverage.json")
+
+
+def _expected_region_codes(canonical_root: Path, year: int, *, mode: str | None = None) -> set[str]:
+    regions = pd.read_parquet(canonical_root / "territories" / f"reference_year={year}" / "region.parquet")
+    codes = set(regions["istat_code"].astype(str))
+    if not codes:
+        raise ValueError("Forest processing lacks ISTAT regions")
+    if (mode or forest_coverage_mode()) == "development_slice":
+        configured = set(HRL["development_slice"]["region_istat_codes"])
+        if not configured <= codes:
+            raise ValueError("Configured forest development slice is absent from ISTAT reference")
+        return configured
+    return codes
+
+
 def _cdse_token(source: dict) -> str:
     """Request a short-lived CDSE token. Never persist or include it in errors."""
     client_id = os.getenv(source["client_id_environment"])
@@ -76,29 +106,48 @@ class _CdseTokenProvider:
 
 
 def _catalog_products(source: dict, token: str) -> list[dict]:
-    """Discover supported HRL products through CDSE OData; unknown shapes fail closed."""
-    tags = [asset["catalog_tag"] for asset in source["assets"]]
-    filters = [f"contains(Name,'{tag}')" for tag in tags]
-    params = {
-        "$filter": "Collection/Name eq 'CLMS' and (" + " or ".join(filters) + ")",
-        "$select": "Id,Name,ContentDate,Checksum,S3Path,OriginDate",
-        "$orderby": "ContentDate/Start desc",
-        "$top": "1000",
-    }
-    response = requests.get(source["catalog_api_url"], params=params, timeout=(15, 90), headers={"Accept": "application/json", "Authorization": f"Bearer {token}"})
-    response.raise_for_status()
-    payload = response.json()
-    values = payload.get("value")
-    if not isinstance(values, list):
-        raise ValueError("Unexpected CDSE OData contract: value[] missing")
     products: list[dict] = []
-    for item in values:
-        if not isinstance(item, dict) or not isinstance(item.get("Id"), str) or not isinstance(item.get("Name"), str):
-            raise ValueError("Unexpected CDSE OData product shape")
-        products.append({key: item.get(key) for key in ("Id", "Name", "ContentDate", "Checksum", "S3Path", "OriginDate")})
+    for asset in source["assets"]:
+        for start_year, end_year in _asset_periods(asset):
+            start = f"{end_year}-01-01T00:00:00.000000Z"
+            end = f"{end_year + 1}-01-01T00:00:00.000000Z"
+            params = {
+                "$filter": (
+                    "Collection/Name eq 'CLMS' and "
+                    f"contains(Name,'{asset['catalog_tag']}') and "
+                    f"ContentDate/Start ge {start} and ContentDate/Start lt {end}"
+                ),
+                "$select": "Id,Name,ContentDate,Checksum,S3Path,OriginDate",
+                "$orderby": "ContentDate/Start asc,Name asc",
+                "$top": "1000",
+            }
+            response = requests.get(source["catalog_api_url"], params=params, timeout=(15, 90), headers={"Accept": "application/json", "Authorization": f"Bearer {token}"})
+            response.raise_for_status()
+            values = response.json().get("value")
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"CDSE catalog has no {asset['id']} snapshot for {start_year}-{end_year}")
+            items = []
+            for item in values:
+                if not isinstance(item, dict) or not isinstance(item.get("Id"), str) or not isinstance(item.get("Name"), str):
+                    raise ValueError("Unexpected CDSE OData product shape")
+                content_date = item.get("ContentDate")
+                if asset.get("snapshot_timestamp") != "content_date_start_at_reference_year":
+                    raise ValueError(f"Unsupported CDSE snapshot timestamp contract for {asset['id']}")
+                if not isinstance(content_date, dict) or not str(content_date.get("Start", "")).startswith(f"{end_year}-01-01"):
+                    raise ValueError(f"CDSE catalog returned an unexpected timestamp for {asset['id']} {end_year}")
+                items.append({key: item.get(key) for key in ("Id", "Name", "ContentDate", "Checksum", "S3Path", "OriginDate")})
+            products.append({"asset_id": asset["id"], "period": [start_year, end_year], "items": sorted(items, key=lambda item: (item["Name"], item["Id"]))})
     if not products:
         raise ValueError("CDSE OData returned no supported Tree Cover & Forest products")
-    return sorted(products, key=lambda item: (item["Name"], item["Id"]))
+    return sorted(products, key=lambda item: (item["asset_id"], item["period"]))
+
+
+def _catalog_snapshot(catalog: dict, asset: dict, start_year: int, end_year: int) -> dict:
+    matches = [item for item in catalog.get("products_payload", catalog.get("products", [])) if item.get("asset_id") == asset["id"] and item.get("period") == [start_year, end_year]]
+    if len(matches) != 1 or not isinstance(matches[0].get("items"), list) or not matches[0]["items"]:
+        raise ValueError(f"CDSE catalog snapshot is missing or ambiguous for {asset['id']} {start_year}-{end_year}")
+    snapshot = matches[0]
+    return snapshot | {"signature": sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
 def _catalog_state(root: Path) -> Path:
@@ -204,13 +253,13 @@ def _process_slice_path(root: Path, asset: dict, start_year: int, end_year: int,
 
 
 def _fetch_process_raster_slices(
-    root: Path, canonical_root: Path, token: str, *, force: bool = False,
+    root: Path, canonical_root: Path, token: str, catalog: dict, *, force: bool = False,
 ) -> dict:
-    """Acquire a bounded local raster slice through CDSE Process API, never R2."""
-    reference_year = int(HRL["development_slice"]["territory_reference_year"])
+    """Acquire resumable Process API slices for the configured national coverage."""
+    reference_year = _territory_reference_year()
     territories = _slice_territories(canonical_root, reference_year)
     regions = territories[territories["level"] == "region"]
-    selected = set(HRL["development_slice"]["region_istat_codes"])
+    selected = _expected_region_codes(canonical_root, reference_year)
     if set(regions["istat_code"]) != selected:
         raise ValueError("Forest process slice lacks configured ISTAT regions")
     changed = False
@@ -220,13 +269,14 @@ def _fetch_process_raster_slices(
     assets = [asset for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)]
     for asset in assets:
         for start_year, end_year in _asset_periods(asset):
+            snapshot = _catalog_snapshot(catalog, asset, start_year, end_year)
             for region in regions.sort_values("istat_code").to_dict("records"):
                 manifest_path = _process_slice_path(root, asset, start_year, end_year, region["istat_code"], 0, 0).parent / "slice-manifest.json"
                 entries: list[dict] = []
                 for bbox, width, height, row, column in _process_tile_grid(region["geometry_wkb"], int(asset["process_resolution_m"]), int(asset["process_max_pixels"])):
                     target = _process_slice_path(root, asset, start_year, end_year, region["istat_code"], row, column)
                     sidecar = target.with_suffix(target.suffix + ".metadata.json")
-                    expected = {"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "bbox_epsg3035": list(bbox), "width": width, "height": height}
+                    expected = {"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "bbox_epsg3035": list(bbox), "width": width, "height": height, "snapshot_signature": snapshot["signature"]}
                     prior = json.loads(sidecar.read_text()) if not force and target.exists() and sidecar.exists() else None
                     if prior and prior.get("request") == expected and prior.get("sha256") == sha256_file(target):
                         metadata = prior
@@ -244,7 +294,7 @@ def _fetch_process_raster_slices(
                                 "source_id": HRL["source_id"], "acquisition_mode": "cdse_process_api_raster_slice",
                                 "acquired_at": now_iso(), "requested_url": HRL["process_api_url"], "resolved_url": HRL["process_api_url"],
                                 "content_type": content_type, "bytes": target.stat().st_size, "sha256": sha256_file(target),
-                                "request": expected, "asset_id": asset["id"], "band": asset["band"], "byoc_collection_id": asset["byoc_collection_id"],
+                                "request": expected, "asset_id": asset["id"], "band": asset["band"], "byoc_collection_id": asset["byoc_collection_id"], "snapshot": snapshot,
                                 "source_resolution_m": asset["resolution_m"], "slice_resolution_m": asset["process_resolution_m"],
                                 "license": HRL["license"], "methodology_url": HRL["methodology_url"],
                             }
@@ -253,8 +303,8 @@ def _fetch_process_raster_slices(
                             requests_made += 1
                     entries.append({"path": target.name, "sha256": metadata["sha256"], "bytes": metadata["bytes"], "request": expected})
                     raw_files.extend([str(target), str(sidecar)])
-                signature = sha256(json.dumps({"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "entries": entries}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-                manifest = {"schemaVersion": 1, "source_id": HRL["source_id"], "asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "slice_resolution_m": asset["process_resolution_m"], "source_signature": signature, "entries": entries}
+                signature = sha256(json.dumps({"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "snapshot_signature": snapshot["signature"], "entries": entries}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                manifest = {"schemaVersion": 1, "source_id": HRL["source_id"], "asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "slice_resolution_m": asset["process_resolution_m"], "source_signature": signature, "snapshot_signature": snapshot["signature"], "snapshot": snapshot, "entries": entries}
                 prior_manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
                 if prior_manifest != manifest:
                     json_dump(manifest_path, manifest)
@@ -284,7 +334,7 @@ def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool =
     raster = None
     if os.getenv(HRL["processing_mode_environment"], "raster") == "raster":
         raster = _fetch_process_raster_slices(
-            root, root / "canonical", token, force=planned_catalog is not None,
+            root, root / "canonical", token, catalog_check, force=planned_catalog is not None,
         )
     return {"infc": infc, "catalog": catalog, "raster": raster, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
 
@@ -302,7 +352,7 @@ def declared_forest_raw_paths(root: Path) -> list[Path]:
         if not asset.get("statistical_api_enabled", True):
             continue
         for start_year, end_year in _asset_periods(asset):
-            for region_code in HRL["development_slice"]["region_istat_codes"]:
+            for region_code in sorted(_expected_region_codes(root / "canonical", _territory_reference_year())):
                 manifest = _process_slice_path(root, asset, start_year, end_year, region_code, 0, 0).parent / "slice-manifest.json"
                 if not manifest.is_file():
                     raise FileNotFoundError(f"Declared CDSE Process API slice manifest missing: {manifest}")
@@ -452,7 +502,10 @@ def _process_raster_groups(root: Path, asset: dict) -> list[dict]:
             if not path.exists() or sha256_file(path) != entry["sha256"]:
                 raise ValueError(f"CDSE Process API slice checksum mismatch: {path}")
             paths.append(path)
-        groups.append({"manifest_path": manifest_path, "source_hash": manifest["source_signature"], "region_istat_code": manifest["region_istat_code"], "start_year": int(manifest["period"][0]), "end_year": int(manifest["period"][1]), "paths": paths})
+        snapshot_signature = manifest.get("snapshot_signature")
+        if not isinstance(snapshot_signature, str) or len(snapshot_signature) != 64:
+            raise ValueError(f"CDSE Process API slice snapshot provenance missing: {manifest_path}")
+        groups.append({"manifest_path": manifest_path, "source_hash": manifest["source_signature"], "snapshot_signature": snapshot_signature, "region_istat_code": manifest["region_istat_code"], "start_year": int(manifest["period"][0]), "end_year": int(manifest["period"][1]), "paths": paths})
     return groups
 
 
@@ -472,12 +525,13 @@ def _slice_territories_with_region_code(canonical_root: Path, year: int) -> pd.D
     return territories
 
 
-def _process_raster_records(asset: dict, group: dict, territories: pd.DataFrame) -> list[dict]:
-    """Aggregate all regional Process API chunks before writing one observation per territory."""
+def _process_raster_records(asset: dict, group: dict, territories: pd.DataFrame) -> tuple[list[dict], list[str]]:
+    """Aggregate chunks; preserve legitimate raster NoData separately from gaps."""
     subset = territories[territories["region_istat_code"] == group["region_istat_code"]]
     if subset.empty:
         raise ValueError(f"Process slice has no configured territory: {group['region_istat_code']}")
     rows: list[dict] = []
+    valid_nodata: list[str] = []
     with rasterio.open(group["paths"][0]) as first:
         if first.crs is None or not first.crs.is_projected:
             raise ValueError(f"CDSE Process API slice lacks projected CRS: {first.name}")
@@ -505,11 +559,17 @@ def _process_raster_records(asset: dict, group: dict, territories: pd.DataFrame)
                 if len(values):
                     values_by_chunk.append(values)
             if not values_by_chunk:
-                raise ValueError(f"No raster values for {asset['id']} / {territory['territory_version_id']}")
+                # A masked/no-data territory is an observed source state, not a
+                # silently missing processing result. It is accounted for in the
+                # coverage sidecar and never promoted as a numeric observation.
+                valid_nodata.append(str(territory["territory_id"]))
+                continue
             values = np.concatenate(values_by_chunk)
 
             def add(metric: str, value: float) -> None:
-                rows.append(_record(asset | {"source_id": HRL["source_id"]}, group["manifest_path"].relative_to(group["manifest_path"].parents[4]), group["source_hash"], territory, metric, float(value), group["start_year"], group["end_year"]))
+                record = _record(asset | {"source_id": HRL["source_id"]}, group["manifest_path"].relative_to(group["manifest_path"].parents[4]), group["source_hash"], territory, metric, float(value), group["start_year"], group["end_year"])
+                record["source_snapshot_signature"] = group["snapshot_signature"]
+                rows.append(record)
 
             if asset["kind"] == "tree_cover_density":
                 add("tree_cover_mean", np.mean(values))
@@ -540,7 +600,7 @@ def _process_raster_records(asset: dict, group: dict, territories: pd.DataFrame)
     finally:
         for dataset in datasets:
             dataset.close()
-    return rows
+    return rows, valid_nodata
 
 
 def _infc_rows(root: Path, canonical_root: Path) -> list[dict]:
@@ -603,15 +663,15 @@ def ingest_infc_forests(root: Path, canonical_root: Path, force: bool = False) -
 
 
 def _slice_territories(canonical_root: Path, year: int) -> pd.DataFrame:
-    """Keep complete municipality/province/region coverage for the configured regions."""
+    """Return the national ISTAT population, or an explicitly selected dev slice."""
     frames = {level: pd.read_parquet(canonical_root / "territories" / f"reference_year={year}" / f"{level}.parquet") for level in MAPPABLE_LEVELS}
-    selected_regions = set(HRL["development_slice"]["region_istat_codes"])
+    selected_regions = _expected_region_codes(canonical_root, year)
     regions = frames["region"][frames["region"]["istat_code"].isin(selected_regions)]
     provinces = frames["province"][frames["province"]["parent_istat_code"].isin(selected_regions)]
     municipalities = frames["municipality"][frames["municipality"]["parent_istat_code"].isin(set(provinces["istat_code"]))]
     result = pd.concat([municipalities, provinces, regions], ignore_index=True)
     if result.empty or result.duplicated(["territory_id", "territory_version_id"]).any():
-        raise ValueError("Invalid configured forest development-slice territory coverage")
+        raise ValueError("Invalid configured forest territory coverage")
     return result
 
 
@@ -784,7 +844,7 @@ def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path,
         canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
         if canonical_hashes == {source_hash}:
             return {"changed": False, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "mode": "statistical-api", "requests": 0}
-    reference_year = int(HRL["development_slice"]["territory_reference_year"])
+    reference_year = _territory_reference_year()
     territories = _slice_territories(canonical_root, reference_year)
     records: list[dict] = []
     checkpoint_records = 0
@@ -833,6 +893,73 @@ def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path,
     return {"changed": True, "records": len(table), "checkpoint_records_reused": checkpoint_records, "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "reference_years": sorted(table.reference_year.unique().tolist()), "mode": "statistical-api", "requests": request_count, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
 
 
+def _temporal_diagnostics(table: pd.DataFrame) -> list[dict]:
+    """Summarise actual payload change and reject accidental duplicate snapshots."""
+    diagnostics: list[dict] = []
+    for (metric, level), series in table.groupby(["metric_id", "territory_level"], sort=True):
+        snapshots: list[tuple[str, pd.DataFrame, dict]] = []
+        for (start, end), rows in series.groupby(["period_start", "period_end"], sort=True):
+            rows = rows.sort_values("territory_id")
+            payload = [(str(row.territory_id), float(row.value_decimal)) for row in rows.itertuples()]
+            digest = sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+            values = rows["value_decimal"].astype(float)
+            diagnostic = {
+                "metricId": metric, "territoryLevel": level, "period": f"{start[:4]}-{end[:4]}",
+                "recordCount": len(rows), "minimum": float(values.min()), "maximum": float(values.max()),
+                "mean": float(values.mean()), "quantiles": {"p25": float(values.quantile(.25)), "p50": float(values.quantile(.5)), "p75": float(values.quantile(.75))},
+                "stablePayloadSha256": digest,
+            }
+            diagnostics.append(diagnostic)
+            snapshots.append((f"{start[:4]}-{end[:4]}", rows, diagnostic))
+        for (previous_period, previous, _), (current_period, current, current_diagnostic) in zip(snapshots, snapshots[1:], strict=False):
+            joined = previous[["territory_id", "value_decimal"]].merge(current[["territory_id", "value_decimal"]], on="territory_id", suffixes=("_previous", "_current"), validate="one_to_one")
+            if len(joined) != len(previous) or len(joined) != len(current):
+                raise ValueError(f"Forest temporal snapshots have different territorial populations: {metric}/{level}/{previous_period}/{current_period}")
+            delta = joined["value_decimal_current"].astype(float) - joined["value_decimal_previous"].astype(float)
+            if bool((delta == 0).all()):
+                raise ValueError(f"Forest temporal snapshots are byte-identical territorial payloads: {metric}/{level}/{previous_period}/{current_period}")
+            correlation = float(joined["value_decimal_previous"].corr(joined["value_decimal_current"])) if len(joined) > 1 else None
+            current_diagnostic["comparisonWithPrevious"] = {
+                "period": previous_period, "percentChanged": float((delta != 0).mean() * 100),
+                "medianAbsoluteDifference": float(delta.abs().median()), "maximumAbsoluteDifference": float(delta.abs().max()), "correlation": correlation,
+            }
+    return diagnostics
+
+
+def _coverage_report(table: pd.DataFrame, coverage: list[dict]) -> dict:
+    """Validate the exact ISTAT population and make valid NoData auditable."""
+    entries: list[dict] = []
+    for item in coverage:
+        expected = set(item["expectedTerritoryIds"])
+        numeric = set(item["numericTerritoryIds"])
+        nodata = set(item["validNoDataTerritoryIds"])
+        if numeric & nodata or expected != numeric | nodata:
+            raise ValueError(f"Forest coverage is incomplete or ambiguous: {item['assetId']}/{item['period']}/{item['territoryLevel']}")
+        entries.append({
+            "assetId": item["assetId"], "period": item["period"], "territoryLevel": item["territoryLevel"],
+            "expectedCount": len(expected), "numericCount": len(numeric), "validNoDataCount": len(nodata),
+            "expectedTerritoryIds": sorted(expected), "numericTerritoryIds": sorted(numeric), "validNoDataTerritoryIds": sorted(nodata),
+        })
+    report = {
+        "schemaVersion": 1, "coverageMode": forest_coverage_mode(), "territoryReferenceYear": _territory_reference_year(),
+        "entries": entries, "temporalDiagnostics": _temporal_diagnostics(table),
+    }
+    if report["coverageMode"] == "national":
+        expected_regions = _expected_region_codes_from_coverage(entries)
+        if expected_regions == set(HRL["development_slice"]["region_istat_codes"]):
+            raise ValueError("Refusing to publish the four-region development slice as national forest coverage")
+    return report
+
+
+def _expected_region_codes_from_coverage(entries: list[dict]) -> set[str]:
+    # Region IDs are present in every national metric/period; ISTAT code is the
+    # stable terminal segment in the canonical identifier.
+    for entry in entries:
+        if entry["territoryLevel"] == "region":
+            return {territory_id.rsplit(":", 1)[-1] for territory_id in entry["expectedTerritoryIds"]}
+    raise ValueError("Forest coverage has no regional population")
+
+
 def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: str | None = None) -> dict:
     destination = canonical_root / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
     selected_mode = mode or os.getenv(HRL["processing_mode_environment"], "raster")
@@ -842,10 +969,18 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
         return _ingest_statistical_api(root, canonical_root, destination, force)
     if destination.exists() and not force:
         table = pd.read_parquet(destination)
+        coverage_path = forest_coverage_report_path(destination)
+        if not coverage_path.exists():
+            raise ValueError("Existing raster forest canonical lacks verified coverage")
+        coverage = json.loads(coverage_path.read_text())
+        expected_regions = _expected_region_codes(canonical_root, _territory_reference_year())
+        if coverage.get("coverageMode") != forest_coverage_mode() or _expected_region_codes_from_coverage(coverage.get("entries", [])) != expected_regions:
+            raise ValueError("Existing raster forest canonical coverage does not match current policy")
         return {"changed": False, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict()}
     records: list[dict] = []
+    coverage: list[dict] = []
     raster_paths: list[Path] = []
-    reference_year = int(HRL["development_slice"]["territory_reference_year"])
+    reference_year = _territory_reference_year()
     territories = _slice_territories_with_region_code(canonical_root, reference_year)
     expected_records = 0
     process_groups_found = False
@@ -855,19 +990,25 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
         groups = _process_raster_groups(root, original)
         if not groups:
             continue
-        expected_groups = len(_asset_periods(original)) * len(HRL["development_slice"]["region_istat_codes"])
+        expected_groups = len(_asset_periods(original)) * len(_expected_region_codes(canonical_root, reference_year))
         if len(groups) != expected_groups:
             raise ValueError(f"Incomplete CDSE Process API slice manifests for {original['id']}: groups={len(groups)}, expected={expected_groups}")
         process_groups_found = True
         metrics_per_territory = {"tree_cover_density": 4, "forest_type": 6, "tree_cover_change": 2}[original["kind"]]
         for group in groups:
-            count = int((territories["region_istat_code"] == group["region_istat_code"]).sum())
+            grouped_territories = territories[territories["region_istat_code"] == group["region_istat_code"]]
+            count = len(grouped_territories)
             expected_records += count * metrics_per_territory
             raster_paths.extend(group["paths"])
-            records.extend(_process_raster_records(original, group, territories))
+            group_records, valid_nodata = _process_raster_records(original, group, territories)
+            records.extend(group_records)
+            for level in MAPPABLE_LEVELS:
+                expected = set(grouped_territories.loc[grouped_territories["level"] == level, "territory_id"].astype(str))
+                numeric = {str(record["territory_id"]) for record in group_records if record["territory_level"] == level}
+                coverage.append({"assetId": original["id"], "period": f"{group['start_year']}-{group['end_year']}", "territoryLevel": level, "expectedTerritoryIds": sorted(expected), "numericTerritoryIds": sorted(numeric), "validNoDataTerritoryIds": sorted(set(valid_nodata) & expected)})
     if process_groups_found:
-        if len(records) != expected_records:
-            raise ValueError(f"Incomplete CDSE Process API raster coverage: records={len(records)}, expected={expected_records}")
+        if len(records) > expected_records:
+            raise ValueError(f"Duplicate CDSE Process API raster coverage: records={len(records)}, expected<={expected_records}")
     else:
         # Retain support for a future national COG download adapter. It may only
         # ingest one complete raster per metric/period; tiled COG input must use
@@ -889,6 +1030,9 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
     if table.duplicated(["derived_metric_id"]).any(): raise ValueError("Duplicate forest zonal metrics")
     destination.parent.mkdir(parents=True, exist_ok=True)
     table.to_parquet(destination, index=False, compression="zstd")
+    coverage_path = forest_coverage_report_path(destination)
+    if process_groups_found:
+        json_dump(coverage_path, _coverage_report(table, coverage))
     retention = os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])
     if retention == "metadata_only":
         # Canonical and sidecar checksum/provenance now exist; only exact raster
@@ -896,4 +1040,4 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
         for path in raster_paths: path.unlink()
     elif retention != "retain":
         raise ValueError("FORESTS_RAW_RETENTION must be retain or metadata_only")
-    return {"changed": True, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "reference_years": sorted(table.reference_year.unique().tolist()), "raw_retention": retention}
+    return {"changed": True, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "reference_years": sorted(table.reference_year.unique().tolist()), "coverage_path": str(coverage_path) if coverage_path.exists() else None, "raw_retention": retention}

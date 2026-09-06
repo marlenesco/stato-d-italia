@@ -8,7 +8,8 @@ from shapely.geometry import Polygon
 
 from stato_italia.cli import load_local_env
 import stato_italia.forests as forests
-from stato_italia.forests import CORINE, HRL, _asset_periods, _check_catalog, _persist_catalog, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _write_statistical_checkpoint
+from stato_italia.forests_delivery import generate_forests_delivery
+from stato_italia.forests import CORINE, HRL, _asset_periods, _catalog_snapshot, _check_catalog, _coverage_report, _persist_catalog, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _write_statistical_checkpoint, forest_coverage_mode
 
 
 def test_corine_and_hrl_keep_separate_forest_cover_metrics() -> None:
@@ -38,6 +39,106 @@ def test_statistical_mode_contract_declares_real_and_future_modes() -> None:
     assert HRL["development_slice"]["region_istat_codes"] == ["03", "09", "12", "19"]
     forest_type = next(item for item in HRL["assets"] if item["kind"] == "forest_type")
     assert forest_type["class_codes"]["mixed"] == 3
+    assert HRL["coverage_default"] == "national"
+    assert {asset["id"] for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)} == {
+        "hrl_tree_cover_density_10m", "hrl_forest_type", "hrl_tree_cover_presence_change",
+    }
+    assert all(asset["snapshot_timestamp"] == "content_date_start_at_reference_year" for asset in HRL["assets"])
+
+
+def test_development_coverage_requires_explicit_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(HRL["coverage_mode_environment"], raising=False)
+    assert forest_coverage_mode() == "national"
+    monkeypatch.setenv(HRL["coverage_mode_environment"], "development_slice")
+    assert forest_coverage_mode() == "development_slice"
+
+
+def test_catalog_snapshot_is_unambiguous_for_exact_asset_period() -> None:
+    entry = {"asset_id": "hrl_tree_cover_density_10m", "period": [2023, 2023], "items": [{"Id": "one", "Name": "TCD_2023"}]}
+    snapshot = _catalog_snapshot({"products_payload": [entry]}, HRL["assets"][0], 2023, 2023)
+    assert snapshot["signature"] == forests.sha256(json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        _catalog_snapshot({"products_payload": [entry, entry]}, HRL["assets"][0], 2023, 2023)
+
+
+def test_catalog_queries_every_supported_asset_period_and_verifies_reference_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            query = calls[-1]["params"]["$filter"]
+            year = next(year for year in (2018, 2021, 2023) if f"{year}-01-01" in query)
+            return {"value": [{"Id": f"id-{year}", "Name": f"product-{year}", "ContentDate": {"Start": f"{year}-01-01T00:00:00.000000Z"}, "Checksum": None, "S3Path": None, "OriginDate": None}]}
+
+    def get(*_args: object, **kwargs: object) -> Response:
+        calls.append(kwargs)
+        return Response()
+
+    monkeypatch.setattr(forests.requests, "get", get)
+    products = forests._catalog_products(HRL, "token")
+
+    assert len(products) == 9  # TCD (3), FTY (2), DLT (3), TCPC (1)
+    assert {tuple(item["period"]) for item in products if item["asset_id"] == "hrl_tree_cover_density_10m"} == {(2018, 2018), (2021, 2021), (2023, 2023)}
+    assert all("ContentDate/Start ge" in call["params"]["$filter"] for call in calls)
+
+
+def test_coverage_report_distinguishes_valid_nodata_and_rejects_duplicate_payloads() -> None:
+    coverage = [
+        {"assetId": "hrl_tree_cover_density_10m", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": ["it:region:02"]},
+        {"assetId": "hrl_tree_cover_density_10m", "period": "2021-2021", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": ["it:region:02"]},
+    ]
+    table = pd.DataFrame([
+        {"metric_id": "tree_cover_mean", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": "it:region:01", "value_decimal": 20.0},
+        {"metric_id": "tree_cover_mean", "territory_level": "region", "period_start": "2021-01-01", "period_end": "2021-12-31", "territory_id": "it:region:01", "value_decimal": 21.0},
+    ])
+    report = _coverage_report(table, coverage)
+    assert report["entries"][0]["validNoDataCount"] == 1
+    assert report["temporalDiagnostics"][1]["comparisonWithPrevious"]["percentChanged"] == 100.0
+    duplicated = table.copy()
+    duplicated.loc[duplicated["period_start"] == "2021-01-01", "value_decimal"] = 20.0
+    with pytest.raises(ValueError, match="byte-identical"):
+        _coverage_report(duplicated, coverage)
+
+
+def test_derived_delivery_requires_national_coverage_and_exposes_geometry_reference(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    territories = canonical / "territories" / "reference_year=2023"
+    territories.mkdir(parents=True)
+    pd.DataFrame([
+        {"territory_id": "it:region:01", "name": "Piemonte", "istat_code": "01"},
+        {"territory_id": "it:region:02", "name": "Valle d'Aosta", "istat_code": "02"},
+    ]).to_parquet(territories / "region.parquet")
+    zonal = canonical / "forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
+    zonal.parent.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric_id": "tree_cover_mean", "territory_id": "it:region:01", "territory_version_id": "it:region:01@2023-01-01", "territory_level": "region", "period_start": "2023-01-01", "period_end": "2023-12-31", "value_decimal": 21.0, "unit_ucum": "%", "official_status": "derived_by_stato_italia", "methodology_version": "hrl_tree_cover_density_10m"},
+        {"metric_id": "tree_cover_mean", "territory_id": "it:region:02", "territory_version_id": "it:region:02@2023-01-01", "territory_level": "region", "period_start": "2023-01-01", "period_end": "2023-12-31", "value_decimal": 22.0, "unit_ucum": "%", "official_status": "derived_by_stato_italia", "methodology_version": "hrl_tree_cover_density_10m"},
+    ]).to_parquet(zonal)
+    infc = canonical / "forests" / "infc.parquet"
+    pd.DataFrame(columns=["metric_id", "territory_id", "territory_version_id", "territory_level", "period_start", "period_end", "value_decimal", "official_status"]).to_parquet(infc)
+    coverage = forests.forest_coverage_report_path(zonal)
+    coverage.write_text(json.dumps({"coverageMode": "national", "entries": [{"assetId": "hrl_tree_cover_density_10m", "period": "2023-2023", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01", "it:region:02"], "validNoDataTerritoryIds": []}]}))
+    geometry = tmp_path / "istat-region-2023.pmtiles"
+    geometry.touch()
+
+    generate_forests_delivery(zonal, infc, canonical, tmp_path / "delivery", "release-test", {"region": geometry}, force=True)
+
+    payload = json.loads((tmp_path / "delivery" / "foreste" / "maps" / "tree_cover_mean" / "2023-2023" / "region.json").read_text())
+    ranking = json.loads((tmp_path / "delivery" / "foreste" / "rankings" / "tree_cover_mean" / "2023-2023" / "region.json").read_text())
+    assert payload["territoryGeometryReference"] == "istat-region-2023.pmtiles"
+    assert payload["coverage"] == {"expectedCount": 2, "numericCount": 2, "validNoDataCount": 0}
+    assert "campione Copernicus" not in ranking["scopeLabel"]
+
+
+def test_existing_raster_canonical_without_coverage_is_not_reused(tmp_path: Path) -> None:
+    destination = tmp_path / "canonical" / "forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
+    destination.parent.mkdir(parents=True)
+    pd.DataFrame({"territory_level": ["region"]}).to_parquet(destination)
+    with pytest.raises(ValueError, match="lacks verified coverage"):
+        forests.ingest_forests(tmp_path, tmp_path / "canonical", mode="raster")
 
 
 def test_process_raster_grid_is_epsg3035_aligned_and_bounded() -> None:
