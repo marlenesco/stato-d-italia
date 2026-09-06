@@ -36,6 +36,7 @@ jobs:
       CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
       CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
       FOREST_PROCESSING_MODE: raster
+      FOREST_COVERAGE_MODE: national
     steps:
       - uses: actions/checkout@v7
       - name: Validate R2 and CDSE configuration
@@ -54,11 +55,11 @@ jobs:
         with:
           path: |
             data/raw/infc-2015-forests
-            data/raw/copernicus-hrl-forests/catalog.json
+            data/raw/copernicus-hrl-forests
             data/canonical/forests
             data/delivery/foreste
-          key: forests-cdse-statistical-v1-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: forests-cdse-statistical-v1-${{ runner.os }}-
+          key: forests-cdse-raster-v2-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: forests-cdse-raster-v2-${{ runner.os }}-
       - id: preflight
         name: GET-check persisted geospatial source state
         if: ${{ !inputs.bootstrap_all }}

@@ -13,6 +13,10 @@ client_id_environment: CDSE_CLIENT_ID
 client_secret_environment: CDSE_CLIENT_SECRET
 processing_mode_environment: FOREST_PROCESSING_MODE
 processing_modes: [statistical-api, raster]
+coverage_mode_environment: FOREST_COVERAGE_MODE
+coverage_modes: [national, development_slice]
+coverage_default: national
+territory_reference_year: 2023
 development_slice:
   territory_reference_year: 2023
   region_istat_codes: ['03', '09', '12', '19']
@@ -22,20 +26,21 @@ known_limitations:
   - HRL Tree Cover Density measures tree-crown projection, not necessarily FAO forest area.
   - Tree Cover Presence Change describes gain/loss of tree cover, not permanent land-use change or deforestation.
   - CDSE OAuth access tokens are short lived and must never be persisted or logged.
-  - Statistical API values are development-slice zonal calculations, not Copernicus-published municipality values.
-  - Raster development slices are extracted through the CDSE Processing API at 100 m; they are retained local processing inputs, not original CLMS tile downloads.
+  - Development slices are explicit test-only runs and are never the production default.
+  - Raster slices are extracted through the CDSE Processing API at 100 m; they are retained local processing inputs, not original CLMS tile downloads.
 assets:
-  - id: hrl_tree_cover_density_100m
+  - id: hrl_tree_cover_density_10m
     kind: tree_cover_density
     format: GeoTIFF
-    resolution_m: 100
+    resolution_m: 10
     process_resolution_m: 100
     process_max_pixels: 2048
     process_no_data: -9999
     years: [2018, 2021, 2023]
     byoc_collection_id: edd3c5f5-da8e-463f-8c9a-712aa451d37e
     band: TCD
-    catalog_tag: TCD
+    catalog_tag: TCDCL
+    snapshot_timestamp: content_date_start_at_reference_year
   - id: hrl_forest_type
     kind: forest_type
     format: GeoTIFF
@@ -47,6 +52,7 @@ assets:
     byoc_collection_id: d267ca76-6afb-4992-99d6-67c67df4820c
     band: FTY
     catalog_tag: FTY
+    snapshot_timestamp: content_date_start_at_reference_year
     class_codes: {non_forest: 0, broadleaved: 1, coniferous: 2, mixed: 3}
   - id: hrl_dominant_leaf_type
     kind: dominant_leaf_type
@@ -57,6 +63,7 @@ assets:
     byoc_collection_id: 42b2ef44-5983-4bd1-9e2f-52c093c08b3d
     band: DLT
     catalog_tag: DLT
+    snapshot_timestamp: content_date_start_at_reference_year
     class_codes: {non_tree: 0, broadleaved: 1, coniferous: 2}
     statistical_api_enabled: false
   - id: hrl_tree_cover_presence_change
@@ -71,4 +78,5 @@ assets:
     byoc_collection_id: c1e547c2-47ec-4ce7-b87c-3057faba5ecc
     band: TCPC
     catalog_tag: TCPC
+    snapshot_timestamp: content_date_start_at_reference_year
     class_codes: {new_tree_cover: 1, loss_tree_cover: 2}
