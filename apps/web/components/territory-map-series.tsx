@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { MapOption } from "../lib/data";
 import { territoryLabel } from "../lib/territory-labels";
+import type { ExplorerFeatureStatus } from "../lib/explorer-model";
 
 type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string; territoryGeometryReference?: string };
 type Point = { period: string; periodStart: string; periodEnd: string; value: number; unit: string; territoryGeometryReference?: string };
@@ -66,7 +67,7 @@ function trendGeometry(samples: Array<Point | null>): TrendGeometry {
   return { paths, points };
 }
 
-export function TerritoryMapSeries({ options, territoryId, territoryName, selectedPeriod, statusNote = "Valori ufficiali; nessuna interpolazione." }: { options: MapOption[]; territoryId?: string; territoryName?: string; selectedPeriod?: string; statusNote?: string }) {
+export function TerritoryMapSeries({ options, territoryId, territoryName, selectedPeriod, statusNote = "Valori ufficiali; nessuna interpolazione.", comparisonStatus = "available" }: { options: MapOption[]; territoryId?: string; territoryName?: string; selectedPeriod?: string; statusNote?: string; comparisonStatus?: ExplorerFeatureStatus }) {
   const [samples, setSamples] = useState<Array<Point | null> | null>(null);
   const requestKey = useMemo(() => options.map((option) => `${option.periodKey}:${option.url}`).join("|"), [options]);
 
@@ -103,12 +104,12 @@ export function TerritoryMapSeries({ options, territoryId, territoryName, select
   const previous = selectedIndex >= 0 ? samples.slice(0, selectedIndex).filter((sample): sample is Point => sample !== null).at(-1) : undefined;
   const geometry = samples.some(Boolean) ? trendGeometry(samples) : null;
   const sameGeometry = current && previous ? geometricallyComparable(previous, current) : true;
-  const result = current && previous && sameGeometry ? comparison(previous, current) : null;
+  const result = comparisonStatus === "available" && current && previous && sameGeometry ? comparison(previous, current) : null;
   const direction = result ? result.change > 0 ? "Aumento" : result.change < 0 ? "Diminuzione" : "Invariato" : "Non comparabile";
 
   return <section className="territory-series territory-series--drawer" aria-live="polite">
     <h3>Andamento nel periodo disponibile</h3>
     {geometry && <figure className="territory-trend"><svg viewBox="0 0 280 88" role="img" aria-label={`Trend pubblicato di ${label}`}><path d="M12 72H268" className="chart-axis" />{geometry.paths.map((path, index) => <polyline key={index} points={path} className="territory-trend-line" />)}{geometry.points.map((point, index) => point && <circle key={index} cx={point.x} cy={point.y} r={index === selectedIndex ? 4.6 : 2.2} className={index === selectedIndex ? "territory-trend-point territory-trend-point--selected" : "territory-trend-point"} />)}</svg><figcaption><span>{options[0]?.periodKey}</span><span>{selectedPeriod ?? options.at(-1)?.periodKey}</span></figcaption></figure>}
-    {!current ? <p className="sidebar-context"><strong>{label}</strong> Dato non pubblicato per periodo selezionato. Territorio resta selezionato.</p> : <><dl className="territory-summary"><div><dt>Selezionato</dt><dd>{format(current.value, current.unit)}</dd></div><div><dt>Confronto precedente</dt><dd><DeltaGauge result={result} /></dd></div></dl><p className="sidebar-context"><strong>{direction}.</strong> {result ? `${result.change > 0 ? "+" : ""}${format(result.change, current.unit)} rispetto a ${previous?.period}.` : previous ? sameGeometry ? "Periodi non comparabili." : "Geometrie territoriali differenti: confronto non comparabile, senza interpolazione o crosswalk." : "Manca periodo precedente pubblicato."}</p><small className="territory-series-note">{statusNote} {result && `${TEMPORAL_COMPARISON_UI_VERSION}: valore ${current.period} − valore ${previous?.period}.`}</small></>}
+    {!current ? <p className="sidebar-context"><strong>{label}</strong> Dato non pubblicato per periodo selezionato. Territorio resta selezionato.</p> : <><dl className="territory-summary"><div><dt>Selezionato</dt><dd>{format(current.value, current.unit)}</dd></div><div><dt>Confronto precedente</dt><dd><DeltaGauge result={result} /></dd></div></dl><p className="sidebar-context"><strong>{direction}.</strong> {result ? `${result.change > 0 ? "+" : ""}${format(result.change, current.unit)} rispetto a ${previous?.period}.` : comparisonStatus === "not_supported" ? "Confronto non supportato dalla capability del dominio." : comparisonStatus === "not_published" ? "Confronto non disponibile nella release: mancano evidenze di comparabilità." : previous ? sameGeometry ? "Periodi non comparabili." : "Geometrie territoriali differenti: confronto non comparabile, senza interpolazione o crosswalk." : "Manca periodo precedente pubblicato."}</p><small className="territory-series-note">{statusNote} {result && `${TEMPORAL_COMPARISON_UI_VERSION}: valore ${current.period} − valore ${previous?.period}.`}</small></>}
   </section>;
 }
