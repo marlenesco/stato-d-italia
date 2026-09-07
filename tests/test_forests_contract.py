@@ -122,14 +122,25 @@ def test_coverage_report_distinguishes_valid_nodata_and_rejects_duplicate_payloa
     table = pd.DataFrame([
         {"metric_id": "tree_cover_mean", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": "it:region:01", "value_decimal": 20.0},
         {"metric_id": "tree_cover_mean", "territory_level": "region", "period_start": "2021-01-01", "period_end": "2021-12-31", "territory_id": "it:region:01", "value_decimal": 21.0},
+        {"metric_id": "tree_cover_p25", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": "it:region:01", "value_decimal": 5.0},
+        {"metric_id": "tree_cover_p25", "territory_level": "region", "period_start": "2021-01-01", "period_end": "2021-12-31", "territory_id": "it:region:01", "value_decimal": 5.0},
     ])
     report = _coverage_report(table.assign(methodology_version="hrl_tree_cover_density_100m"), coverage, {"01", "02"})
     assert sum(entry["validNoDataCount"] for entry in report["entries"]) == 2
-    assert report["temporalDiagnostics"][1]["comparisonWithPrevious"]["percentChangedAmongComparable"] == 100.0
+    mean_diagnostic = next(item for item in report["temporalDiagnostics"] if item["metricId"] == "tree_cover_mean" and item["period"] == "2021-2021")
+    p25_diagnostic = next(item for item in report["temporalDiagnostics"] if item["metricId"] == "tree_cover_p25" and item["period"] == "2021-2021")
+    assert mean_diagnostic["comparisonWithPrevious"]["percentChangedAmongComparable"] == 100.0
+    assert p25_diagnostic["identicalToPrevious"] is True
+    snapshot = next(item for item in report["snapshotDiagnostics"] if item["period"] == "2021-2021")
+    assert snapshot["comparisonWithPrevious"]["identical"] is False
+    assert snapshot["comparisonWithPrevious"]["identicalMetrics"] == ["tree_cover_p25"]
     duplicated = table.copy()
-    duplicated.loc[duplicated["period_start"] == "2021-01-01", "value_decimal"] = 20.0
+    duplicated.loc[(duplicated["period_start"] == "2021-01-01") & (duplicated["metric_id"] == "tree_cover_mean"), "value_decimal"] = 20.0
+    duplicated.loc[(duplicated["period_start"] == "2021-01-01") & (duplicated["metric_id"] == "tree_cover_p25"), "value_decimal"] = 5.0
     with pytest.raises(ValueError, match="byte-identical"):
         _coverage_report(duplicated.assign(methodology_version="hrl_tree_cover_density_100m"), coverage, {"01", "02"})
+    with pytest.raises(ValueError, match="source snapshot signature reused"):
+        _coverage_report(table.assign(methodology_version="hrl_tree_cover_density_100m", source_snapshot_signature="s" * 64), coverage, {"01", "02"})
 
 
 def test_regional_coverage_union_is_per_snapshot_and_rejects_missing_development_or_overlap() -> None:
