@@ -474,7 +474,7 @@ def _validate_delivery_dependencies(
     if affected_families is not None:
         required_downstream = {
             "infc": {"forest_delivery", "forest_geometry_2015", "territory_insights"},
-            "copernicus": {"forest_delivery", "forest_geometry_2023", "territory_insights"},
+            "copernicus": {"forest_delivery", "forest_geometry_2018", "forest_geometry_2021", "forest_geometry_2023", "territory_insights"},
             "soil": {"soil_delivery", "territory_insights"},
             "water": {"water_delivery", "territory_insights"},
             "dissesto": {"dissesto_delivery", "territory_insights"},
@@ -512,7 +512,10 @@ def _validate_delivery_dependencies(
                     raise ValueError(f"Forest delivery references missing map: {map_path}")
                 payload = _artifact_json(by_logical[map_path], store)
                 reference = str(payload.get("territoryReferenceDate", ""))
+                reference_year = payload.get("territoryReferenceYear")
                 level = str(payload.get("territoryLevel", ""))
+                if not isinstance(reference_year, int) or reference[:4] != str(reference_year):
+                    raise ValueError(f"Forest map lacks its explicit territory reference year: {map_path}")
                 if Path(geometry_path).name != f"istat-{level}-{reference[:4]}.pmtiles":
                     raise ValueError(f"Forest map lacks compatible geometry: {map_path}")
                 if payload.get("territoryGeometryReference") != Path(geometry_path).name:
@@ -781,7 +784,7 @@ def _run_geospatial(
         _hydrate(input_store, root, _active_infc_logical_paths(previous_state))
     if args.force:
         families = allowed_families
-    _hydrate(input_store, root, _territory_logical_paths((2015, 2023)))
+    _hydrate(input_store, root, _territory_logical_paths((2015, 2018, 2021, 2023)))
     if "infc" in families:
         _hydrate_planned_raw_dependencies(input_store, root, {"infc"})
     infc_logical = "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"
@@ -797,8 +800,8 @@ def _run_geospatial(
     fresh_geometry: list[Path] = []
     forests_pmtiles = {
         **{
-            level: {"path": str(delivery / "foreste/geometry" / f"istat-{level}-2023.pmtiles"), "carried": True}
-            for level in ("municipality", "province", "region")
+            f"{level}_{year}": {"path": str(delivery / "foreste/geometry" / f"istat-{level}-{year}.pmtiles"), "carried": True}
+            for year in (2018, 2021, 2023) for level in ("municipality", "province", "region")
         },
         "region_2015": {"path": str(delivery / "foreste/geometry/istat-region-2015.pmtiles"), "carried": True},
     }
@@ -809,12 +812,13 @@ def _run_geospatial(
         )
         fresh_geometry.append(path)
     if "copernicus" in families:
-        for level in ("municipality", "province", "region"):
-            path = delivery / "foreste/geometry" / f"istat-{level}-2023.pmtiles"
-            forests_pmtiles[level] = build_pmtiles(
-                canonical / f"territories/reference_year=2023/{level}.parquet", path,
-            )
-            fresh_geometry.append(path)
+        for year in (2018, 2021, 2023):
+            for level in ("municipality", "province", "region"):
+                path = delivery / "foreste/geometry" / f"istat-{level}-{year}.pmtiles"
+                forests_pmtiles[f"{level}_{year}"] = build_pmtiles(
+                    canonical / f"territories/reference_year={year}/{level}.parquet", path,
+                )
+                fresh_geometry.append(path)
     forest_delivery = generate_forests_delivery(
         root / zonal_logical, root / infc_logical, canonical, delivery, release_id,
         {level: Path(info["path"]) for level, info in forests_pmtiles.items()},
@@ -895,7 +899,7 @@ def _geospatial_downstream_families(source_families: set[str]) -> set[str]:
     if source_families & {"infc", "copernicus"}:
         affected.add("territory_insights")
     if "copernicus" in source_families:
-        affected.add("forest_geometry_2023")
+        affected.update({"forest_geometry_2018", "forest_geometry_2021", "forest_geometry_2023"})
     return affected
 
 
@@ -932,7 +936,7 @@ _DATA_DELIVERY_FAMILY = {
     "emissions": "emissions_delivery",
 }
 
-_FOREST_BOUNDARY_REFERENCE_YEARS = frozenset({2015, 2023})
+_FOREST_BOUNDARY_REFERENCE_YEARS = frozenset({2015, 2018, 2021, 2023})
 
 
 def _historical_water_affected(source_families: set[str]) -> bool:
@@ -1430,16 +1434,16 @@ def run(args: argparse.Namespace) -> int:
     emissions_geometry_changed = any(not info.get("skipped", False) for info in emissions_pmtiles.values())
     forests_pmtiles: dict[str, dict] = {}
     if args.scope != "data" and "zonal" in forests:
-        reference_year = 2023
-        for level in ("municipality", "province", "region"):
-            path = delivery / "foreste" / "geometry" / f"istat-{level}-{reference_year}.pmtiles"
-            if boundaries["changed"] or forests["zonal"]["changed"] or not is_readable_pmtiles(path):
-                forests_pmtiles[level] = build_pmtiles(canonical / "territories" / f"reference_year={reference_year}" / f"{level}.parquet", path)
-            else:
-                forests_pmtiles[level] = {"path": str(path), "bytes": path.stat().st_size, "skipped": True}
+        for reference_year in (2018, 2021, 2023):
+            for level in ("municipality", "province", "region"):
+                path = delivery / "foreste" / "geometry" / f"istat-{level}-{reference_year}.pmtiles"
+                if boundaries["changed"] or forests["zonal"]["changed"] or not is_readable_pmtiles(path):
+                    forests_pmtiles[f"{level}_{reference_year}"] = build_pmtiles(canonical / "territories" / f"reference_year={reference_year}" / f"{level}.parquet", path)
+                else:
+                    forests_pmtiles[f"{level}_{reference_year}"] = {"path": str(path), "bytes": path.stat().st_size, "skipped": True}
         # INFC remains a complementary official 2015 regional dataset. Keep its
-        # own geometry alongside the 2023 Copernicus slice; delivery maps select
-        # the matching one rather than relabelling 2015 values with 2023 borders.
+        # own geometry alongside the historical Copernicus snapshots; delivery
+        # maps select their matching reference instead of relabelling borders.
         path = delivery / "foreste" / "geometry" / "istat-region-2015.pmtiles"
         if boundaries["changed"] or not is_readable_pmtiles(path):
             forests_pmtiles["region_2015"] = build_pmtiles(canonical / "territories" / "reference_year=2015" / "region.parquet", path)

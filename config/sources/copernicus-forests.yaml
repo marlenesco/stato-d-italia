@@ -16,6 +16,8 @@ processing_modes: [statistical-api, raster]
 coverage_mode_environment: FOREST_COVERAGE_MODE
 coverage_modes: [national, development_slice]
 coverage_default: national
+# Production snapshots resolve their own ISTAT reference year from the asset
+# period. This remains only as an explicit development-slice fallback.
 territory_reference_year: 2023
 development_slice:
   territory_reference_year: 2023
@@ -83,7 +85,7 @@ assets:
     band: TCPC
     catalog_name_contains_template: _TCPC_C{start_year}-{end_year}_R20m_
     catalog_name_regex_template: ^CLMS_HRLVLCC_TCPC_C{start_year}-{end_year}_R20m_[A-Z0-9]+_[0-9]+_V[0-9]+_R[0-9]+$
-    catalog_content_year: start
     snapshot_timestamp: content_date_start_at_reference_year
     source_nodata_codes: [255]
+    source_value_codes: [0, 1, 2, 10, 255]
     class_codes: {new_tree_cover: 1, loss_tree_cover: 2}

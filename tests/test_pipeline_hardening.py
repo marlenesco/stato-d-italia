@@ -717,7 +717,7 @@ def test_forest_downstream_dependencies_distinguish_infc_and_copernicus() -> Non
         "infc", "forest_delivery", "forest_geometry_2015", "territory_insights",
     }
     assert _geospatial_downstream_families({"copernicus"}) == {
-        "copernicus", "forest_delivery", "forest_geometry_2023", "territory_insights",
+        "copernicus", "forest_delivery", "forest_geometry_2018", "forest_geometry_2021", "forest_geometry_2023", "territory_insights",
     }
 
 

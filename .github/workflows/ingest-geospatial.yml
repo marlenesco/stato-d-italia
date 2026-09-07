@@ -123,7 +123,9 @@ jobs:
             data/canonical/forests
             data/delivery/foreste
           key: forests-national-candidate-v2-${{ runner.os }}-forests-zonal-statistics-v2-${{ hashFiles('config/sources/copernicus-forests.yaml') }}-${{ github.run_id }}
-          restore-keys: forests-national-candidate-v2-${{ runner.os }}-forests-zonal-statistics-v2-${{ hashFiles('config/sources/copernicus-forests.yaml') }}-
+          restore-keys: |
+            forests-national-candidate-v2-${{ runner.os }}-forests-zonal-statistics-v2-${{ hashFiles('config/sources/copernicus-forests.yaml') }}-
+            forests-national-candidate-v2-${{ runner.os }}-forests-zonal-statistics-v2-
       - name: Read active source state only
         run: >-
           uv run stato-data check-sources --domain forests --publish r2
