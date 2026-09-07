@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import requests
 
 import stato_italia.cli as cli
 from stato_italia.cli import (
@@ -55,6 +56,9 @@ def test_national_forest_candidate_job_has_no_r2_publication_path() -> None:
     assert "actions/cache/save@v6.1.0" in workflow
     assert "forests-national-candidate-v2-" in workflow
     assert "if: ${{ always() }}" in workflow
+    assert "Fail closed on unverifiable forest catalogue" in workflow
+    assert "Forest national validation cannot continue: CDSE catalogue source is unverifiable." in workflow
+    assert ".catalog.status == \"unverifiable\"" in workflow
 
 
 def test_forest_domain_registry_is_scoped_to_its_sources_and_shared_downstream() -> None:
@@ -88,8 +92,7 @@ def test_check_sources_domain_forests_constrains_preflight_and_marks_plan(
     monkeypatch.setattr(cli, "check_persisted_sources", check)
     import stato_italia.forests as forests
 
-    monkeypatch.setattr(forests, "_cdse_token", lambda _source: "token")
-    monkeypatch.setattr(forests, "_check_catalog", lambda _source, _token: {
+    monkeypatch.setattr(forests, "_check_catalog", lambda _source: {
         "products": [], "signature": "a" * 64,
     })
     monkeypatch.setattr(sys, "argv", ["stato-data", "check-sources", "--domain", "forests", "--workdir", str(tmp_path)])
@@ -102,6 +105,43 @@ def test_check_sources_domain_forests_constrains_preflight_and_marks_plan(
     assert report["domain"] == "forests"
     assert report["scope"] == "geospatial"
     assert Path(str(captured["stage_dir"])).name == "forests"
+
+
+def test_check_sources_marks_catalogue_forbidden_as_unverifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Response:
+        status_code = 403
+
+    monkeypatch.setattr(cli, "load_local_env", lambda: None)
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda _store: {"schemaVersion": 1, "sources": []})
+    monkeypatch.setattr(cli, "active_release", lambda _store: {"releaseId": "r1"})
+    monkeypatch.setattr(cli, "check_persisted_sources", lambda *_args, **_kwargs: {
+        "scope": "geospatial", "sourceChecks": 0, "sourcesChanged": 0,
+        "sourcesUnchanged": 0, "sourcesUnverifiable": 0, "changed": False, "sources": [],
+    })
+    import stato_italia.forests as forests
+
+    monkeypatch.setattr(
+        forests,
+        "_check_catalog",
+        lambda _source: (_ for _ in ()).throw(requests.HTTPError(
+            "CDSE catalogue denied unauthenticated product discovery: HTTP 403",
+            response=Response(),
+        )),
+    )
+    monkeypatch.setattr(sys, "argv", ["stato-data", "check-sources", "--domain", "forests", "--workdir", str(tmp_path)])
+
+    assert cli.main() == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["changed"] is False
+    assert report["sourcesUnverifiable"] == 1
+    assert report["catalog"] == {
+        "checked": False, "status": "unverifiable", "changed": False,
+        "reason": "HTTPError", "httpStatus": 403,
+        "endpoint": "catalogue.dataspace.copernicus.eu",
+    }
 
 
 def test_forest_domain_run_does_not_widen_force_to_data_scope(

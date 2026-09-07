@@ -33,6 +33,8 @@ CORINE = load_source("copernicus-corine-forests")
 INFC = load_source("infc-2015-forests")
 ZONAL_ALGORITHM_VERSION = "forests-zonal-statistics-v2"
 MAPPABLE_LEVELS = ("municipality", "province", "region")
+CATALOG_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+CATALOG_MAX_ATTEMPTS = 5
 
 
 def forest_coverage_mode() -> str:
@@ -114,7 +116,60 @@ class _CdseTokenProvider:
             return self._token
 
 
-def _catalog_products(source: dict, token: str) -> list[dict]:
+def _close_response(response: requests.Response) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
+def _catalog_retry_delay(response: requests.Response | None, attempt: int) -> float:
+    retry_after = getattr(response, "headers", {}).get("Retry-After") if response is not None else None
+    if isinstance(retry_after, str):
+        try:
+            return min(max(float(retry_after), 0), 60)
+        except ValueError:
+            pass
+    return min(2 ** attempt, 16)
+
+
+def _get_catalog(source: dict, params: dict) -> requests.Response:
+    """GET CDSE OData without Sentinel Hub credentials, retrying only transients."""
+    last_error: Exception | None = None
+    for attempt in range(CATALOG_MAX_ATTEMPTS):
+        response: requests.Response | None = None
+        try:
+            response = requests.get(
+                source["catalog_api_url"], params=params, timeout=(15, 90),
+                headers={"Accept": "application/json"},
+            )
+            status = getattr(response, "status_code", None)
+            if status in CATALOG_RETRYABLE_STATUSES:
+                last_error = requests.HTTPError(
+                    f"CDSE catalogue transient product discovery failure: HTTP {status}",
+                    response=response,
+                )
+                delay = _catalog_retry_delay(response, attempt)
+                _close_response(response)
+            elif status in {401, 403}:
+                _close_response(response)
+                raise requests.HTTPError(
+                    f"CDSE catalogue denied unauthenticated product discovery: HTTP {status}",
+                    response=response,
+                )
+            else:
+                response.raise_for_status()
+                return response
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
+            last_error = exc
+            delay = _catalog_retry_delay(None, attempt)
+        if attempt < CATALOG_MAX_ATTEMPTS - 1:
+            sleep(delay)
+    if isinstance(last_error, requests.HTTPError):
+        raise last_error
+    raise RuntimeError("CDSE catalogue product discovery failed after transient retries") from last_error
+
+
+def _catalog_products(source: dict) -> list[dict]:
     products: list[dict] = []
     for asset in source["assets"]:
         for start_year, end_year in _asset_periods(asset):
@@ -132,9 +187,11 @@ def _catalog_products(source: dict, token: str) -> list[dict]:
                 "$orderby": "ContentDate/Start asc,Name asc",
                 "$top": "1000",
             }
-            response = requests.get(source["catalog_api_url"], params=params, timeout=(15, 90), headers={"Accept": "application/json", "Authorization": f"Bearer {token}"})
-            response.raise_for_status()
-            values = response.json().get("value")
+            response = _get_catalog(source, params)
+            try:
+                values = response.json().get("value")
+            finally:
+                _close_response(response)
             if not isinstance(values, list) or not values:
                 raise ValueError(f"CDSE catalog has no {asset['id']} snapshot for {start_year}-{end_year}")
             items = []
@@ -187,9 +244,9 @@ def _catalog_state(root: Path) -> Path:
     return root / "raw" / HRL["source_id"] / "catalog.json"
 
 
-def _check_catalog(source: dict, token: str) -> dict:
+def _check_catalog(source: dict) -> dict:
     """Read remote catalog and compute signature without changing local state."""
-    products = _catalog_products(source, token)
+    products = _catalog_products(source)
     signature = sha256(json.dumps(products, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {
         "source_id": source["source_id"], "signature": signature, "products_payload": products,
@@ -451,14 +508,14 @@ def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool =
         return {"infc": infc, "catalog": {"status": "offline"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     if not check_geospatial:
         return {"infc": infc, "catalog": {"status": "deferred"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
-    if not os.getenv(HRL["client_id_environment"]) or not os.getenv(HRL["client_secret_environment"]):
-        return {"infc": infc, "catalog": {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
-    token = _cdse_token(HRL)
     planned_catalog = planned_catalog_check()
-    catalog_check = planned_catalog or _check_catalog(HRL, token)
+    catalog_check = planned_catalog or _check_catalog(HRL)
     catalog = _persist_catalog(root, catalog_check)
     raster = None
     if os.getenv(HRL["processing_mode_environment"], "raster") == "raster":
+        if not os.getenv(HRL["client_id_environment"]) or not os.getenv(HRL["client_secret_environment"]):
+            return {"infc": infc, "catalog": catalog | {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
+        token = _cdse_token(HRL)
         raster = _fetch_process_raster_slices(
             root, root / "canonical", token, catalog_check, force=planned_catalog is not None,
         )

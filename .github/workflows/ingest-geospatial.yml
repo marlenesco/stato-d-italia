@@ -130,6 +130,12 @@ jobs:
         run: >-
           uv run stato-data check-sources --domain forests --publish r2
           --workdir data --output artifacts --report reports/forest-source-check.json
+      - name: Fail closed on unverifiable forest catalogue
+        run: |
+          if jq -e '.catalog.status == "unverifiable"' reports/forest-source-check.json >/dev/null; then
+            echo "::error::Forest national validation cannot continue: CDSE catalogue source is unverifiable."
+            exit 1
+          fi
       - name: Build local national candidate without release activation
         run: >-
           uv run stato-data run --domain forests --force
