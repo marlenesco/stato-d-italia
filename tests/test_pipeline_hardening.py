@@ -125,6 +125,47 @@ def test_forest_domain_run_does_not_widen_force_to_data_scope(
     assert domain.source_families == frozenset({"infc", "copernicus"})
 
 
+@pytest.mark.parametrize("changed", (True, False))
+def test_run_validation_plan_uses_hydration_release_for_build_and_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], changed: bool,
+) -> None:
+    class RemoteInput:
+        reads = 0
+        writes = 0
+
+    remote = RemoteInput()
+    output = tmp_path / "artifacts"
+    plan = tmp_path / "forest-plan.json"
+    plan.write_text(json.dumps({
+        "schemaVersion": 1, "scope": "geospatial", "domain": "forests", "activeReleaseId": "active-r2",
+        "changed": changed, "sources": [], "sourceChecks": 0, "sourcesChanged": int(changed),
+        "sourcesUnchanged": int(not changed), "sourcesUnverifiable": 0,
+    }))
+    lookups: list[object] = []
+
+    monkeypatch.setattr(cli, "R2ObjectStore", lambda: remote)
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda store: lookups.append(store) or {"schemaVersion": 1, "sources": []})
+    monkeypatch.setattr(cli, "active_release", lambda store: lookups.append(store) or {"releaseId": "active-r2", "objects": []})
+    monkeypatch.setattr(cli, "_run_geospatial", lambda _args, **kwargs: lookups.append(kwargs["hydrate_store"]) or 0)
+    monkeypatch.setattr(cli, "load_local_env", lambda: None)
+
+    assert cli.run(Namespace(
+        workdir=str(tmp_path / "data"), output=str(output), report=str(tmp_path / "report.json"),
+        release_id="candidate", publish="local", scope="all", domain="forests", plan=str(plan),
+        force=False, offline=False, hydrate_from="r2", validation_only=True,
+    )) == 0
+
+    assert lookups and all(item is remote for item in lookups)
+    assert remote.writes == 0
+    if changed:
+        assert not (output / "object-store/manifest.json").exists()
+    else:
+        report = json.loads((tmp_path / "report.json").read_text())
+        assert report["status"] == "noop"
+        assert report["manifest"]["releaseId"] == "active-r2"
+    capsys.readouterr()
+
+
 def test_validation_only_forest_run_reads_input_store_and_never_publishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
