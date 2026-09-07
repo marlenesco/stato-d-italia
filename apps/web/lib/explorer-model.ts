@@ -1,8 +1,8 @@
 import type { MapOption } from "./data";
-import { DOMAIN_CAPABILITIES, type DomainId, type TemporalMode, type TerritoryLevel } from "./domain-capabilities";
+import { DOMAIN_CAPABILITIES, type DomainCapability, type DomainId, type TemporalMode, type TerritoryLevel } from "./domain-capabilities";
 
 export type ExplorerFeatureStatus = "available" | "not_published" | "not_supported";
-export type ExplorerFeatureReason = "domain_not_supported" | "not_published" | "single_snapshot" | "single_change_period" | "missing_compatible_geometry" | "comparison_not_supported" | "missing_comparison_evidence" | "ranking_not_published";
+export type ExplorerFeatureReason = "domain_not_supported" | "not_published" | "single_snapshot" | "single_change_period" | "insufficient_published_periods" | "missing_compatible_geometry" | "comparison_not_supported" | "missing_comparison_evidence" | "ranking_not_published";
 export type ExplorerFeature = { status: ExplorerFeatureStatus; reason?: ExplorerFeatureReason };
 export type ExplorerFeatures = {
   map: ExplorerFeature;
@@ -31,6 +31,7 @@ export type ExplorerModelInput = {
   requestedLevel?: string | null;
   requestedPeriod?: string | null;
   preferences?: ExplorerSelectionPreferences;
+  capability?: DomainCapability;
 };
 export type ExplorerModel = {
   metricId?: string;
@@ -84,7 +85,8 @@ function timelineFeature(temporal: TemporalMode, options: MapOption[]): Explorer
   if (temporal === "change_period") return unsupported("single_change_period");
   if (options.length < 2) {
     const onlyPeriod = options[0]?.periodKey.split("-");
-    return unsupported(onlyPeriod && onlyPeriod[0] !== onlyPeriod[1] ? "single_change_period" : "single_snapshot");
+    if (temporal === "mixed") return unsupported(onlyPeriod && onlyPeriod[0] !== onlyPeriod[1] ? "single_change_period" : "single_snapshot");
+    return unavailable("insufficient_published_periods");
   }
   return available();
 }
@@ -95,7 +97,7 @@ function rankingPath(domain: DomainId, option: MapOption) {
 }
 
 export function resolveExplorerModel(input: ExplorerModelInput): ExplorerModel {
-  const capability = DOMAIN_CAPABILITIES[input.domain];
+  const capability = input.capability ?? DOMAIN_CAPABILITIES[input.domain];
   const semanticMaps = input.maps.filter((option) => isMappableLevel(option.level) && capability.levels[option.level]);
   const publishedMaps = semanticMaps.filter((option) => Boolean(geometryFor(option, input)));
   const availableMetrics = [...new Set(publishedMaps.map((option) => option.metricId))].sort();
@@ -141,7 +143,7 @@ export function resolveExplorerModel(input: ExplorerModelInput): ExplorerModel {
   const currentIdentities = level ? input.currentTerritoryIds?.[level] : undefined;
   const profile = capability.profilePolicy === "not_allowed"
     ? unsupported()
-    : selectedOption && (!currentIdentities || currentIdentities.length > 0) ? available() : unavailable("not_published");
+    : selectedOption && currentIdentities && currentIdentities.length > 0 ? available() : unavailable("not_published");
 
   return {
     metricId,

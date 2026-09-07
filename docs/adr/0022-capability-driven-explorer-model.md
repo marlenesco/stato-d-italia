@@ -35,6 +35,12 @@ release. I renderer decidono il testo e il layout, ma ricevono la capability
 risolta: non deducono più timeline, ranking o confronto dalla sola presenza di
 una URL.
 
+Una serie semanticamente ammessa con meno di due periodi consegnati è
+`not_published`, non `not_supported`: manca la popolazione di periodi richiesta
+dalla release. La capability profilo richiede inoltre una popolazione di identità
+territoriali correnti non vuota nell'indice delivery; la verifica dell'identità
+selezionata resta separata e puntuale.
+
 Un confronto con policy `same_metric_unit_method_geometry` resta fail-closed se
 l'indice non fornisce evidenza sufficiente per metodologia e geometria. I check
 runtime su unità, durata del periodo e geometria restano necessari e non sono

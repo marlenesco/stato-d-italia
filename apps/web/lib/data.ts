@@ -264,33 +264,35 @@ async function loadTerritoryInsights(base: string, release: Release, level: "mun
 export async function loadSoilData(): Promise<SoilData> {
   const { base, release, index } = await soilRelease();
   const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
+  const currentTerritoryIds = await loadCurrentTerritoryPopulation(base, release);
   return {
     releaseId: release.releaseId,
     provenance,
     maps: index.maps.map((path) => parseMap(path, asset(base, release, path))),
     rankings: Object.fromEntries(index.rankings.map((path) => [path, asset(base, release, path)])),
     geometry: geometryUrls(base, release, index.geometry),
+    currentTerritoryIds,
   };
 }
 
 export async function loadDissestoData(): Promise<DissestoData> {
   const { base, release, index } = await dissestoRelease();
   const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
+  const currentTerritoryIds = await loadCurrentTerritoryPopulation(base, release);
   return {
     releaseId: release.releaseId,
     provenance,
     maps: index.maps.map((path) => parseMap(path, asset(base, release, path))),
     rankings: {},
     geometry: geometryUrls(base, release, index.geometry),
+    currentTerritoryIds,
   };
 }
 
 export async function loadForestData(): Promise<ForestData> {
   const { base, release, index } = await forestsRelease();
   const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
-  const territoryIndex = release.objects.some((item) => item.logicalPath === "delivery/territories/index.json")
-    ? await fetchJson<TerritoryIdentityIndex>(asset(base, release, "delivery/territories/index.json"), 300)
-    : null;
+  const currentTerritoryIds = await loadCurrentTerritoryPopulation(base, release);
   return {
     releaseId: release.releaseId,
     provenance,
@@ -298,7 +300,7 @@ export async function loadForestData(): Promise<ForestData> {
     rankings: Object.fromEntries(index.rankings.map((path) => [path, asset(base, release, path)])),
     geometry: geometryUrls(base, release, index.geometry),
     mapGeometry: Object.fromEntries(Object.entries(index.mapGeometry ?? {}).map(([mapPath, geometryPath]) => [mapPath, `${asset(base, release, geometryPath)}?release=${release.releaseId}`])),
-    currentTerritoryIds: currentTerritoryPopulation(territoryIndex),
+    currentTerritoryIds,
   };
 }
 
@@ -388,6 +390,12 @@ export async function loadHomeDomainSignals(): Promise<HomeDomainSignal[]> {
 
 type TerritoryIdentityIndex = { shards: string[]; currentIdentityIds?: Partial<Record<TerritoryLevel, string[]>> };
 type TerritoryIdentityShard = { territories: TerritoryIdentity[] };
+
+async function loadCurrentTerritoryPopulation(base: string, release: Release) {
+  const logicalPath = "delivery/territories/index.json";
+  if (!release.objects.some((item) => item.logicalPath === logicalPath)) return currentTerritoryPopulation(null);
+  return currentTerritoryPopulation(await fetchJson<TerritoryIdentityIndex>(asset(base, release, logicalPath), 300));
+}
 
 async function loadTerritoryIdentity(base: string, release: Release, level: TerritoryLevel, istatCode: string): Promise<TerritoryIdentity> {
   const index = await fetchJson<TerritoryIdentityIndex>(asset(base, release, "delivery/territories/index.json"), 300);
