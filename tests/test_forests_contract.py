@@ -6,6 +6,7 @@ import re
 import numpy as np
 import pandas as pd
 import pytest
+import requests
 from shapely.geometry import Polygon
 
 from stato_italia.cli import load_local_env
@@ -147,11 +148,109 @@ def test_catalog_queries_every_supported_asset_period_and_verifies_reference_tim
         return Response()
 
     monkeypatch.setattr(forests.requests, "get", get)
-    products = forests._catalog_products(HRL, "token")
+    products = forests._catalog_products(HRL)
 
     assert len(products) == 9  # TCD (3), FTY (2), DLT (3), TCPC (1)
     assert {tuple(item["period"]) for item in products if item["asset_id"] == "hrl_tree_cover_density_100m"} == {(2018, 2018), (2021, 2021), (2023, 2023)}
     assert all("ContentDate/Start ge" in call["params"]["$filter"] for call in calls)
+    assert all(call["headers"] == {"Accept": "application/json"} for call in calls)
+
+
+def test_catalog_discovery_retries_transient_statuses_without_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            self.headers: dict[str, str] = {}
+            self.closed = False
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    responses = iter([Response(503), Response(503), Response(200)])
+    calls: list[dict] = []
+    pauses: list[float] = []
+    monkeypatch.setattr(forests.requests, "get", lambda *_args, **kwargs: calls.append(kwargs) or next(responses))
+    monkeypatch.setattr(forests, "sleep", pauses.append)
+
+    response = forests._get_catalog(HRL, {"$top": "1"})
+
+    assert response.status_code == 200
+    assert len(calls) == 3
+    assert pauses == [1, 2]
+    assert all("Authorization" not in call["headers"] for call in calls)
+
+
+def test_catalog_discovery_respects_retry_after_for_rate_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def __init__(self, status_code: int, retry_after: str | None = None) -> None:
+            self.status_code = status_code
+            self.headers = {"Retry-After": retry_after} if retry_after else {}
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+        def close(self) -> None:
+            return None
+
+    responses = iter([Response(429, "7"), Response(200)])
+    pauses: list[float] = []
+    monkeypatch.setattr(forests.requests, "get", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(forests, "sleep", pauses.append)
+
+    assert forests._get_catalog(HRL, {"$top": "1"}).status_code == 200
+    assert pauses == [7.0]
+
+
+def test_catalog_discovery_fails_closed_for_persistent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        status_code = 403
+        headers: dict[str, str] = {}
+
+        def close(self) -> None:
+            return None
+
+    calls = 0
+
+    def get(*_args: object, **_kwargs: object) -> Response:
+        nonlocal calls
+        calls += 1
+        return Response()
+
+    monkeypatch.setattr(forests.requests, "get", get)
+
+    with pytest.raises(requests.HTTPError, match="denied unauthenticated product discovery: HTTP 403") as error:
+        forests._get_catalog(HRL, {"$top": "1"})
+
+    assert calls == 1
+    assert "Bearer" not in str(error.value)
+    assert "token" not in str(error.value).lower()
+
+
+def test_process_api_keeps_bearer_authentication(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def close(self) -> None:
+            return None
+
+    captured: dict[str, str] = {}
+
+    def post(*_args: object, **kwargs: object) -> Response:
+        captured.update(kwargs["headers"])  # type: ignore[arg-type]
+        return Response()
+
+    monkeypatch.setattr(forests.requests, "post", post)
+
+    assert forests._post_process_raster({"request": "payload"}, "process-token").status_code == 200
+    assert captured == {"Accept": "image/tiff", "Authorization": "Bearer process-token"}
 
 
 def test_catalog_contract_rejects_tcd_confidence_layer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,7 +268,7 @@ def test_catalog_contract_rejects_tcd_confidence_layer(monkeypatch: pytest.Monke
     source = HRL | {"assets": [next(asset for asset in HRL["assets"] if asset["kind"] == "tree_cover_density") | {"years": [2018]}]}
 
     with pytest.raises(ValueError, match="unexpected product name"):
-        forests._catalog_products(source, "token")
+        forests._catalog_products(source)
 
 
 def test_catalog_contract_rejects_missing_or_ambiguous_content_dates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,7 +284,7 @@ def test_catalog_contract_rejects_missing_or_ambiguous_content_dates(monkeypatch
 
     monkeypatch.setattr(forests.requests, "get", lambda *_args, **_kwargs: Response())
     with pytest.raises(ValueError, match="unexpected timestamp"):
-        forests._catalog_products(HRL | {"assets": [asset]}, "token")
+        forests._catalog_products(HRL | {"assets": [asset]})
     with pytest.raises(ValueError, match="ambiguous content dates"):
         _catalog_snapshot({"products_payload": [{"asset_id": asset["id"], "period": [2018, 2021], "items": [
             {"Id": "one", "Name": valid_name, "ContentDate": {"Start": "2018-01-01T00:00:00Z", "End": "2021-12-31T23:59:59Z"}},
@@ -541,9 +640,9 @@ def test_catalog_preflight_is_read_only_and_run_regenerates_canonical_from_v2(
         "Id": "v2", "Name": "V2", "ContentDate": None, "Checksum": None,
         "S3Path": None, "OriginDate": None,
     }]
-    monkeypatch.setattr(forests, "_catalog_products", lambda _source, _token: products_v2)
+    monkeypatch.setattr(forests, "_catalog_products", lambda _source: products_v2)
 
-    remote = _check_catalog(HRL, "token")
+    remote = _check_catalog(HRL)
 
     assert json.loads(catalog_path.read_text())["signature"] == "1" * 64
     persisted = _persist_catalog(tmp_path, remote)

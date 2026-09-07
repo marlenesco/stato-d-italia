@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 
@@ -1699,12 +1700,12 @@ def main() -> int:
         result["schemaVersion"] = PLAN_SCHEMA_VERSION
         result["activeReleaseId"] = release.get("releaseId") if release else None
         if args.scope == "geospatial":
-            from .forests import HRL, _cdse_token, _check_catalog
+            from .forests import HRL, _check_catalog
 
             previous_catalog = next((entry for entry in (persisted or {}).get("sources", []) if entry.get("kind") == "catalog" and entry.get("source_id", entry.get("sourceId")) == HRL["source_id"]), None)
             result["sourceChecks"] += 1
             try:
-                catalog = _check_catalog(HRL, _cdse_token(HRL))
+                catalog = _check_catalog(HRL)
                 catalog_changed = previous_catalog is None or previous_catalog.get("sha256") != catalog["signature"]
                 result["catalog"] = {
                     "checked": True,
@@ -1723,18 +1724,16 @@ def main() -> int:
                 else:
                     result["sourcesUnchanged"] += 1
             except Exception as exc:
-                has_baseline = previous_catalog is not None
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
                 result["catalog"] = {
-                    "checked": False,
-                    "status": "unverifiable" if has_baseline else "changed",
-                    "changed": not has_baseline,
+                    "checked": False, "status": "unverifiable", "changed": False,
                     "reason": type(exc).__name__,
+                    "endpoint": urlparse(HRL["catalog_api_url"]).netloc,
                 }
-                if has_baseline:
-                    result["sourcesUnverifiable"] = result.get("sourcesUnverifiable", 0) + 1
-                else:
-                    result["changed"] = True
-                    result["sourcesChanged"] += 1
+                if isinstance(status, int):
+                    result["catalog"]["httpStatus"] = status
+                result["sourcesUnverifiable"] = result.get("sourcesUnverifiable", 0) + 1
         if args.force:
             result["changed"] = True
             result["reason"] = "force"
