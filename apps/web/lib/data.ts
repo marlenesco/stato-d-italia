@@ -1,5 +1,6 @@
 import "server-only";
 import { DOMAIN_CAPABILITIES, type DataKind, type DomainId, type TemporalMode, type TerritoryLevel } from "./domain-capabilities";
+import { currentTerritoryPopulation } from "./current-profile";
 
 type ReleaseObject = { key: string; logicalPath?: string; name: string };
 type Manifest = { releaseId: string; releaseKey: string };
@@ -297,7 +298,7 @@ export async function loadForestData(): Promise<ForestData> {
     rankings: Object.fromEntries(index.rankings.map((path) => [path, asset(base, release, path)])),
     geometry: geometryUrls(base, release, index.geometry),
     mapGeometry: Object.fromEntries(Object.entries(index.mapGeometry ?? {}).map(([mapPath, geometryPath]) => [mapPath, `${asset(base, release, geometryPath)}?release=${release.releaseId}`])),
-    currentTerritoryIds: territoryIndex?.currentIdentityIds,
+    currentTerritoryIds: currentTerritoryPopulation(territoryIndex),
   };
 }
 
