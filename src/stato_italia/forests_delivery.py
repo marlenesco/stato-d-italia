@@ -9,7 +9,7 @@ from .common import sha256_file
 from .forests import INFC, ZONAL_ALGORITHM_VERSION, forest_coverage_report_path
 from .registry import load_source
 
-DELIVERY_ALGORITHM_VERSION = "forests-delivery-v7"
+DELIVERY_ALGORITHM_VERSION = "forests-delivery-v8"
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -43,16 +43,17 @@ def _ranking_rows(rows: pd.DataFrame, territory_root: Path, reference_year: int,
     return result
 
 
-def _coverage_for_map(report: dict, asset_id: str, period: str, level: str) -> dict:
-    entries = [item for item in report.get("entries", []) if item.get("assetId") == asset_id and item.get("period") == period and item.get("territoryLevel") == level]
+def _coverage_for_map(report: dict, asset_id: str, period: str, level: str, reference_year: int) -> dict:
+    geometry_reference = f"istat-{level}-{reference_year}.pmtiles"
+    entries = [item for item in report.get("entries", []) if item.get("assetId") == asset_id and item.get("period") == period and item.get("territoryLevel") == level and item.get("territoryReferenceYear") == reference_year and item.get("territoryGeometryReference") == geometry_reference]
     if not entries:
-        raise ValueError(f"Forest delivery lacks coverage for {asset_id}/{period}/{level}")
+        raise ValueError(f"Forest delivery lacks coverage for {asset_id}/{period}/{level}/{reference_year}")
     numeric = set().union(*(set(item["numericTerritoryIds"]) for item in entries))
     nodata = set().union(*(set(item["validNoDataTerritoryIds"]) for item in entries))
     expected = set().union(*(set(item["expectedTerritoryIds"]) for item in entries))
     if numeric & nodata or numeric | nodata != expected:
-        raise ValueError(f"Forest delivery has incomplete coverage for {asset_id}/{period}/{level}")
-    return {"expectedCount": len(expected), "numericCount": len(numeric), "validNoDataCount": len(nodata)}
+        raise ValueError(f"Forest delivery has incomplete coverage for {asset_id}/{period}/{level}/{reference_year}")
+    return {"expectedCount": len(expected), "numericCount": len(numeric), "validNoDataCount": len(nodata), "territoryReferenceYear": reference_year, "territoryGeometryReference": geometry_reference}
 
 
 def generate_forests_delivery(zonal_path: Path | None, infc_path: Path, territory_root: Path, destination: Path, release_id: str, geometry: dict[str, Path], force: bool = False, coverage_path: Path | None = None) -> dict:
@@ -105,11 +106,12 @@ def generate_forests_delivery(zonal_path: Path | None, infc_path: Path, territor
             period_key = f"{start[:4]}-{end[:4]}"
             if source_kind == "derived" and "methodology_version" not in rows.columns:
                 raise ValueError("Derived Forest canonical contract lacks methodology_version")
-            coverage = _coverage_for_map(coverage_report, str(rows.iloc[0].methodology_version), period_key, level) if source_kind == "derived" and coverage_report else None
+            reference_year = int(reference_dates[0][:4])
+            coverage = _coverage_for_map(coverage_report, str(rows.iloc[0].methodology_version), period_key, level, reference_year) if source_kind == "derived" and coverage_report else None
             logical = f"delivery/foreste/maps/{metric}/{period_key}/{level}.json"
             _write(destination / logical.removeprefix("delivery/"), {
                 "schemaVersion": 1, "releaseId": release_id, "theme": "foreste", "kind": f"{source_kind}_snapshot_map_values",
-                "metricId": metric, "unit": rows.iloc[0].unit_ucum, "periodStart": start, "periodEnd": end, "territoryLevel": level, "territoryReferenceDate": reference_dates[0],
+                "metricId": metric, "unit": rows.iloc[0].unit_ucum, "periodStart": start, "periodEnd": end, "territoryLevel": level, "territoryReferenceDate": reference_dates[0], "territoryReferenceYear": reference_year,
                 "territoryGeometryReference": f"istat-{level}-{reference_dates[0][:4]}.pmtiles", "coverage": coverage,
                 "columns": ["territoryId", "value"], "values": [[row.territory_id, float(row.value_decimal)] for row in rows.itertuples()], "provenanceRef": "delivery/foreste/provenance.json",
             })
