@@ -244,9 +244,15 @@ def _missing_bigbang_source_plan_entries(state: dict | None) -> list[dict]:
 
 def _planned_noop_report(
     args: argparse.Namespace, store: LocalObjectStore | R2ObjectStore, *, started: float, started_at: str,
+    reference_store: LocalObjectStore | R2ObjectStore | None = None,
 ) -> int:
     plan = active_ingestion_plan() or {}
-    manifest = store.read_json("manifest.json")
+    if getattr(args, "validation_only", False):
+        manifest = active_release(reference_store or store)
+        if manifest is None:
+            raise FileNotFoundError("Validation-only noop requires an active reference release")
+    else:
+        manifest = store.read_json("manifest.json")
     report = {
         "run_id": manifest["releaseId"], "status": "noop", "changed": False, "scope": args.scope,
         "operationalMetrics": {
@@ -1330,7 +1336,7 @@ def run(args: argparse.Namespace) -> int:
     if plan_path:
         if args.scope == "all":
             raise ValueError("Incremental ingestion plans are supported only for scoped runs")
-        release = active_release(store)
+        release = active_release(hydrate_store)
         if release is None:
             raise FileNotFoundError("Incremental ingestion plan requires an active release")
         load_ingestion_plan(
@@ -1340,7 +1346,9 @@ def run(args: argparse.Namespace) -> int:
         if domain is not None:
             _validate_domain_plan(domain)
         if not active_ingestion_plan().get("changed") and not args.force:
-            return _planned_noop_report(args, store, started=started, started_at=started_at)
+            return _planned_noop_report(
+                args, store, reference_store=hydrate_store, started=started, started_at=started_at,
+            )
     if args.scope == "geospatial":
         return _run_geospatial(
             args, root=root, output=output, canonical=canonical, delivery=delivery, store=store,

@@ -135,6 +135,7 @@ jobs:
           --hydrate-from r2 --publish local --validation-only
           --workdir data --output artifacts --report reports/forest-national-validation.json
       - name: Verify production manifest remained unchanged
+        if: ${{ always() && hashFiles('reports/production-manifest-before.json') != '' }}
         run: |
           uv run python - <<'PY'
           import json
@@ -150,10 +151,11 @@ jobs:
           )
           PY
       - name: Preserve candidate diagnostics
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: forest-national-candidate-${{ github.run_id }}
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             reports/forest-source-check.json
             reports/forest-national-validation.json
