@@ -1,7 +1,9 @@
 from pathlib import Path
 import json
 import os
+import re
 
+import numpy as np
 import pandas as pd
 import pytest
 from shapely.geometry import Polygon
@@ -9,7 +11,7 @@ from shapely.geometry import Polygon
 from stato_italia.cli import load_local_env
 import stato_italia.forests as forests
 from stato_italia.forests_delivery import generate_forests_delivery
-from stato_italia.forests import CORINE, HRL, _asset_periods, _catalog_snapshot, _check_catalog, _coverage_report, _persist_catalog, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _write_statistical_checkpoint, forest_coverage_mode
+from stato_italia.forests import CORINE, HRL, _asset_periods, _catalog_snapshot, _check_catalog, _coverage_report, _expected_region_codes_from_coverage, _persist_catalog, _process_payload, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _stats_payload, _valid_source_values, _write_statistical_checkpoint, forest_coverage_mode
 
 
 def test_corine_and_hrl_keep_separate_forest_cover_metrics() -> None:
@@ -41,9 +43,12 @@ def test_statistical_mode_contract_declares_real_and_future_modes() -> None:
     assert forest_type["class_codes"]["mixed"] == 3
     assert HRL["coverage_default"] == "national"
     assert {asset["id"] for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)} == {
-        "hrl_tree_cover_density_10m", "hrl_forest_type", "hrl_tree_cover_presence_change",
+        "hrl_tree_cover_density_100m", "hrl_forest_type", "hrl_tree_cover_presence_change",
     }
     assert all(asset["snapshot_timestamp"] == "content_date_start_at_reference_year" for asset in HRL["assets"])
+    assert next(asset for asset in HRL["assets"] if asset["kind"] == "tree_cover_density").get("source_nodata_codes") is None
+    assert next(asset for asset in HRL["assets"] if asset["kind"] == "forest_type")["source_nodata_codes"] == [255]
+    assert next(asset for asset in HRL["assets"] if asset["kind"] == "tree_cover_change")["source_nodata_codes"] == [255]
 
 
 def test_development_coverage_requires_explicit_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,7 +59,7 @@ def test_development_coverage_requires_explicit_environment(monkeypatch: pytest.
 
 
 def test_catalog_snapshot_is_unambiguous_for_exact_asset_period() -> None:
-    entry = {"asset_id": "hrl_tree_cover_density_10m", "period": [2023, 2023], "items": [{"Id": "one", "Name": "TCD_2023"}]}
+    entry = {"asset_id": "hrl_tree_cover_density_100m", "period": [2023, 2023], "items": [{"Id": "one", "Name": "TCD_2023"}]}
     snapshot = _catalog_snapshot({"products_payload": [entry]}, HRL["assets"][0], 2023, 2023)
     assert snapshot["signature"] == forests.sha256(json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     with pytest.raises(ValueError, match="missing or ambiguous"):
@@ -70,8 +75,12 @@ def test_catalog_queries_every_supported_asset_period_and_verifies_reference_tim
 
         def json(self) -> dict:
             query = calls[-1]["params"]["$filter"]
-            year = next(year for year in (2018, 2021, 2023) if f"{year}-01-01" in query)
-            return {"value": [{"Id": f"id-{year}", "Name": f"product-{year}", "ContentDate": {"Start": f"{year}-01-01T00:00:00.000000Z"}, "Checksum": None, "S3Path": None, "OriginDate": None}]}
+            years = [year for year in (2018, 2021, 2023) if f"{year}-01-01" in query]
+            year = years[0]
+            contains = query.split("contains(Name,'", 1)[1].split("')", 1)[0]
+            asset = next(item for item in HRL["assets"] if item["catalog_name_contains_template"].format(start_year=2018 if "C2018-2021" in contains else year, end_year=2021 if "C2018-2021" in contains else year) == contains)
+            name = re.sub(r"\^|\$", "", asset["catalog_name_regex_template"].format(start_year=2018 if "C2018-2021" in contains else year, end_year=2021 if "C2018-2021" in contains else year)).replace("[A-Z0-9]+", "E09N27").replace("[0-9]+", "01")
+            return {"value": [{"Id": f"id-{year}", "Name": name, "ContentDate": {"Start": f"{year}-01-01T00:00:00.000000Z"}, "Checksum": None, "S3Path": None, "OriginDate": None}]}
 
     def get(*_args: object, **kwargs: object) -> Response:
         calls.append(kwargs)
@@ -81,26 +90,99 @@ def test_catalog_queries_every_supported_asset_period_and_verifies_reference_tim
     products = forests._catalog_products(HRL, "token")
 
     assert len(products) == 9  # TCD (3), FTY (2), DLT (3), TCPC (1)
-    assert {tuple(item["period"]) for item in products if item["asset_id"] == "hrl_tree_cover_density_10m"} == {(2018, 2018), (2021, 2021), (2023, 2023)}
+    assert {tuple(item["period"]) for item in products if item["asset_id"] == "hrl_tree_cover_density_100m"} == {(2018, 2018), (2021, 2021), (2023, 2023)}
     assert all("ContentDate/Start ge" in call["params"]["$filter"] for call in calls)
+
+
+def test_catalog_contract_rejects_tcd_confidence_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"value": [{
+                "Id": "confidence", "Name": "CLMS_HRLVLCC_TCDCL_S2018_R10m_E09N27_03035_V01_R00",
+                "ContentDate": {"Start": "2018-01-01T00:00:00.000000Z"},
+            }]}
+
+    monkeypatch.setattr(forests.requests, "get", lambda *_args, **_kwargs: Response())
+    source = HRL | {"assets": [next(asset for asset in HRL["assets"] if asset["kind"] == "tree_cover_density") | {"years": [2018]}]}
+
+    with pytest.raises(ValueError, match="unexpected product name"):
+        forests._catalog_products(source, "token")
 
 
 def test_coverage_report_distinguishes_valid_nodata_and_rejects_duplicate_payloads() -> None:
     coverage = [
-        {"assetId": "hrl_tree_cover_density_10m", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": ["it:region:02"]},
-        {"assetId": "hrl_tree_cover_density_10m", "period": "2021-2021", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": ["it:region:02"]},
+        {"assetId": "hrl_tree_cover_density_100m", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": []},
+        {"assetId": "hrl_tree_cover_density_100m", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:02"], "numericTerritoryIds": [], "validNoDataTerritoryIds": ["it:region:02"]},
+        {"assetId": "hrl_tree_cover_density_100m", "period": "2021-2021", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": []},
+        {"assetId": "hrl_tree_cover_density_100m", "period": "2021-2021", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:02"], "numericTerritoryIds": [], "validNoDataTerritoryIds": ["it:region:02"]},
     ]
     table = pd.DataFrame([
         {"metric_id": "tree_cover_mean", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": "it:region:01", "value_decimal": 20.0},
         {"metric_id": "tree_cover_mean", "territory_level": "region", "period_start": "2021-01-01", "period_end": "2021-12-31", "territory_id": "it:region:01", "value_decimal": 21.0},
     ])
-    report = _coverage_report(table, coverage)
-    assert report["entries"][0]["validNoDataCount"] == 1
-    assert report["temporalDiagnostics"][1]["comparisonWithPrevious"]["percentChanged"] == 100.0
+    report = _coverage_report(table.assign(methodology_version="hrl_tree_cover_density_100m"), coverage, {"01", "02"})
+    assert sum(entry["validNoDataCount"] for entry in report["entries"]) == 2
+    assert report["temporalDiagnostics"][1]["comparisonWithPrevious"]["percentChangedAmongComparable"] == 100.0
     duplicated = table.copy()
     duplicated.loc[duplicated["period_start"] == "2021-01-01", "value_decimal"] = 20.0
     with pytest.raises(ValueError, match="byte-identical"):
-        _coverage_report(duplicated, coverage)
+        _coverage_report(duplicated.assign(methodology_version="hrl_tree_cover_density_100m"), coverage, {"01", "02"})
+
+
+def test_regional_coverage_union_is_per_snapshot_and_rejects_missing_development_or_overlap() -> None:
+    entries = [
+        {"assetId": "tcd", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": []},
+        {"assetId": "tcd", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:02"], "numericTerritoryIds": [], "validNoDataTerritoryIds": ["it:region:02"]},
+        {"assetId": "tcd", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:03"], "numericTerritoryIds": ["it:region:03"], "validNoDataTerritoryIds": []},
+    ]
+    assert _expected_region_codes_from_coverage(entries, "tcd", "2018-2018") == {"01", "02", "03"}
+    table = pd.DataFrame([
+        {"metric_id": "tree_cover_mean", "methodology_version": "tcd", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": "it:region:01", "value_decimal": 10.0},
+        {"metric_id": "tree_cover_mean", "methodology_version": "tcd", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": "it:region:03", "value_decimal": 11.0},
+    ])
+    assert _coverage_report(table, entries, {"01", "02", "03"})["coverageMode"] == "national"
+    missing_table = table[table["territory_id"] != "it:region:03"]
+    with pytest.raises(ValueError, match="differs from ISTAT"):
+        _coverage_report(missing_table, entries[:-1], {"01", "02", "03"})
+    development = [entry | {"expectedTerritoryIds": [f"it:region:{code}"], "numericTerritoryIds": [f"it:region:{code}"], "validNoDataTerritoryIds": []} for entry, code in zip(entries, ("03", "09", "12"), strict=True)]
+    development_table = pd.DataFrame([
+        {"metric_id": "tree_cover_mean", "methodology_version": "tcd", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": f"it:region:{code}", "value_decimal": float(index)}
+        for index, code in enumerate(("03", "09", "12"), start=1)
+    ])
+    with pytest.raises(ValueError, match="differs from ISTAT"):
+        _coverage_report(development_table, development, {"01", "02", "03"})
+    overlapping = entries + [entries[0]]
+    with pytest.raises(ValueError, match="overlapping"):
+        _expected_region_codes_from_coverage(overlapping, "tcd", "2018-2018")
+
+
+def test_source_nodata_255_is_not_zero_and_real_zero_is_preserved() -> None:
+    forest_type = next(asset for asset in HRL["assets"] if asset["kind"] == "forest_type")
+    assert _valid_source_values(forest_type, np.array([255, 255, 255], dtype=np.int16)).size == 0
+    assert _valid_source_values(forest_type, np.array([0, 0, 0], dtype=np.int16)).tolist() == [0, 0, 0]
+
+
+def test_temporal_diagnostics_allow_source_nodata_transitions() -> None:
+    coverage = [
+        {"assetId": "tcd", "period": "2018-2018", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": ["it:region:02"]},
+        {"assetId": "tcd", "period": "2021-2021", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:02"], "validNoDataTerritoryIds": ["it:region:01"]},
+    ]
+    table = pd.DataFrame([
+        {"metric_id": "tree_cover_mean", "methodology_version": "tcd", "territory_level": "region", "period_start": "2018-01-01", "period_end": "2018-12-31", "territory_id": "it:region:01", "value_decimal": 10.0},
+        {"metric_id": "tree_cover_mean", "methodology_version": "tcd", "territory_level": "region", "period_start": "2021-01-01", "period_end": "2021-12-31", "territory_id": "it:region:02", "value_decimal": 10.0},
+    ])
+
+    report = _coverage_report(table, coverage, {"01", "02"})
+
+    comparison = report["temporalDiagnostics"][1]["comparisonWithPrevious"]
+    assert comparison == {
+        "period": "2018-2018", "numericInBoth": 0, "becameNoData": 1,
+        "becameNumeric": 1, "noDataInBoth": 0, "percentChangedAmongComparable": None,
+        "medianAbsoluteDifference": None, "maximumAbsoluteDifference": None, "correlation": None,
+    }
 
 
 def test_derived_delivery_requires_national_coverage_and_exposes_geometry_reference(tmp_path: Path) -> None:
@@ -114,13 +196,13 @@ def test_derived_delivery_requires_national_coverage_and_exposes_geometry_refere
     zonal = canonical / "forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
     zonal.parent.mkdir(parents=True)
     pd.DataFrame([
-        {"metric_id": "tree_cover_mean", "territory_id": "it:region:01", "territory_version_id": "it:region:01@2023-01-01", "territory_level": "region", "period_start": "2023-01-01", "period_end": "2023-12-31", "value_decimal": 21.0, "unit_ucum": "%", "official_status": "derived_by_stato_italia", "methodology_version": "hrl_tree_cover_density_10m"},
-        {"metric_id": "tree_cover_mean", "territory_id": "it:region:02", "territory_version_id": "it:region:02@2023-01-01", "territory_level": "region", "period_start": "2023-01-01", "period_end": "2023-12-31", "value_decimal": 22.0, "unit_ucum": "%", "official_status": "derived_by_stato_italia", "methodology_version": "hrl_tree_cover_density_10m"},
+        {"metric_id": "tree_cover_mean", "territory_id": "it:region:01", "territory_version_id": "it:region:01@2023-01-01", "territory_level": "region", "period_start": "2023-01-01", "period_end": "2023-12-31", "value_decimal": 21.0, "unit_ucum": "%", "official_status": "derived_by_stato_italia", "methodology_version": "hrl_tree_cover_density_100m"},
+        {"metric_id": "tree_cover_mean", "territory_id": "it:region:02", "territory_version_id": "it:region:02@2023-01-01", "territory_level": "region", "period_start": "2023-01-01", "period_end": "2023-12-31", "value_decimal": 22.0, "unit_ucum": "%", "official_status": "derived_by_stato_italia", "methodology_version": "hrl_tree_cover_density_100m"},
     ]).to_parquet(zonal)
     infc = canonical / "forests" / "infc.parquet"
     pd.DataFrame(columns=["metric_id", "territory_id", "territory_version_id", "territory_level", "period_start", "period_end", "value_decimal", "official_status"]).to_parquet(infc)
     coverage = forests.forest_coverage_report_path(zonal)
-    coverage.write_text(json.dumps({"coverageMode": "national", "entries": [{"assetId": "hrl_tree_cover_density_10m", "period": "2023-2023", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01", "it:region:02"], "validNoDataTerritoryIds": []}]}))
+    coverage.write_text(json.dumps({"coverageMode": "national", "entries": [{"assetId": "hrl_tree_cover_density_100m", "period": "2023-2023", "territoryLevel": "region", "expectedTerritoryIds": ["it:region:01", "it:region:02"], "numericTerritoryIds": ["it:region:01", "it:region:02"], "validNoDataTerritoryIds": []}]}))
     geometry = tmp_path / "istat-region-2023.pmtiles"
     geometry.touch()
 
@@ -162,6 +244,14 @@ def test_process_payload_preserves_source_band_and_explicit_nodata() -> None:
     assert payload["output"]["responses"][0]["format"]["type"] == "image/tiff"
     assert asset["band"] in payload["evalscript"]
     assert str(asset["process_no_data"]) in payload["evalscript"]
+
+
+def test_tcpc_process_payload_uses_the_documented_2018_snapshot() -> None:
+    asset = next(item for item in HRL["assets"] if item["kind"] == "tree_cover_change")
+    payload = _process_payload(asset, (1000, 2000, 3000, 4000), 20, 20, 2018, 2021)
+
+    time_range = payload["input"]["data"][0]["dataFilter"]["timeRange"]
+    assert time_range == {"from": "2018-01-01T00:00:00Z", "to": "2018-01-02T00:00:00Z"}
 
 
 def test_raster_development_slice_has_bounded_process_api_requests() -> None:

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { MapOption } from "../lib/data";
+import { resolveMapDataset, resolveTemporalScale, type MapDataset, type SnapshotMapDataset, type TemporalScaleDomain } from "../lib/map-data";
 import { domainColorRamps, type DomainColorName, type DomainColorRamp } from "../lib/domain-colors";
 import { configureItalyMapControls, italyMapCamera } from "../lib/italy-map-bounds";
 import { territoryIstatCode, territoryLabel } from "../lib/territory-labels";
@@ -10,7 +11,6 @@ import { focusMapForInspector } from "./map-inspector-focus";
 import { hierarchyFromProperties, TerritoryContext, type TerritoryHierarchy } from "./territory-context";
 import { TerritoryMapSeries } from "./territory-map-series";
 
-type MapDataset = { values: [string, number][]; unit: string; periodStart: string; periodEnd: string };
 type RankingRow = { territoryId: string; name: string; istatCode: string; value: number; percentile: number | null; rank: number | null };
 type Ranking = { rows: RankingRow[]; scopeLabel?: string };
 type RankingState = "loading" | "available" | "not-applicable" | "unavailable";
@@ -52,6 +52,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const [mapError, setMapError] = useState<string | null>(null);
   const [valuesLoading, setValuesLoading] = useState(true);
   const [dataset, setDataset] = useState<MapDataset | null>(null);
+  const [scaleDomain, setScaleDomain] = useState<TemporalScaleDomain | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(selectedTerritoryId ?? null);
   const [selectedName, setSelectedName] = useState<string | undefined>();
@@ -65,6 +66,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     setMapReady(false);
     setMapError(null);
     setDataset(null);
+    setScaleDomain(null);
     setValuesLoading(true);
     const mapContainer = container.current;
     if (!geometryUrl || !mapContainer) {
@@ -138,32 +140,33 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     setValuesLoading(true);
     setMapError(null);
     setDataset(null);
+    setScaleDomain(null);
     async function updateValues() {
       try {
-        const [mapUrl, snapCode] = option.url.split("#", 2);
+        const [mapUrl] = option.url.split("#", 2);
         const response = await fetch(mapUrl, { signal: controller.signal });
         if (!response.ok) throw new Error(`Valori della mappa non disponibili (${response.status}).`);
-        const raw = await response.json() as MapDataset & { snapshots?: Array<{ sourceDimensions: { snap_code: string }; unit: string; values: [string, number][] }> };
-        const snapshot = raw.snapshots?.find((item) => item.sourceDimensions.snap_code === snapCode);
-        const nextDataset = snapshot ? { values: snapshot.values, unit: snapshot.unit, periodStart: raw.periodStart, periodEnd: raw.periodEnd } : raw;
+        const raw = await response.json() as SnapshotMapDataset;
+        const nextDataset = resolveMapDataset(raw, option.url);
         const values = nextDataset.values.map((item) => item[1]).filter(Number.isFinite);
         if (!values.length) throw new Error("La mappa non contiene valori numerici pubblicati.");
-        const scaleValues = sharedTemporalScale && temporalOptions.length ? (await Promise.all(temporalOptions.map(async (seriesOption) => {
-          const [seriesUrl, seriesSnapshot] = seriesOption.url.split("#", 2);
+        const scaleDatasets = sharedTemporalScale && temporalOptions.length ? await Promise.all(temporalOptions.map(async (seriesOption) => {
+          const [seriesUrl] = seriesOption.url.split("#", 2);
           const seriesResponse = await fetch(seriesUrl, { signal: controller.signal });
           if (!seriesResponse.ok) throw new Error(`Scala temporale non disponibile (${seriesResponse.status}).`);
-          const seriesRaw = await seriesResponse.json() as MapDataset & { snapshots?: Array<{ sourceDimensions: { snap_code: string }; values: [string, number][] }> };
-          return (seriesRaw.snapshots?.find((item) => item.sourceDimensions.snap_code === seriesSnapshot)?.values ?? seriesRaw.values).map((item) => item[1]).filter(Number.isFinite);
-        }))).flat() : values;
-        if (!scaleValues.length) throw new Error("La scala temporale non contiene valori numerici pubblicati.");
+          return resolveMapDataset(await seriesResponse.json() as SnapshotMapDataset, seriesOption.url);
+        })) : [nextDataset];
+        const nextScaleDomain = resolveTemporalScale(scaleDatasets, sharedTemporalScale);
+        if (!nextScaleDomain) throw new Error("La scala temporale non contiene valori numerici pubblicati.");
         const activeMap = mapRef.current;
         if (controller.signal.aborted || !activeMap) return;
         featureIds.current.forEach((territoryId) => activeMap.removeFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }));
         nextDataset.values.forEach(([territoryId, value]) => activeMap.setFeatureState({ source: "territories", sourceLayer: "territories", id: territoryId }, { value }));
         featureIds.current = nextDataset.values.map(([territoryId]) => territoryId);
-        activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(Math.min(...scaleValues), Math.max(...scaleValues), ramp));
+        activeMap.setPaintProperty("soil-fill", "fill-color", fillColorExpression(nextScaleDomain.min, nextScaleDomain.max, ramp));
         currentDataset.current = nextDataset;
         setDataset(nextDataset);
+        setScaleDomain(nextScaleDomain);
       } catch (caught) {
         if (!controller.signal.aborted) setMapError(caught instanceof Error ? caught.message : "Impossibile caricare i valori della mappa.");
       } finally {
@@ -221,9 +224,9 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const selectedRow = ranking?.rows.find((row) => row.territoryId === selectedId);
   const selectedValue = dataset?.values.find(([territoryId]) => territoryId === selectedId)?.[1];
   const mapValues = dataset?.values.map(([, value]) => value).filter(Number.isFinite) ?? [];
-  const min = mapValues.length ? Math.min(...mapValues) : null;
-  const max = mapValues.length ? Math.max(...mapValues) : null;
-  const middle = min !== null && max !== null ? min + (max - min) / 2 : null;
+  const min = scaleDomain?.min ?? null;
+  const max = scaleDomain?.max ?? null;
+  const middle = scaleDomain?.mid ?? null;
   const selectedLabel = selectedRow ? territoryLabel(selectedRow.territoryId, selectedRow.name) : selectedId ? territoryLabel(selectedId, selectedName) : null;
   const levelLabel = option.level === "municipality" ? "Comune" : option.level === "province" ? "Provincia" : "Regione";
   const selectionLabel = option.level === "municipality" ? "Comune selezionato" : option.level === "province" ? "Provincia selezionata" : "Regione selezionata";

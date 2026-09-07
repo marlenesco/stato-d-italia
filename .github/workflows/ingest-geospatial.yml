@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   ingest-geospatial:
+    if: github.ref_name != 'phase-d1'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -73,3 +74,90 @@ jobs:
           --scope ${{ inputs.bootstrap_all && 'all' || 'geospatial' }}
           ${{ !inputs.bootstrap_all && '--plan reports/geospatial-source-check.json' || '' }}
           ${{ inputs.force && '--force' || '' }}
+
+  validate-national-forests:
+    if: github.ref_name == 'phase-d1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      INFC_HTTPS_PROXIES: ${{ secrets.INFC_HTTPS_PROXIES }}
+      CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
+      CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
+      FOREST_PROCESSING_MODE: raster
+      FOREST_COVERAGE_MODE: national
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate read and CDSE configuration
+        run: |
+          test -n "$R2_ACCESS_KEY_ID" || { echo "::error::Missing R2_ACCESS_KEY_ID secret"; exit 1; }
+          test -n "$R2_SECRET_ACCESS_KEY" || { echo "::error::Missing R2_SECRET_ACCESS_KEY secret"; exit 1; }
+          test -n "$R2_ENDPOINT" || { echo "::error::Missing R2_ENDPOINT secret"; exit 1; }
+          test -n "$R2_BUCKET" || { echo "::error::Missing R2_BUCKET secret"; exit 1; }
+          test -n "$CDSE_CLIENT_ID" || { echo "::error::Missing CDSE_CLIENT_ID secret"; exit 1; }
+          test -n "$CDSE_CLIENT_SECRET" || { echo "::error::Missing CDSE_CLIENT_SECRET secret"; exit 1; }
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uv sync --all-groups --frozen
+      - run: uv run pytest -q
+      - name: Snapshot production manifest before validation
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          from stato_italia.release import R2ObjectStore
+
+          Path("reports").mkdir(exist_ok=True)
+          Path("reports/production-manifest-before.json").write_text(
+              json.dumps(R2ObjectStore().read_json("manifest.json"), ensure_ascii=False, sort_keys=True) + "\n"
+          )
+          PY
+      - name: Restore resumable local CDSE slices
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            data/raw/infc-2015-forests
+            data/raw/copernicus-hrl-forests
+            data/canonical/forests
+            data/delivery/foreste
+          key: forests-national-candidate-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: forests-national-candidate-v1-${{ runner.os }}-
+      - name: Read active source state only
+        run: >-
+          uv run stato-data check-sources --domain forests --publish r2
+          --workdir data --output artifacts --report reports/forest-source-check.json
+      - name: Build local national candidate without release activation
+        run: >-
+          uv run stato-data run --domain forests --force
+          --plan reports/forest-source-check.json
+          --hydrate-from r2 --publish local --validation-only
+          --workdir data --output artifacts --report reports/forest-national-validation.json
+      - name: Verify production manifest remained unchanged
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          from stato_italia.release import R2ObjectStore
+
+          before = json.loads(Path("reports/production-manifest-before.json").read_text())
+          after = R2ObjectStore().read_json("manifest.json")
+          if before != after:
+              raise SystemExit("Production manifest changed during candidate validation")
+          Path("reports/production-manifest-after.json").write_text(
+              json.dumps(after, ensure_ascii=False, sort_keys=True) + "\n"
+          )
+          PY
+      - name: Preserve candidate diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: forest-national-candidate-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            reports/forest-source-check.json
+            reports/forest-national-validation.json
+            reports/production-manifest-before.json
+            reports/production-manifest-after.json
+            data/canonical/forests/algorithm_version=forests-zonal-statistics-v2/zonal_statistics.coverage.json
+            data/delivery/foreste/index.json
