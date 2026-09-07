@@ -10,6 +10,7 @@ from typing import Iterable, Mapping
 import pandas as pd
 
 from .common import json_dump
+from .territories import territory_reference_date
 
 
 FIRST_BIGBANG_YEAR = 1951
@@ -59,9 +60,7 @@ class TerritoryPolicyDecision:
 
 
 def _expected_istat_reference_date(year: int) -> str:
-    if year == 2021:
-        return "2021-12-31"
-    return f"{year}-01-01"
+    return territory_reference_date(year)
 
 
 def _as_version(value: TerritoryGeometryVersion | Mapping[str, object]) -> TerritoryGeometryVersion:

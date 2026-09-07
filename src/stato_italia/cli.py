@@ -786,6 +786,14 @@ def _run_geospatial(
     if args.force:
         families = allowed_families
     _hydrate(input_store, root, _territory_logical_paths((2015, 2018, 2021, 2023)))
+    # The 2021 ISTAT resolver correction is intentionally rebuilt from the
+    # official source only for the local Forest validation candidate. It cannot
+    # be silently carried from the active release, and validation-only prevents
+    # the shared territory artifact from reaching a production manifest here.
+    territory_refresh = (
+        ingest_boundaries(root, canonical, years=(2021,), offline=args.offline)
+        if validation_only else {"changed": False, "years": [], "carried": True}
+    )
     if "infc" in families:
         _hydrate_planned_raw_dependencies(input_store, root, {"infc"})
     infc_logical = "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"
@@ -853,15 +861,20 @@ def _run_geospatial(
     current_state = build_source_state_from_metadata_paths(
         root / "raw", metadata_paths, include_catalog=catalog_path,
     )
+    refreshed_territory_paths = (
+        [canonical / "territories" / "reference_year=2021" / f"{level}.parquet" for level in ("municipality", "province", "region")]
+        if territory_refresh["changed"] else []
+    )
     declared = [
         *raw_paths, *fresh_geometry,
+        *refreshed_territory_paths,
         *forest_delivery.get("files", []), *insights.get("files", []),
     ]
     if "infc" in families:
         declared.append(root / infc_logical)
     if "copernicus" in families:
         declared.extend((root / zonal_logical, root / zonal_coverage_logical))
-    changed = infc["changed"] or zonal["changed"] or forest_delivery["changed"] or insights["changed"]
+    changed = territory_refresh["changed"] or infc["changed"] or zonal["changed"] or forest_delivery["changed"] or insights["changed"]
     generated_metrics = {
         "canonicalBytesGenerated": sum(item.get("canonical_bytes", 0) for item in (infc, zonal) if item["changed"]),
         "derivedBytesGenerated": 0,
@@ -875,6 +888,7 @@ def _run_geospatial(
             "scope": "geospatial", "domain": domain.name if domain else None,
             "validationOnly": True, "hydrateFrom": getattr(args, "hydrate_from", "local"),
             "inputReleaseId": input_release.get("releaseId") if input_release else None,
+            "territories": territory_refresh,
             "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal},
             "operationalMetrics": generated_metrics,
             "candidateArtifacts": [str(path.relative_to(root)) for path in declared if path.is_file()],
