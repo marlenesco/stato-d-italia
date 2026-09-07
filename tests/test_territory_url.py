@@ -17,11 +17,13 @@ from stato_italia.territories import (
 
 def _source_feature(
     level: str, *, source_identity: str | tuple[str, ...], code: str | None,
-    name: str, parent_candidates: tuple[str, ...] = (), region_code: str = "01",
+    name: str, source_codes: dict[str, str | None] | None = None, region_code: str = "01",
 ) -> dict:
+    administrative_codes = {"cod_uts": None, "cod_prov": None, "cod_cm": None, "cod_pcm": None}
+    administrative_codes.update(source_codes or {})
     return {
         "level": level, "source_identity": source_identity, "istat_code": code,
-        "name": name, "name_normalized": name.lower(), "parent_candidates": parent_candidates,
+        "name": name, "name_normalized": name.lower(), "source_codes": administrative_codes,
         "region_code": region_code, "geometry": Point(12, 42).__geo_interface__,
     }
 
@@ -29,8 +31,8 @@ def _source_feature(
 def _valid_source_features() -> dict[str, list[dict]]:
     return {
         "region": [_source_feature("region", source_identity="01", code="01", name="Piemonte")],
-        "province": [_source_feature("province", source_identity=("001",), code=None, name="Torino", parent_candidates=("001",))],
-        "municipality": [_source_feature("municipality", source_identity="001001", code="001001", name="Comune", parent_candidates=("001",))],
+        "province": [_source_feature("province", source_identity=("cod_prov=001",), code=None, name="Torino", source_codes={"cod_prov": "001", "cod_uts": "001"})],
+        "municipality": [_source_feature("municipality", source_identity="001001", code="001001", name="Comune", source_codes={"cod_prov": "001", "cod_uts": "001"})],
     }
 
 
@@ -47,7 +49,7 @@ def test_istat_reference_date_has_the_documented_2021_exception() -> None:
     assert territory_reference_date(2023) == "2023-01-01"
 
 
-def test_2021_normalization_uses_uts_for_metro_municipality_parents() -> None:
+def test_2021_normalization_uses_field_semantic_uts_for_metro_municipality_parents() -> None:
     source = {
         "region": [
             _source_feature("region", source_identity="03", code="03", name="Lombardia", region_code="03"),
@@ -55,14 +57,14 @@ def test_2021_normalization_uses_uts_for_metro_municipality_parents() -> None:
             _source_feature("region", source_identity="15", code="15", name="Campania", region_code="15"),
         ],
         "province": [
-            _source_feature("province", source_identity=("015", "215"), code=None, name="Milano", parent_candidates=("015", "215"), region_code="03"),
-            _source_feature("province", source_identity=("058", "258"), code=None, name="Roma", parent_candidates=("058", "258"), region_code="12"),
-            _source_feature("province", source_identity=("063", "263"), code=None, name="Napoli", parent_candidates=("063", "263"), region_code="15"),
+            _source_feature("province", source_identity=("milano",), code=None, name="Milano", source_codes={"cod_prov": "015", "cod_cm": "215", "cod_uts": "215"}, region_code="03"),
+            _source_feature("province", source_identity=("roma",), code=None, name="Roma", source_codes={"cod_prov": "058", "cod_cm": "258", "cod_uts": "258"}, region_code="12"),
+            _source_feature("province", source_identity=("napoli",), code=None, name="Napoli", source_codes={"cod_prov": "063", "cod_cm": "263", "cod_uts": "263"}, region_code="15"),
         ],
         "municipality": [
-            _source_feature("municipality", source_identity="015146", code="015146", name="Milano", parent_candidates=("215",), region_code="03"),
-            _source_feature("municipality", source_identity="058091", code="058091", name="Roma", parent_candidates=("258",), region_code="12"),
-            _source_feature("municipality", source_identity="063049", code="063049", name="Napoli", parent_candidates=("263",), region_code="15"),
+            _source_feature("municipality", source_identity="015146", code="015146", name="Milano", source_codes={"cod_prov": "015", "cod_cm": "215", "cod_uts": "215"}, region_code="03"),
+            _source_feature("municipality", source_identity="058091", code="058091", name="Roma", source_codes={"cod_prov": "058", "cod_cm": "258", "cod_uts": "258"}, region_code="12"),
+            _source_feature("municipality", source_identity="063049", code="063049", name="Napoli", source_codes={"cod_prov": "063", "cod_cm": "263", "cod_uts": "263"}, region_code="15"),
         ],
     }
 
@@ -70,16 +72,51 @@ def test_2021_normalization_uses_uts_for_metro_municipality_parents() -> None:
 
     assert {item["istat_code"] for item in normalized["province"]} == {"215", "258", "263"}
     assert {item["parent_istat_code"] for item in normalized["municipality"]} == {"215", "258", "263"}
+    assert {item["source_cod_prov"] for item in normalized["province"]} == {"015", "058", "063"}
+    assert {item["source_cod_uts"] for item in normalized["province"]} == {"215", "258", "263"}
     assert all(item["territory_version_id"].endswith("@2021-12-31") for records in normalized.values() for item in records)
+
+
+def test_2021_municipality_does_not_fall_back_to_cod_prov_when_uts_parent_is_missing() -> None:
+    source = _valid_source_features()
+    source["province"] = [
+        _source_feature("province", source_identity=("milano",), code=None, name="Milano", source_codes={"cod_prov": "015", "cod_cm": "015", "cod_uts": "015"}),
+    ]
+    source["municipality"] = [
+        _source_feature("municipality", source_identity="015146", code="015146", name="Milano", source_codes={"cod_prov": "015", "cod_cm": "215", "cod_uts": "215"}),
+    ]
+
+    with pytest.raises(ValueError, match="parent does not exist.*215"):
+        normalize_boundary_features(source, territory_reference_date(2021))
+
+
+def test_2021_non_metro_keeps_matching_province_and_uts_code() -> None:
+    source = _valid_source_features()
+
+    normalized = normalize_boundary_features(source, territory_reference_date(2021))
+
+    assert normalized["province"][0]["istat_code"] == "001"
+    assert normalized["municipality"][0]["parent_istat_code"] == "001"
+
+
+def test_pre_2021_schema_preserves_legacy_province_code_priority() -> None:
+    source = _valid_source_features()
+    source["province"][0]["source_codes"] = {"cod_uts": "201", "cod_prov": "001", "cod_cm": None, "cod_pcm": None}
+    source["municipality"][0]["source_codes"] = {"cod_uts": "201", "cod_prov": "001", "cod_cm": None, "cod_pcm": None}
+
+    normalized = normalize_boundary_features(source, territory_reference_date(2020))
+
+    assert normalized["province"][0]["istat_code"] == "001"
+    assert normalized["municipality"][0]["parent_istat_code"] == "001"
 
 
 def test_2021_normalization_regression_keeps_all_municipalities_through_hierarchy_resolution() -> None:
     source = _valid_source_features()
-    source["province"] = [_source_feature("province", source_identity=("201", "001"), code=None, name="Torino", parent_candidates=("201", "001"))]
+    source["province"] = [_source_feature("province", source_identity=("torino",), code=None, name="Torino", source_codes={"cod_prov": "001", "cod_uts": "201"})]
     source["municipality"] = [
         _source_feature(
             "municipality", source_identity=f"{index:06d}", code=f"{index:06d}",
-            name=f"Comune {index}", parent_candidates=("201",),
+            name=f"Comune {index}", source_codes={"cod_prov": "001", "cod_uts": "201"},
         )
         for index in range(1, 7905)
     ]
@@ -96,14 +133,14 @@ def test_2021_normalization_regression_keeps_all_municipalities_through_hierarch
         (
             {
                 **_valid_source_features(),
-                "municipality": [_source_feature("municipality", source_identity="001001", code="001001", name="Orfano", parent_candidates=("999",))],
+                "municipality": [_source_feature("municipality", source_identity="001001", code="001001", name="Orfano", source_codes={"cod_uts": "999", "cod_prov": "001"})],
             },
-            "missing or ambiguous",
+            "parent does not exist",
         ),
         (
             {
                 **_valid_source_features(),
-                "province": [_source_feature("province", source_identity=("001",), code=None, name="Orfana", parent_candidates=("001",), region_code="99")],
+                "province": [_source_feature("province", source_identity=("orfana",), code=None, name="Orfana", source_codes={"cod_uts": "001"}, region_code="99")],
             },
             "province has an unknown region parent",
         ),
@@ -111,12 +148,12 @@ def test_2021_normalization_regression_keeps_all_municipalities_through_hierarch
             {
                 **_valid_source_features(),
                 "province": [
-                    _source_feature("province", source_identity=("001",), code=None, name="A", parent_candidates=("001",)),
-                    _source_feature("province", source_identity=("002",), code=None, name="B", parent_candidates=("002",)),
+                    _source_feature("province", source_identity=("a",), code=None, name="A", source_codes={"cod_uts": "001"}),
+                    _source_feature("province", source_identity=("b",), code=None, name="B", source_codes={"cod_uts": "001"}),
                 ],
-                "municipality": [_source_feature("municipality", source_identity="001001", code="001001", name="Ambiguo", parent_candidates=("001", "002"))],
+                "municipality": [_source_feature("municipality", source_identity="001001", code="001001", name="Ambiguo", source_codes={"cod_uts": "001", "cod_prov": "001"})],
             },
-            "municipality parent is missing or ambiguous",
+            "resolves multiple province features",
         ),
     ),
 )
@@ -167,6 +204,23 @@ def test_2021_stale_canonical_is_not_reusable(tmp_path: Path) -> None:
             "territory_id": f"it:{level}:{code}", "territory_version_id": f"it:{level}:{code}@2021-01-01",
             "level": level, "istat_code": code, "name": level, "parent_istat_code": parent,
             "reference_date": "2021-01-01", "geometry_wkb": Point(12, 42).wkb,
+        }]).to_parquet(root / f"{level}.parquet")
+
+    assert territories._canonical_snapshot_is_current(root, 2021) is False
+
+
+def test_2021_v2_canonical_is_not_reusable_after_field_semantic_resolution(tmp_path: Path) -> None:
+    root = tmp_path / "territories" / "reference_year=2021"
+    root.mkdir(parents=True)
+    for level, code, parent in (
+        ("region", "01", None),
+        ("province", "215", "01"),
+        ("municipality", "015146", "215"),
+    ):
+        pd.DataFrame([{
+            "territory_id": f"it:{level}:{code}", "territory_version_id": f"it:{level}:{code}@2021-12-31",
+            "canonical_contract_version": 2, "level": level, "istat_code": code, "name": level,
+            "parent_istat_code": parent, "reference_date": "2021-12-31", "geometry_wkb": Point(12, 42).wkb,
         }]).to_parquet(root / f"{level}.parquet")
 
     assert territories._canonical_snapshot_is_current(root, 2021) is False
