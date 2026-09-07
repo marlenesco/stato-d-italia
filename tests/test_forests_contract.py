@@ -30,10 +30,28 @@ def test_change_raster_requires_two_reference_years() -> None:
 def test_statistical_payload_uses_cdse_byoc_and_equal_area_crs() -> None:
     asset = next(item for item in HRL["assets"] if item["kind"] == "tree_cover_density")
     territory = {"geometry_wkb": Polygon([(12, 41), (12.1, 41), (12.1, 41.1), (12, 41.1)]).wkb}
-    payload = _stats_payload(asset, territory, 2023, 2023)
+    payload = _stats_payload(asset, territory, {
+        "contentDateStart": "2023-01-01T00:00:00Z",
+        "contentDateEnd": "2023-12-31T23:59:59Z",
+    })
     assert payload["input"]["data"][0]["type"] == f"byoc-{asset['byoc_collection_id']}"
     assert payload["input"]["bounds"]["properties"]["crs"].endswith("/3035")
     assert payload["calculations"]["default"]["statistics"]["default"]["percentiles"]["k"] == [25, 50, 75]
+
+
+def test_statistical_tcpc_uses_the_verified_catalog_content_date_interval() -> None:
+    asset = next(item for item in HRL["assets"] if item["kind"] == "tree_cover_change")
+    territory = {"geometry_wkb": Polygon([(12, 41), (12.1, 41), (12.1, 41.1), (12, 41.1)]).wkb}
+    snapshot = {
+        "contentDateStart": "2018-01-01T00:00:00Z",
+        "contentDateEnd": "2021-12-31T23:59:59Z",
+    }
+
+    payload = _stats_payload(asset, territory, snapshot)
+
+    expected = {"from": snapshot["contentDateStart"], "to": snapshot["contentDateEnd"]}
+    assert payload["input"]["data"][0]["dataFilter"]["timeRange"] == expected
+    assert payload["aggregation"]["timeRange"] == expected
 
 
 def test_statistical_mode_contract_declares_real_and_future_modes() -> None:
@@ -64,6 +82,47 @@ def test_catalog_snapshot_is_unambiguous_for_exact_asset_period() -> None:
     assert snapshot["signature"] == forests.sha256(json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     with pytest.raises(ValueError, match="missing or ambiguous"):
         _catalog_snapshot({"products_payload": [entry, entry]}, HRL["assets"][0], 2023, 2023)
+
+
+def test_statistical_jobs_use_the_historical_istat_population_for_each_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_years: list[int] = []
+
+    def territories(_canonical_root: Path, year: int) -> pd.DataFrame:
+        requested_years.append(year)
+        return pd.DataFrame([{
+            "territory_id": "it:region:01",
+            "territory_version_id": f"it:region:01@{year}-01-01",
+            "level": "region",
+        }])
+
+    monkeypatch.setattr(forests, "_slice_territories", territories)
+    monkeypatch.setattr(
+        forests,
+        "_catalog_snapshot",
+        lambda _catalog, asset, start, end: {
+            "contentDateStart": f"{start}-01-01T00:00:00Z",
+            "contentDateEnd": f"{end}-12-31T23:59:59Z",
+            "signature": f"{asset['id']}:{start}-{end}",
+        },
+    )
+
+    jobs = forests._statistical_jobs(tmp_path, {"products": []})
+
+    observed = {
+        (asset["id"], start, end, territory["territory_version_id"])
+        for asset, start, end, _snapshot, territory in jobs
+    }
+    assert requested_years == [2018, 2021, 2023, 2018, 2021, 2021]
+    assert observed == {
+        ("hrl_tree_cover_density_100m", 2018, 2018, "it:region:01@2018-01-01"),
+        ("hrl_tree_cover_density_100m", 2021, 2021, "it:region:01@2021-01-01"),
+        ("hrl_tree_cover_density_100m", 2023, 2023, "it:region:01@2023-01-01"),
+        ("hrl_forest_type", 2018, 2018, "it:region:01@2018-01-01"),
+        ("hrl_forest_type", 2021, 2021, "it:region:01@2021-01-01"),
+        ("hrl_tree_cover_presence_change", 2018, 2021, "it:region:01@2021-01-01"),
+    }
 
 
 def test_catalog_queries_every_supported_asset_period_and_verifies_reference_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -411,7 +470,11 @@ def test_statistical_response_is_closed_after_each_territory_request(monkeypatch
     monkeypatch.setattr(forests, "_post_statistics", lambda *_: response)
     monkeypatch.setattr(forests, "_statistical_response", lambda *_: [{"mean": 20, "percentiles": {"25.0": 10, "50.0": 20, "75.0": 30}}])
 
-    records = forests._statistical_records(asset, territory, "fake-token", "source-hash")
+    records = forests._statistical_records(asset, territory, 2023, 2023, {
+        "contentDateStart": "2023-01-01T00:00:00Z",
+        "contentDateEnd": "2023-12-31T23:59:59Z",
+        "signature": "s" * 64,
+    }, "fake-token", "source-hash")
 
     assert response.closed
     assert [record["metric_id"] for record in records] == ["tree_cover_mean", "tree_cover_p25", "tree_cover_p50", "tree_cover_p75"]
@@ -449,13 +512,14 @@ def test_statistical_checkpoint_reuses_only_complete_matching_records(tmp_path: 
     asset = next(item for item in HRL["assets"] if item["kind"] == "tree_cover_density") | {"years": [2023]}
     territory = {"territory_id": "it:municipality:000001", "territory_version_id": "it:municipality:000001@2023-01-01"}
     source_hash = "a" * 64
-    records = [{"territory_version_id": territory["territory_version_id"], "source_asset_sha256": source_hash, "metric_id": metric} for metric in ("tree_cover_mean", "tree_cover_p25", "tree_cover_p50", "tree_cover_p75")]
+    snapshot = {"signature": "s" * 64}
+    records = [{"territory_version_id": territory["territory_version_id"], "source_asset_sha256": source_hash, "source_snapshot_signature": snapshot["signature"], "metric_id": metric} for metric in ("tree_cover_mean", "tree_cover_p25", "tree_cover_p50", "tree_cover_p75")]
 
-    _write_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, source_hash, records)
+    _write_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, 2023, 2023, snapshot, source_hash, records)
 
-    assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, source_hash, force=False) == records
-    assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, "b" * 64, force=False) is None
-    assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, source_hash, force=True) is None
+    assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, 2023, 2023, snapshot, source_hash, force=False) == records
+    assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, 2023, 2023, snapshot, "b" * 64, force=False) is None
+    assert _read_statistical_checkpoint(tmp_path / "zonal_statistics.parquet", asset, territory, 2023, 2023, snapshot, source_hash, force=True) is None
 
 
 def test_catalog_preflight_is_read_only_and_run_regenerates_canonical_from_v2(
@@ -485,18 +549,27 @@ def test_catalog_preflight_is_read_only_and_run_regenerates_canonical_from_v2(
     persisted = _persist_catalog(tmp_path, remote)
     assert persisted["changed"] is True
     monkeypatch.setattr(forests, "_cdse_token", lambda _source: "token")
-    monkeypatch.setattr(forests, "_slice_territories", lambda *_: pd.DataFrame([{
+    asset = next(item for item in HRL["assets"] if item["kind"] == "tree_cover_density")
+    territory = {
         "territory_id": "it:region:01", "territory_version_id": "it:region:01@2023-01-01",
         "level": "region",
-    }]))
+    }
+    snapshot = {
+        "contentDateStart": "2023-01-01T00:00:00Z",
+        "contentDateEnd": "2023-12-31T23:59:59Z",
+        "signature": "s" * 64,
+    }
+    monkeypatch.setattr(forests, "_statistical_jobs", lambda *_: [(asset, 2023, 2023, snapshot, territory)])
     monkeypatch.setattr(forests, "_read_statistical_checkpoint", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(forests, "_write_statistical_checkpoint", lambda *_args, **_kwargs: None)
 
-    def records(asset: dict, territory: dict, _token: str, source_hash: str) -> list[dict]:
+    def records(asset: dict, territory: dict, start: int, end: int, source_snapshot: dict, _token: str, source_hash: str) -> list[dict]:
         return [{
             "derived_metric_id": asset["id"], "territory_id": territory["territory_id"],
             "territory_version_id": territory["territory_version_id"], "territory_level": territory["level"],
-            "reference_year": 2023, "source_asset_sha256": source_hash,
+            "reference_year": end, "period_start": f"{start}-01-01", "period_end": f"{end}-12-31",
+            "methodology_version": asset["id"], "source_asset_sha256": source_hash,
+            "source_snapshot_signature": source_snapshot["signature"],
         }]
 
     monkeypatch.setattr(forests, "_statistical_records", records)

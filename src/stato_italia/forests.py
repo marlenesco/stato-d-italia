@@ -250,15 +250,24 @@ def _process_tile_grid(geometry_wkb: bytes, resolution_m: int, max_pixels: int) 
     return tiles
 
 
-def _process_payload(asset: dict, bbox: tuple[float, float, float, float], width: int, height: int, snapshot: dict) -> dict:
-    timestamp = str(snapshot["contentDateStart"])
+def _source_time_range(asset: dict, snapshot: dict) -> dict[str, str]:
+    """Resolve the source interval from catalog provenance, never logical years."""
+    timestamp = snapshot.get("contentDateStart")
+    content_end = snapshot.get("contentDateEnd")
+    if not isinstance(timestamp, str) or not isinstance(content_end, str):
+        raise ValueError(f"CDSE catalog snapshot lacks an interpretable time range for {asset['id']}")
     # Annual HRL snapshots retain their established single-source-date request.
     # TCPC is a change product: its catalogued content interval is authoritative.
-    content_end = str(snapshot["contentDateEnd"] if asset["kind"] == "tree_cover_change" else f"{(date.fromisoformat(timestamp[:10]) + timedelta(days=1)).isoformat()}T00:00:00Z")
+    end = content_end if asset["kind"] == "tree_cover_change" else f"{(date.fromisoformat(timestamp[:10]) + timedelta(days=1)).isoformat()}T00:00:00Z"
+    return {"from": timestamp, "to": end}
+
+
+def _process_payload(asset: dict, bbox: tuple[float, float, float, float], width: int, height: int, snapshot: dict) -> dict:
+    time_range = _source_time_range(asset, snapshot)
     return {
         "input": {
             "bounds": {"bbox": list(bbox), "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/3035"}},
-            "data": [{"type": f"byoc-{asset['byoc_collection_id']}", "dataFilter": {"timeRange": {"from": timestamp, "to": content_end}}}],
+            "data": [{"type": f"byoc-{asset['byoc_collection_id']}", "dataFilter": {"timeRange": time_range}}],
         },
         "output": {"width": width, "height": height, "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}]},
         "evalscript": _process_evalscript(asset),
@@ -824,21 +833,16 @@ def _stats_evalscript(asset: dict) -> str:
     return f"//VERSION=3\nfunction setup() {{ return {{ input: [\"{band}\", \"dataMask\"], output: [{{ id: \"default\", bands: {len(classes)}, sampleType: \"UINT8\" }}, {{ id: \"dataMask\", bands: 1 }}] }}; }}\nfunction evaluatePixel(s) {{ return {{ default: [{outputs}], dataMask: [s.dataMask] }}; }}"
 
 
-def _stats_payload(asset: dict, territory: dict, start_year: int, end_year: int) -> dict:
+def _stats_payload(asset: dict, territory: dict, snapshot: dict) -> dict:
     geometry = wkb.loads(territory["geometry_wkb"])
     project = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True).transform
-    # HRL BYOC items are timestamped at the source reference date (1 January),
-    # not over a continuous annual observation interval. Query that one snapshot
-    # while retaining the documented source period in canonical observations.
-    content_year = start_year if asset["kind"] == "tree_cover_change" else end_year
-    start = f"{content_year}-01-01T00:00:00Z"
-    end = f"{content_year}-01-02T00:00:00Z"
+    time_range = _source_time_range(asset, snapshot)
     calculation: dict = {"statistics": {"default": {}}}
     if asset["kind"] == "tree_cover_density":
         calculation["statistics"]["default"] = {"percentiles": {"k": [25, 50, 75]}}
     return {
-        "input": {"bounds": {"geometry": mapping(transform(project, geometry)), "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/3035"}}, "data": [{"type": f"byoc-{asset['byoc_collection_id']}", "dataFilter": {"timeRange": {"from": start, "to": end}}}]},
-        "aggregation": {"timeRange": {"from": start, "to": end}, "aggregationInterval": {"of": "P1D"}, "evalscript": _stats_evalscript(asset), "resx": asset.get("statistical_resolution_m", asset["resolution_m"]), "resy": asset.get("statistical_resolution_m", asset["resolution_m"])},
+        "input": {"bounds": {"geometry": mapping(transform(project, geometry)), "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/3035"}}, "data": [{"type": f"byoc-{asset['byoc_collection_id']}", "dataFilter": {"timeRange": time_range}}]},
+        "aggregation": {"timeRange": time_range, "aggregationInterval": {"of": "P3Y" if asset["kind"] == "tree_cover_change" else "P1D"}, "evalscript": _stats_evalscript(asset), "resx": asset.get("statistical_resolution_m", asset["resolution_m"]), "resy": asset.get("statistical_resolution_m", asset["resolution_m"])},
         "calculations": {"default": calculation},
     }
 
@@ -889,55 +893,57 @@ def _post_statistics(payload: dict, tokens: _CdseTokenProvider) -> requests.Resp
     raise RuntimeError("CDSE Statistical API failed after transient retries") from last_error
 
 
-def _statistical_records(asset: dict, territory: dict, tokens: _CdseTokenProvider, source_hash: str) -> list[dict]:
-    periods = [(year, year) for year in asset.get("years", [])] + [tuple(period) for period in asset.get("periods", [])]
+def _statistical_records(
+    asset: dict, territory: dict, start: int, end: int, snapshot: dict,
+    tokens: _CdseTokenProvider, source_hash: str,
+) -> list[dict]:
     records: list[dict] = []
-    for start, end in periods:
-        with _post_statistics(_stats_payload(asset, territory, start, end), tokens) as response:
-            stats = _statistical_response(response, asset)
-        locator = f"statistical-api:{asset['id']}:{start}-{end}"
-        def add(metric: str, value: float) -> None:
-            records.append(_record(asset | {"source_id": HRL["source_id"]}, locator, source_hash, territory, metric, value, start, end))
-        if asset["kind"] == "tree_cover_density":
-            values = stats[0]
-            percentiles = values.get("percentiles")
-            if not isinstance(percentiles, dict) or any(str(key) not in percentiles for key in ("25.0", "50.0", "75.0")):
-                raise ValueError("CDSE Statistical API percentiles missing for Tree Cover Density")
-            add("tree_cover_mean", float(values["mean"])); add("tree_cover_p25", float(percentiles["25.0"])); add("tree_cover_p50", float(percentiles["50.0"])); add("tree_cover_p75", float(percentiles["75.0"]))
-        else:
-            pixel_ha = asset.get("statistical_resolution_m", asset["resolution_m"]) ** 2 / 10_000
-            classes = [(name, code) for name, code in asset["class_codes"].items() if name not in {"non_forest", "non_tree"}]
-            areas = {name: float(stats[index]["mean"]) * float(stats[index]["sampleCount"]) * pixel_ha for index, (name, _) in enumerate(classes)}
-            if asset["kind"] == "forest_type":
-                total = sum(areas.values())
-                geometry = transform(Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True).transform, wkb.loads(territory["geometry_wkb"]))
-                add("forest_cover_hrl", total); add("forest_area_ha", total); add("forest_share_pct", total / (geometry.area / 10_000) * 100)
-                add("broadleaved_area_hrl_ha", areas["broadleaved"]); add("coniferous_area_hrl_ha", areas["coniferous"]); add("mixed_forest_area_hrl_ha", areas["mixed"])
-            elif asset["kind"] == "tree_cover_change":
-                add("tree_cover_gain_ha", areas["new_tree_cover"]); add("tree_cover_loss_ha", areas["loss_tree_cover"])
-            elif asset["kind"] == "dominant_leaf_type":
-                add("broadleaved_area_dlt_ha", areas["broadleaved"]); add("coniferous_area_dlt_ha", areas["coniferous"])
+    with _post_statistics(_stats_payload(asset, territory, snapshot), tokens) as response:
+        stats = _statistical_response(response, asset)
+    locator = f"statistical-api:{asset['id']}:{start}-{end}"
+    def add(metric: str, value: float) -> None:
+        record = _record(asset | {"source_id": HRL["source_id"]}, locator, source_hash, territory, metric, value, start, end)
+        record["source_snapshot_signature"] = snapshot["signature"]
+        records.append(record)
+    if asset["kind"] == "tree_cover_density":
+        values = stats[0]
+        percentiles = values.get("percentiles")
+        if not isinstance(percentiles, dict) or any(str(key) not in percentiles for key in ("25.0", "50.0", "75.0")):
+            raise ValueError("CDSE Statistical API percentiles missing for Tree Cover Density")
+        add("tree_cover_mean", float(values["mean"])); add("tree_cover_p25", float(percentiles["25.0"])); add("tree_cover_p50", float(percentiles["50.0"])); add("tree_cover_p75", float(percentiles["75.0"]))
+    else:
+        pixel_ha = asset.get("statistical_resolution_m", asset["resolution_m"]) ** 2 / 10_000
+        classes = [(name, code) for name, code in asset["class_codes"].items() if name not in {"non_forest", "non_tree"}]
+        areas = {name: float(stats[index]["mean"]) * float(stats[index]["sampleCount"]) * pixel_ha for index, (name, _) in enumerate(classes)}
+        if asset["kind"] == "forest_type":
+            total = sum(areas.values())
+            geometry = transform(Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True).transform, wkb.loads(territory["geometry_wkb"]))
+            add("forest_cover_hrl", total); add("forest_area_ha", total); add("forest_share_pct", total / (geometry.area / 10_000) * 100)
+            add("broadleaved_area_hrl_ha", areas["broadleaved"]); add("coniferous_area_hrl_ha", areas["coniferous"]); add("mixed_forest_area_hrl_ha", areas["mixed"])
+        elif asset["kind"] == "tree_cover_change":
+            add("tree_cover_gain_ha", areas["new_tree_cover"]); add("tree_cover_loss_ha", areas["loss_tree_cover"])
+        elif asset["kind"] == "dominant_leaf_type":
+            add("broadleaved_area_dlt_ha", areas["broadleaved"]); add("coniferous_area_dlt_ha", areas["coniferous"])
     return records
 
 
-def _checkpoint_path(destination: Path, asset: dict, territory: dict) -> Path:
+def _checkpoint_path(destination: Path, asset: dict, territory: dict, start: int, end: int) -> Path:
     """Stable local-only checkpoint; source signature is validated in its payload."""
-    key = sha256(f"{asset['id']}:{territory['territory_version_id']}".encode()).hexdigest()
+    key = sha256(f"{asset['id']}:{start}-{end}:{territory['territory_version_id']}".encode()).hexdigest()
     return destination.parent / "statistical-api-checkpoints" / asset["id"] / f"{key}.json"
 
 
 def _expected_statistical_records(asset: dict) -> int:
-    periods = len(asset.get("years", [])) + len(asset.get("periods", []))
     per_period = {"tree_cover_density": 4, "forest_type": 6, "tree_cover_change": 2, "dominant_leaf_type": 2}.get(asset["kind"])
     if per_period is None:
         raise ValueError(f"Unknown statistical forest asset kind: {asset['kind']}")
-    return periods * per_period
+    return per_period
 
 
-def _read_statistical_checkpoint(destination: Path, asset: dict, territory: dict, source_hash: str, force: bool) -> list[dict] | None:
+def _read_statistical_checkpoint(destination: Path, asset: dict, territory: dict, start: int, end: int, snapshot: dict, source_hash: str, force: bool) -> list[dict] | None:
     if force:
         return None
-    path = _checkpoint_path(destination, asset, territory)
+    path = _checkpoint_path(destination, asset, territory, start, end)
     if not path.exists():
         return None
     try:
@@ -946,73 +952,103 @@ def _read_statistical_checkpoint(destination: Path, asset: dict, territory: dict
         raise ValueError(f"Invalid local CDSE checkpoint: {path}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"Invalid local CDSE checkpoint shape: {path}")
-    if payload.get("sourceHash") != source_hash or payload.get("assetId") != asset["id"] or payload.get("territoryVersionId") != territory["territory_version_id"]:
+    if payload.get("schemaVersion") != 2 or payload.get("sourceHash") != source_hash or payload.get("sourceSnapshotSignature") != snapshot["signature"] or payload.get("assetId") != asset["id"] or payload.get("logicalPeriod") != [start, end] or payload.get("territoryVersionId") != territory["territory_version_id"]:
         return None
     records = payload.get("records")
     if not isinstance(records, list) or len(records) != _expected_statistical_records(asset) or not all(isinstance(record, dict) for record in records):
         raise ValueError(f"Invalid local CDSE checkpoint records: {path}")
-    if any(record.get("territory_version_id") != territory["territory_version_id"] or record.get("source_asset_sha256") != source_hash for record in records):
+    if any(record.get("territory_version_id") != territory["territory_version_id"] or record.get("source_asset_sha256") != source_hash or record.get("source_snapshot_signature") != snapshot["signature"] for record in records):
         raise ValueError(f"Invalid local CDSE checkpoint provenance: {path}")
     return records
 
 
-def _write_statistical_checkpoint(destination: Path, asset: dict, territory: dict, source_hash: str, records: list[dict]) -> None:
-    path = _checkpoint_path(destination, asset, territory)
+def _write_statistical_checkpoint(destination: Path, asset: dict, territory: dict, start: int, end: int, snapshot: dict, source_hash: str, records: list[dict]) -> None:
+    path = _checkpoint_path(destination, asset, territory, start, end)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "sourceHash": source_hash,
+        "sourceSnapshotSignature": snapshot["signature"],
         "assetId": asset["id"],
+        "logicalPeriod": [start, end],
         "territoryVersionId": territory["territory_version_id"],
         "records": records,
     }, ensure_ascii=False, separators=(",", ":")) + "\n")
     temporary.replace(path)
 
 
+def _statistical_jobs(canonical_root: Path, catalog: dict) -> list[tuple[dict, int, int, dict, dict]]:
+    """Expand one verified catalog snapshot into its matching ISTAT population."""
+    jobs: list[tuple[dict, int, int, dict, dict]] = []
+    for asset in (item for item in HRL["assets"] if item.get("statistical_api_enabled", True)):
+        for start, end in _asset_periods(asset):
+            snapshot = _catalog_snapshot(catalog, asset, start, end)
+            reference_year = territory_reference_year_for_period(asset, start, end)
+            for territory in _slice_territories(canonical_root, reference_year).to_dict("records"):
+                jobs.append((asset, start, end, snapshot, territory))
+    if not jobs:
+        raise ValueError("CDSE Statistical API has no supported source snapshots")
+    return jobs
+
+
+def _statistical_canonical_matches_contract(table: pd.DataFrame, source_hash: str, jobs: list[tuple[dict, int, int, dict, dict]]) -> bool:
+    required = {"methodology_version", "period_start", "period_end", "territory_version_id", "source_asset_sha256", "source_snapshot_signature"}
+    if required - set(table.columns) or set(table["source_asset_sha256"].dropna().astype(str)) != {source_hash}:
+        return False
+    expected = {
+        (asset["id"], start, end, territory["territory_version_id"]): snapshot["signature"]
+        for asset, start, end, snapshot, territory in jobs
+    }
+    observed: set[tuple[str, int, int, str]] = set()
+    for row in table.itertuples():
+        key = (str(row.methodology_version), int(str(row.period_start)[:4]), int(str(row.period_end)[:4]), str(row.territory_version_id))
+        if expected.get(key) != getattr(row, "source_snapshot_signature"):
+            return False
+        observed.add(key)
+    return observed == set(expected)
+
+
 def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path, force: bool) -> dict:
     state = _catalog_state(root)
     if not state.exists():
         raise FileNotFoundError("CDSE catalog state missing. Run `stato-data fetch foreste` first.")
-    tokens = _CdseTokenProvider(HRL)
     metadata = json.loads(state.read_text())
     source_hash = metadata.get("signature")
     if not isinstance(source_hash, str) or len(source_hash) != 64:
         raise ValueError("Invalid CDSE catalog state signature")
+    catalog = {"products": metadata.get("products")}
+    jobs = _statistical_jobs(canonical_root, catalog)
     if destination.exists() and not force:
         table = pd.read_parquet(destination)
-        canonical_hashes = set(table["source_asset_sha256"].dropna().astype(str))
-        if canonical_hashes == {source_hash}:
+        if _statistical_canonical_matches_contract(table, source_hash, jobs):
             return {"changed": False, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "mode": "statistical-api", "requests": 0}
-    reference_year = _territory_reference_year()
-    territories = _slice_territories(canonical_root, reference_year)
     records: list[dict] = []
     checkpoint_records = 0
-    assets = [asset for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)]
-    territory_records = territories.to_dict("records")
-    request_count = sum(len(asset.get("years", [])) + len(asset.get("periods", [])) for asset in assets) * len(territory_records)
+    request_count = len(jobs)
     workers = int(os.getenv("FOREST_STATISTICAL_API_WORKERS", "4"))
     if not 1 <= workers <= 6:
         raise ValueError("FOREST_STATISTICAL_API_WORKERS must be between 1 and 6")
-    pending: list[tuple[dict, dict]] = []
-    for territory in territory_records:
-        for asset in assets:
-            checkpoint = _read_statistical_checkpoint(destination, asset, territory, source_hash, force)
-            if checkpoint is None:
-                pending.append((territory, asset))
-            else:
-                records.extend(checkpoint)
-                checkpoint_records += len(checkpoint)
+    pending: list[tuple[dict, int, int, dict, dict]] = []
+    for asset, start, end, snapshot, territory in jobs:
+        checkpoint = _read_statistical_checkpoint(destination, asset, territory, start, end, snapshot, source_hash, force)
+        if checkpoint is None:
+            pending.append((asset, start, end, snapshot, territory))
+        else:
+            records.extend(checkpoint)
+            checkpoint_records += len(checkpoint)
+    if pending:
+        tokens = _CdseTokenProvider(HRL)
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cdse-forest") as pool:
-        jobs = iter(pending)
-        futures: dict[Future[list[dict]], tuple[dict, dict]] = {}
+        pending_jobs = iter(pending)
+        futures: dict[Future[list[dict]], tuple[dict, int, int, dict, dict]] = {}
 
         def submit_next() -> bool:
             try:
-                territory, asset = next(jobs)
+                asset, start, end, snapshot, territory = next(pending_jobs)
             except StopIteration:
                 return False
-            futures[pool.submit(_statistical_records, asset, territory, tokens, source_hash)] = (territory, asset)
+            futures[pool.submit(_statistical_records, asset, territory, start, end, snapshot, tokens, source_hash)] = (asset, start, end, snapshot, territory)
             return True
 
         for _ in range(min(workers * 2, len(pending))):
@@ -1020,9 +1056,9 @@ def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path,
         while futures:
             completed, _ = wait(futures, return_when=FIRST_COMPLETED)
             for future in completed:
-                territory, asset = futures.pop(future)
+                asset, start, end, snapshot, territory = futures.pop(future)
                 result = future.result()
-                _write_statistical_checkpoint(destination, asset, territory, source_hash, result)
+                _write_statistical_checkpoint(destination, asset, territory, start, end, snapshot, source_hash, result)
                 records.extend(result)
                 submit_next()
     table = pd.DataFrame(records)
