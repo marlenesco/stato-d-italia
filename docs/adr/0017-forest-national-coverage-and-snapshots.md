@@ -1,6 +1,6 @@
 # ADR 0017: copertura nazionale e snapshot temporali delle elaborazioni Foreste
 
-**Stato:** accepted
+**Stato:** superseded by ADR 0018
 
 ## Contesto
 
@@ -20,9 +20,9 @@ timestamp `ContentDate/Start` della data di riferimento configurata. Il
 manifest delle slice e le osservazioni derivate conservano la signature dello
 snapshot. Assenza, ambiguità o timestamp inatteso sono errori bloccanti.
 
-La verifica pubblica del catalogo identifica Tree Cover Density come `TCDCL` a
-10 m e Forest Type a 100 m; la griglia Process a 100 m è una scelta di
-elaborazione separata e non viene presentata come risoluzione nativa TCD.
+La precedente identificazione operativa di Tree Cover Density come `TCDCL` a
+10 m era errata: `TCDCL` è il confidence layer e non la densità di copertura.
+La correzione del contratto operativo è registrata in ADR 0018.
 
 La canonical raster produce un sidecar di copertura: popolazione ISTAT attesa,
 territori con valore numerico e territori con NoData raster valido. I tre

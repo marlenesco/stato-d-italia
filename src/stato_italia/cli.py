@@ -760,7 +760,10 @@ def _run_geospatial(
     args: argparse.Namespace, *, root: Path, output: Path, canonical: Path, delivery: Path,
     store: LocalObjectStore | R2ObjectStore, previous_state: dict | None, release_id: str,
     started: float, started_at: str, domain: DomainProcessing | None = None,
+    hydrate_store: LocalObjectStore | R2ObjectStore | None = None,
 ) -> int:
+    input_store = hydrate_store or store
+    validation_only = bool(getattr(args, "validation_only", False))
     plan = active_ingestion_plan()
     allowed_families = set(domain.source_families) if domain else {"infc", "copernicus"}
     families = _changed_source_families()
@@ -769,19 +772,19 @@ def _run_geospatial(
         raise ValueError(f"Geospatial plan contains sources outside its domain: {sorted(unexpected_families)}")
     if plan is None:
         families = allowed_families
-        _hydrate(store, root, _active_infc_logical_paths(previous_state))
+        _hydrate(input_store, root, _active_infc_logical_paths(previous_state))
     if args.force:
         families = allowed_families
-    _hydrate(store, root, _territory_logical_paths((2015, 2023)))
+    _hydrate(input_store, root, _territory_logical_paths((2015, 2023)))
     if "infc" in families:
-        _hydrate_planned_raw_dependencies(store, root, {"infc"})
+        _hydrate_planned_raw_dependencies(input_store, root, {"infc"})
     infc_logical = "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"
     zonal_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
     zonal_coverage_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json"
     if "infc" not in families:
-        _hydrate(store, root, [infc_logical])
+        _hydrate(input_store, root, [infc_logical])
     if "copernicus" not in families:
-        _hydrate(store, root, [zonal_logical, zonal_coverage_logical])
+        _hydrate(input_store, root, [zonal_logical, zonal_coverage_logical])
     forest_fetch, infc, zonal = _process_geospatial_forest_sources(
         args, root=root, canonical=canonical, previous_state=previous_state,
     )
@@ -813,7 +816,7 @@ def _run_geospatial(
     )
     insights = {"changed": False, "files": [], "carried": True}
     if families & {"infc", "copernicus"}:
-        _hydrate(store, root, [
+        _hydrate(input_store, root, [
             "canonical/soil/dataset_version=2025-2024-observations/observations.parquet",
             "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet",
             "canonical/dissesto/dataset_version=idrogeo-risk-2024/observations.parquet",
@@ -847,14 +850,33 @@ def _run_geospatial(
         declared.append(root / infc_logical)
     if "copernicus" in families:
         declared.extend((root / zonal_logical, root / zonal_coverage_logical))
-    affected_artifacts = _geospatial_downstream_families(families)
-    manifest, metrics, publication = _publish_scoped(
-        store=store, root=root, output=output, release_id=release_id, scope="geospatial", previous_state=previous_state,
-        current_state=current_state, declared_paths=declared,
-        changed=infc["changed"] or zonal["changed"] or forest_delivery["changed"] or insights["changed"],
-        affected_families=affected_artifacts,
-    )
-    report = {"run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop", "changed": publication["changed"], "scope": "geospatial", "domain": domain.name if domain else None, "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal}, "operationalMetrics": metrics | {"canonicalBytesGenerated": sum(item.get("canonical_bytes", 0) for item in (infc, zonal) if item["changed"]), "derivedBytesGenerated": 0, "deliveryBytesGenerated": sum(item.get("bytes", 0) for item in (forest_delivery, insights) if item.get("changed")), "pipelineDurationSeconds": round(time.monotonic() - started, 3)}, "manifest": manifest, "carriedArtifacts": publication["carried"], "startedAt": started_at, "completedAt": now_iso()}
+    changed = infc["changed"] or zonal["changed"] or forest_delivery["changed"] or insights["changed"]
+    generated_metrics = {
+        "canonicalBytesGenerated": sum(item.get("canonical_bytes", 0) for item in (infc, zonal) if item["changed"]),
+        "derivedBytesGenerated": 0,
+        "deliveryBytesGenerated": sum(item.get("bytes", 0) for item in (forest_delivery, insights) if item.get("changed")),
+        "pipelineDurationSeconds": round(time.monotonic() - started, 3),
+    }
+    if validation_only:
+        input_release = active_release(input_store)
+        report = {
+            "run_id": release_id, "status": "validated", "changed": changed,
+            "scope": "geospatial", "domain": domain.name if domain else None,
+            "validationOnly": True, "hydrateFrom": getattr(args, "hydrate_from", "local"),
+            "inputReleaseId": input_release.get("releaseId") if input_release else None,
+            "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal},
+            "operationalMetrics": generated_metrics,
+            "candidateArtifacts": [str(path.relative_to(root)) for path in declared if path.is_file()],
+            "startedAt": started_at, "completedAt": now_iso(),
+        }
+    else:
+        affected_artifacts = _geospatial_downstream_families(families)
+        manifest, metrics, publication = _publish_scoped(
+            store=store, root=root, output=output, release_id=release_id, scope="geospatial", previous_state=previous_state,
+            current_state=current_state, declared_paths=declared, changed=changed,
+            affected_families=affected_artifacts,
+        )
+        report = {"run_id": manifest["releaseId"], "status": "success" if publication["changed"] else "noop", "changed": publication["changed"], "scope": "geospatial", "domain": domain.name if domain else None, "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal}, "operationalMetrics": metrics | generated_metrics, "manifest": manifest, "carriedArtifacts": publication["carried"], "startedAt": started_at, "completedAt": now_iso()}
     json_dump(Path(args.report), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
@@ -1285,6 +1307,12 @@ def _run_combined_scope_forests(
 def run(args: argparse.Namespace) -> int:
     clear_ingestion_plan()
     _require_main_for_production_activation(args.publish)
+    hydrate_from = getattr(args, "hydrate_from", "local")
+    validation_only = bool(getattr(args, "validation_only", False))
+    if hydrate_from == "r2" and args.publish != "local":
+        raise ValueError("R2 hydration is permitted only with local candidate output")
+    if validation_only and args.publish != "local":
+        raise ValueError("Validation-only runs require local candidate output")
     domain = _domain_processing(args)
     args.scope = _execution_scope(args, domain)
     started = time.monotonic()
@@ -1296,7 +1324,8 @@ def run(args: argparse.Namespace) -> int:
     delivery = root / "delivery"
     release_id = args.release_id or _release_id()
     store = R2ObjectStore() if args.publish == "r2" else LocalObjectStore(output / "object-store")
-    previous_source_state = _active_source_state_with_legacy_bootstrap(store)
+    hydrate_store = R2ObjectStore() if hydrate_from == "r2" else store
+    previous_source_state = _active_source_state_with_legacy_bootstrap(hydrate_store)
     plan_path = getattr(args, "plan", None)
     if plan_path:
         if args.scope == "all":
@@ -1316,7 +1345,7 @@ def run(args: argparse.Namespace) -> int:
         return _run_geospatial(
             args, root=root, output=output, canonical=canonical, delivery=delivery, store=store,
             previous_state=previous_source_state, release_id=release_id, started=started, started_at=started_at,
-            domain=domain,
+            domain=domain, hydrate_store=hydrate_store,
         )
     if args.scope == "data" and plan_path:
         return _run_incremental_data(
@@ -1593,6 +1622,8 @@ def main() -> int:
     run_parser.add_argument("--report", default="reports/first-ingestion.json")
     run_parser.add_argument("--release-id")
     run_parser.add_argument("--publish", choices=("local", "r2"), default="local")
+    run_parser.add_argument("--hydrate-from", choices=("local", "r2"), default="local", help="read active artifacts from a separate store; R2 is read-only candidate input")
+    run_parser.add_argument("--validation-only", action="store_true", help="write candidate files locally without creating a release or updating any manifest")
     run_parser.add_argument("--force", action="store_true", help="reprocess unchanged source assets; manual recovery only")
     run_parser.add_argument("--offline", action="store_true", help="use only pre-existing official raw assets; never make HTTP requests")
     run_parser.add_argument("--scope", choices=("all", "data", "geospatial"), default="all", help="workflow ownership; data reuses validated geospatial canonical")

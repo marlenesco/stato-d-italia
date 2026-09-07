@@ -43,6 +43,16 @@ def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
     assert "data/raw/infc-2015-forests" in geospatial_workflow
 
 
+def test_national_forest_candidate_job_has_no_r2_publication_path() -> None:
+    workflow = (Path(__file__).parents[1] / ".github/workflows/ingest-geospatial.yml").read_text()
+
+    assert "if: github.ref_name != 'phase-d1'" in workflow
+    assert "if: github.ref_name == 'phase-d1'" in workflow
+    assert "--hydrate-from r2 --publish local --validation-only" in workflow
+    assert "production-manifest-before" in workflow
+    assert "production-manifest-after" in workflow
+
+
 def test_forest_domain_registry_is_scoped_to_its_sources_and_shared_downstream() -> None:
     spec = cli.DOMAIN_PROCESSING["forests"]
 
@@ -113,6 +123,61 @@ def test_forest_domain_run_does_not_widen_force_to_data_scope(
     assert captured["force"] is True
     assert isinstance(domain, cli.DomainProcessing)
     assert domain.source_families == frozenset({"infc", "copernicus"})
+
+
+def test_validation_only_forest_run_reads_input_store_and_never_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A national candidate may hydrate remote inputs, but can only write local files."""
+    class RemoteInput:
+        reads = 0
+        writes = 0
+
+        def read_json(self, _key: str) -> dict:
+            self.reads += 1
+            return {"releaseId": "active-r2"}
+
+        def exists(self, _key: str) -> bool:
+            self.reads += 1
+            return True
+
+    remote = RemoteInput()
+    output = LocalObjectStore(tmp_path / "artifacts" / "object-store")
+    hydrated: list[str] = []
+
+    def hydrate(store: object, _root: Path, paths: list[str]) -> None:
+        assert store is remote
+        remote.reads += len(paths)
+        hydrated.extend(paths)
+
+    root = tmp_path / "data"
+    catalog = root / "raw/copernicus-hrl-forests/catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text("{}")
+    monkeypatch.setattr(cli, "_hydrate", hydrate)
+    monkeypatch.setattr(cli, "active_release", lambda store: {"releaseId": "active-r2"} if store is remote else None)
+    monkeypatch.setattr(cli, "_process_geospatial_forest_sources", lambda *_args, **_kwargs: (
+        {"infc": [], "catalog": {"path": str(catalog)}},
+        {"changed": False, "canonical_bytes": 0},
+        {"changed": False, "canonical_bytes": 0},
+    ))
+    monkeypatch.setattr(cli, "generate_forests_delivery", lambda *_args, **_kwargs: {"changed": False, "files": [], "bytes": 0})
+    monkeypatch.setattr(cli, "generate_territory_insights_delivery", lambda *_args, **_kwargs: {"changed": False, "files": [], "bytes": 0})
+    monkeypatch.setattr(cli, "build_pmtiles", lambda _source, destination: {"path": str(destination), "bytes": 0})
+    monkeypatch.setattr(cli, "build_source_state_from_metadata_paths", lambda *_args, **_kwargs: {"schemaVersion": 1, "sources": []})
+    monkeypatch.setattr(cli, "_publish_scoped", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("validation must not publish")))
+
+    assert _run_geospatial(
+        Namespace(offline=False, force=False, report=str(tmp_path / "reports/validation.json"), validation_only=True, hydrate_from="r2"),
+        root=root, output=tmp_path / "artifacts", canonical=root / "canonical", delivery=root / "delivery",
+        store=output, hydrate_store=remote, previous_state=None, release_id="candidate",
+        started=0.0, started_at="2026-09-07T00:00:00Z", domain=cli.DOMAIN_PROCESSING["forests"],
+    ) == 0
+
+    assert remote.reads > 0
+    assert remote.writes == 0
+    assert (tmp_path / "reports/validation.json").is_file()
+    assert hydrated
 
 
 def test_production_activation_is_refused_outside_main(monkeypatch: pytest.MonkeyPatch) -> None:

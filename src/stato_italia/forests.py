@@ -109,12 +109,15 @@ def _catalog_products(source: dict, token: str) -> list[dict]:
     products: list[dict] = []
     for asset in source["assets"]:
         for start_year, end_year in _asset_periods(asset):
-            start = f"{end_year}-01-01T00:00:00.000000Z"
-            end = f"{end_year + 1}-01-01T00:00:00.000000Z"
+            content_year = _catalog_content_year(asset, start_year, end_year)
+            start = f"{content_year}-01-01T00:00:00.000000Z"
+            end = f"{content_year + 1}-01-01T00:00:00.000000Z"
+            name_contains = str(asset["catalog_name_contains_template"]).format(start_year=start_year, end_year=end_year)
+            name_pattern = re.compile(str(asset["catalog_name_regex_template"]).format(start_year=start_year, end_year=end_year))
             params = {
                 "$filter": (
                     "Collection/Name eq 'CLMS' and "
-                    f"contains(Name,'{asset['catalog_tag']}') and "
+                    f"contains(Name,'{name_contains}') and "
                     f"ContentDate/Start ge {start} and ContentDate/Start lt {end}"
                 ),
                 "$select": "Id,Name,ContentDate,Checksum,S3Path,OriginDate",
@@ -133,8 +136,10 @@ def _catalog_products(source: dict, token: str) -> list[dict]:
                 content_date = item.get("ContentDate")
                 if asset.get("snapshot_timestamp") != "content_date_start_at_reference_year":
                     raise ValueError(f"Unsupported CDSE snapshot timestamp contract for {asset['id']}")
-                if not isinstance(content_date, dict) or not str(content_date.get("Start", "")).startswith(f"{end_year}-01-01"):
-                    raise ValueError(f"CDSE catalog returned an unexpected timestamp for {asset['id']} {end_year}")
+                if not name_pattern.fullmatch(item["Name"]):
+                    raise ValueError(f"CDSE catalog returned an unexpected product name for {asset['id']}: {item['Name']}")
+                if not isinstance(content_date, dict) or not str(content_date.get("Start", "")).startswith(f"{content_year}-01-01"):
+                    raise ValueError(f"CDSE catalog returned an unexpected timestamp for {asset['id']} {start_year}-{end_year}")
                 items.append({key: item.get(key) for key in ("Id", "Name", "ContentDate", "Checksum", "S3Path", "OriginDate")})
             products.append({"asset_id": asset["id"], "period": [start_year, end_year], "items": sorted(items, key=lambda item: (item["Name"], item["Id"]))})
     if not products:
@@ -185,6 +190,15 @@ def _asset_periods(asset: dict) -> list[tuple[int, int]]:
     return [(int(year), int(year)) for year in asset.get("years", [])] + [tuple(map(int, period)) for period in asset.get("periods", [])]
 
 
+def _catalog_content_year(asset: dict, start_year: int, end_year: int) -> int:
+    policy = asset.get("catalog_content_year", "end")
+    if policy == "start":
+        return start_year
+    if policy == "end":
+        return end_year
+    raise ValueError(f"Unsupported CDSE catalog content-year policy for {asset['id']}: {policy}")
+
+
 def _process_evalscript(asset: dict) -> str:
     """Keep the source band intact and reserve a distinct nodata value."""
     return (
@@ -218,11 +232,11 @@ def _process_tile_grid(geometry_wkb: bytes, resolution_m: int, max_pixels: int) 
 
 
 def _process_payload(asset: dict, bbox: tuple[float, float, float, float], width: int, height: int, start_year: int, end_year: int) -> dict:
-    timestamp = f"{end_year}-01-01T00:00:00Z"
+    timestamp = f"{_catalog_content_year(asset, start_year, end_year)}-01-01T00:00:00Z"
     return {
         "input": {
             "bounds": {"bbox": list(bbox), "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/3035"}},
-            "data": [{"type": f"byoc-{asset['byoc_collection_id']}", "dataFilter": {"timeRange": {"from": timestamp, "to": f"{end_year}-01-02T00:00:00Z"}}}],
+            "data": [{"type": f"byoc-{asset['byoc_collection_id']}", "dataFilter": {"timeRange": {"from": timestamp, "to": f"{_catalog_content_year(asset, start_year, end_year)}-01-02T00:00:00Z"}}}],
         },
         "output": {"width": width, "height": height, "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}]},
         "evalscript": _process_evalscript(asset),
@@ -264,22 +278,30 @@ def _fetch_process_raster_slices(
         raise ValueError("Forest process slice lacks configured ISTAT regions")
     changed = False
     requests_made = 0
+    tiles_reused = 0
+    bytes_downloaded = 0
+    request_plan: dict[str, dict[str, int]] = {}
     files: list[dict] = []
     raw_files: list[str] = []
     assets = [asset for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)]
     for asset in assets:
         for start_year, end_year in _asset_periods(asset):
             snapshot = _catalog_snapshot(catalog, asset, start_year, end_year)
+            plan_key = f"{asset['id']}:{start_year}-{end_year}"
+            request_plan.setdefault(plan_key, {"assetId": asset["id"], "period": f"{start_year}-{end_year}", "planned": 0, "executed": 0, "reused": 0})
             for region in regions.sort_values("istat_code").to_dict("records"):
                 manifest_path = _process_slice_path(root, asset, start_year, end_year, region["istat_code"], 0, 0).parent / "slice-manifest.json"
                 entries: list[dict] = []
                 for bbox, width, height, row, column in _process_tile_grid(region["geometry_wkb"], int(asset["process_resolution_m"]), int(asset["process_max_pixels"])):
+                    request_plan[plan_key]["planned"] += 1
                     target = _process_slice_path(root, asset, start_year, end_year, region["istat_code"], row, column)
                     sidecar = target.with_suffix(target.suffix + ".metadata.json")
                     expected = {"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "bbox_epsg3035": list(bbox), "width": width, "height": height, "snapshot_signature": snapshot["signature"]}
                     prior = json.loads(sidecar.read_text()) if not force and target.exists() and sidecar.exists() else None
                     if prior and prior.get("request") == expected and prior.get("sha256") == sha256_file(target):
                         metadata = prior
+                        tiles_reused += 1
+                        request_plan[plan_key]["reused"] += 1
                     else:
                         with _post_process_raster(_process_payload(asset, bbox, width, height, start_year, end_year), token) as response:
                             response.raise_for_status()
@@ -301,6 +323,8 @@ def _fetch_process_raster_slices(
                             json_dump(sidecar, metadata)
                             changed = True
                             requests_made += 1
+                            bytes_downloaded += target.stat().st_size
+                            request_plan[plan_key]["executed"] += 1
                     entries.append({"path": target.name, "sha256": metadata["sha256"], "bytes": metadata["bytes"], "request": expected})
                     raw_files.extend([str(target), str(sidecar)])
                 signature = sha256(json.dumps({"asset_id": asset["id"], "period": [start_year, end_year], "region_istat_code": region["istat_code"], "snapshot_signature": snapshot["signature"], "entries": entries}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -311,7 +335,30 @@ def _fetch_process_raster_slices(
                     changed = True
                 raw_files.append(str(manifest_path))
                 files.append({"path": str(manifest_path), "bytes": sum(item["bytes"] for item in entries), "tiles": len(entries), "asset": asset["id"], "period": f"{start_year}-{end_year}", "region": region["istat_code"]})
-    return {"changed": changed, "requests": requests_made, "files": files, "raw_files": raw_files, "raw_bytes": sum(item["bytes"] for item in files)}
+    return {
+        "changed": changed, "requests": requests_made, "requests_planned": sum(item["planned"] for item in request_plan.values()),
+        "tiles_reused": tiles_reused, "tiles_downloaded": requests_made, "bytes_downloaded": bytes_downloaded,
+        "request_plan": list(request_plan.values()), "files": files, "raw_files": raw_files,
+        "raw_bytes": sum(item["bytes"] for item in files),
+    }
+
+
+def forest_process_request_plan(canonical_root: Path) -> list[dict]:
+    """Calculate the actual national Process API request plan from ISTAT geometry."""
+    reference_year = _territory_reference_year()
+    regions = _slice_territories(canonical_root, reference_year)
+    regions = regions[regions["level"] == "region"]
+    plan: list[dict] = []
+    for asset in HRL["assets"]:
+        if not asset.get("statistical_api_enabled", True):
+            continue
+        for start_year, end_year in _asset_periods(asset):
+            planned = sum(
+                len(_process_tile_grid(region["geometry_wkb"], int(asset["process_resolution_m"]), int(asset["process_max_pixels"])))
+                for region in regions.to_dict("records")
+            )
+            plan.append({"assetId": asset["id"], "period": f"{start_year}-{end_year}", "planned": planned})
+    return plan
 
 
 def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool = True, include_infc: bool = True) -> dict:
@@ -439,7 +486,7 @@ def _raster_records(asset: dict, path: Path, source_hash: str, territories: pd.D
             values = _pixels(dataset, territory["geometry_wkb"])
             if not len(values):
                 continue
-            values = values[np.isfinite(values)]
+            values = _valid_source_values(asset, values)
             if not len(values):
                 continue
             def add(metric: str, value: float) -> None:
@@ -509,6 +556,19 @@ def _process_raster_groups(root: Path, asset: dict) -> list[dict]:
     return groups
 
 
+def _valid_source_values(asset: dict, values: np.ndarray) -> np.ndarray:
+    """Exclude processing and documented source NoData while preserving real zero."""
+    result = values[np.isfinite(values)]
+    if "process_no_data" in asset:
+        result = result[result != asset["process_no_data"]]
+    source_nodata = asset.get("source_nodata_codes", [])
+    if not isinstance(source_nodata, list) or not all(isinstance(code, (int, float)) for code in source_nodata):
+        raise ValueError(f"Invalid source NoData contract for {asset['id']}")
+    if source_nodata:
+        result = result[~np.isin(result, source_nodata)]
+    return result
+
+
 def _slice_territories_with_region_code(canonical_root: Path, year: int) -> pd.DataFrame:
     territories = _slice_territories(canonical_root, year).copy()
     provinces = territories[territories["level"] == "province"]
@@ -555,7 +615,7 @@ def _process_raster_records(asset: dict, group: dict, territories: pd.DataFrame)
                     continue
                 values = cropped[0]
                 values = values.compressed() if np.ma.isMaskedArray(values) else values.ravel()
-                values = values[np.isfinite(values) & (values != asset["process_no_data"])]
+                values = _valid_source_values(asset, values)
                 if len(values):
                     values_by_chunk.append(values)
             if not values_by_chunk:
@@ -691,8 +751,9 @@ def _stats_payload(asset: dict, territory: dict, start_year: int, end_year: int)
     # HRL BYOC items are timestamped at the source reference date (1 January),
     # not over a continuous annual observation interval. Query that one snapshot
     # while retaining the documented source period in canonical observations.
-    start = f"{end_year}-01-01T00:00:00Z"
-    end = f"{end_year}-01-02T00:00:00Z"
+    content_year = _catalog_content_year(asset, start_year, end_year)
+    start = f"{content_year}-01-01T00:00:00Z"
+    end = f"{content_year}-01-02T00:00:00Z"
     calculation: dict = {"statistics": {"default": {}}}
     if asset["kind"] == "tree_cover_density":
         calculation["statistics"]["default"] = {"percentiles": {"k": [25, 50, 75]}}
@@ -893,40 +954,76 @@ def _ingest_statistical_api(root: Path, canonical_root: Path, destination: Path,
     return {"changed": True, "records": len(table), "checkpoint_records_reused": checkpoint_records, "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "reference_years": sorted(table.reference_year.unique().tolist()), "mode": "statistical-api", "requests": request_count, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
 
 
-def _temporal_diagnostics(table: pd.DataFrame) -> list[dict]:
+def _coverage_state(entries: list[dict], asset_id: str, period: str, level: str) -> tuple[set[str], set[str], set[str]]:
+    matching = [entry for entry in entries if entry["assetId"] == asset_id and entry["period"] == period and entry["territoryLevel"] == level]
+    if not matching:
+        raise ValueError(f"Forest coverage lacks {asset_id}/{period}/{level}")
+    expected: set[str] = set()
+    numeric: set[str] = set()
+    nodata: set[str] = set()
+    for entry in matching:
+        entry_expected = set(entry["expectedTerritoryIds"])
+        entry_numeric = set(entry["numericTerritoryIds"])
+        entry_nodata = set(entry["validNoDataTerritoryIds"])
+        if expected & entry_expected:
+            raise ValueError(f"Forest coverage has overlapping regional entries: {asset_id}/{period}/{level}")
+        expected.update(entry_expected)
+        numeric.update(entry_numeric)
+        nodata.update(entry_nodata)
+    if numeric & nodata or expected != numeric | nodata:
+        raise ValueError(f"Forest coverage is incomplete or ambiguous: {asset_id}/{period}/{level}")
+    return expected, numeric, nodata
+
+
+def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> list[dict]:
     """Summarise actual payload change and reject accidental duplicate snapshots."""
     diagnostics: list[dict] = []
     for (metric, level), series in table.groupby(["metric_id", "territory_level"], sort=True):
         snapshots: list[tuple[str, pd.DataFrame, dict]] = []
+        asset_ids = set(series["methodology_version"].dropna().astype(str)) if "methodology_version" in series else set()
+        if len(asset_ids) != 1:
+            raise ValueError(f"Forest temporal diagnostics lack one source asset: {metric}/{level}")
+        asset_id = asset_ids.pop()
         for (start, end), rows in series.groupby(["period_start", "period_end"], sort=True):
             rows = rows.sort_values("territory_id")
+            period = f"{start[:4]}-{end[:4]}"
+            expected, numeric, nodata = _coverage_state(coverage_entries, asset_id, period, level)
+            row_ids = set(rows["territory_id"].astype(str))
+            if row_ids != numeric:
+                raise ValueError(f"Forest numeric coverage does not match canonical rows: {metric}/{level}/{period}")
             payload = [(str(row.territory_id), float(row.value_decimal)) for row in rows.itertuples()]
             digest = sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
             values = rows["value_decimal"].astype(float)
             diagnostic = {
-                "metricId": metric, "territoryLevel": level, "period": f"{start[:4]}-{end[:4]}",
+                "metricId": metric, "territoryLevel": level, "period": period,
                 "recordCount": len(rows), "minimum": float(values.min()), "maximum": float(values.max()),
                 "mean": float(values.mean()), "quantiles": {"p25": float(values.quantile(.25)), "p50": float(values.quantile(.5)), "p75": float(values.quantile(.75))},
-                "stablePayloadSha256": digest,
+                "stablePayloadSha256": digest, "expectedCount": len(expected), "numericCount": len(numeric), "validNoDataCount": len(nodata),
             }
             diagnostics.append(diagnostic)
-            snapshots.append((f"{start[:4]}-{end[:4]}", rows, diagnostic))
-        for (previous_period, previous, _), (current_period, current, current_diagnostic) in zip(snapshots, snapshots[1:], strict=False):
+            snapshots.append((period, rows, diagnostic))
+        for (previous_period, previous, previous_diagnostic), (current_period, current, current_diagnostic) in zip(snapshots, snapshots[1:], strict=False):
+            _, previous_numeric, previous_nodata = _coverage_state(coverage_entries, asset_id, previous_period, level)
+            _, current_numeric, current_nodata = _coverage_state(coverage_entries, asset_id, current_period, level)
             joined = previous[["territory_id", "value_decimal"]].merge(current[["territory_id", "value_decimal"]], on="territory_id", suffixes=("_previous", "_current"), validate="one_to_one")
-            if len(joined) != len(previous) or len(joined) != len(current):
-                raise ValueError(f"Forest temporal snapshots have different territorial populations: {metric}/{level}/{previous_period}/{current_period}")
             delta = joined["value_decimal_current"].astype(float) - joined["value_decimal_previous"].astype(float)
-            if bool((delta == 0).all()):
+            same_numeric_population = previous_numeric == current_numeric
+            same_nodata_population = previous_nodata == current_nodata
+            if same_numeric_population and same_nodata_population and bool((delta == 0).all()):
                 raise ValueError(f"Forest temporal snapshots are byte-identical territorial payloads: {metric}/{level}/{previous_period}/{current_period}")
             correlation = float(joined["value_decimal_previous"].corr(joined["value_decimal_current"])) if len(joined) > 1 else None
             current_diagnostic["comparisonWithPrevious"] = {
-                "period": previous_period, "percentChanged": float((delta != 0).mean() * 100),
-                "medianAbsoluteDifference": float(delta.abs().median()), "maximumAbsoluteDifference": float(delta.abs().max()), "correlation": correlation,
+                "period": previous_period, "numericInBoth": len(previous_numeric & current_numeric),
+                "becameNoData": len(previous_numeric & current_nodata), "becameNumeric": len(previous_nodata & current_numeric),
+                "noDataInBoth": len(previous_nodata & current_nodata),
+                "percentChangedAmongComparable": float((delta != 0).mean() * 100) if len(delta) else None,
+                "medianAbsoluteDifference": float(delta.abs().median()) if len(delta) else None,
+                "maximumAbsoluteDifference": float(delta.abs().max()) if len(delta) else None, "correlation": correlation,
             }
     return diagnostics
 
 
-def _coverage_report(table: pd.DataFrame, coverage: list[dict]) -> dict:
+def _coverage_report(table: pd.DataFrame, coverage: list[dict], expected_region_codes: set[str]) -> dict:
     """Validate the exact ISTAT population and make valid NoData auditable."""
     entries: list[dict] = []
     for item in coverage:
@@ -942,22 +1039,29 @@ def _coverage_report(table: pd.DataFrame, coverage: list[dict]) -> dict:
         })
     report = {
         "schemaVersion": 1, "coverageMode": forest_coverage_mode(), "territoryReferenceYear": _territory_reference_year(),
-        "entries": entries, "temporalDiagnostics": _temporal_diagnostics(table),
+        "entries": entries, "temporalDiagnostics": _temporal_diagnostics(table, entries),
     }
     if report["coverageMode"] == "national":
-        expected_regions = _expected_region_codes_from_coverage(entries)
-        if expected_regions == set(HRL["development_slice"]["region_istat_codes"]):
-            raise ValueError("Refusing to publish the four-region development slice as national forest coverage")
+        for asset_id, period in sorted({(entry["assetId"], entry["period"]) for entry in entries}):
+            regional_population, _, _ = _coverage_state(entries, asset_id, period, "region")
+            region_codes = {territory_id.rsplit(":", 1)[-1] for territory_id in regional_population}
+            if region_codes != expected_region_codes:
+                raise ValueError(f"Forest national regional coverage differs from ISTAT reference: {asset_id}/{period}")
     return report
 
 
-def _expected_region_codes_from_coverage(entries: list[dict]) -> set[str]:
-    # Region IDs are present in every national metric/period; ISTAT code is the
-    # stable terminal segment in the canonical identifier.
-    for entry in entries:
-        if entry["territoryLevel"] == "region":
-            return {territory_id.rsplit(":", 1)[-1] for territory_id in entry["expectedTerritoryIds"]}
-    raise ValueError("Forest coverage has no regional population")
+def _expected_region_codes_from_coverage(entries: list[dict], asset_id: str | None = None, period: str | None = None) -> set[str]:
+    """Return the complete, non-overlapping regional union for one snapshot."""
+    candidates = [entry for entry in entries if entry["territoryLevel"] == "region" and (asset_id is None or entry["assetId"] == asset_id) and (period is None or entry["period"] == period)]
+    if not candidates:
+        raise ValueError("Forest coverage has no regional population")
+    identities: set[str] = set()
+    for entry in candidates:
+        expected = set(entry["expectedTerritoryIds"])
+        if identities & expected:
+            raise ValueError("Forest coverage has overlapping regional entries")
+        identities.update(expected)
+    return {territory_id.rsplit(":", 1)[-1] for territory_id in identities}
 
 
 def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: str | None = None) -> dict:
@@ -974,8 +1078,12 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
             raise ValueError("Existing raster forest canonical lacks verified coverage")
         coverage = json.loads(coverage_path.read_text())
         expected_regions = _expected_region_codes(canonical_root, _territory_reference_year())
-        if coverage.get("coverageMode") != forest_coverage_mode() or _expected_region_codes_from_coverage(coverage.get("entries", [])) != expected_regions:
+        entries = coverage.get("entries", [])
+        if coverage.get("coverageMode") != forest_coverage_mode() or not isinstance(entries, list):
             raise ValueError("Existing raster forest canonical coverage does not match current policy")
+        for asset_id, period in {(entry.get("assetId"), entry.get("period")) for entry in entries if isinstance(entry, dict)}:
+            if not isinstance(asset_id, str) or not isinstance(period, str) or _expected_region_codes_from_coverage(entries, asset_id, period) != expected_regions:
+                raise ValueError("Existing raster forest canonical coverage does not match current policy")
         return {"changed": False, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict()}
     records: list[dict] = []
     coverage: list[dict] = []
@@ -1032,7 +1140,7 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
     table.to_parquet(destination, index=False, compression="zstd")
     coverage_path = forest_coverage_report_path(destination)
     if process_groups_found:
-        json_dump(coverage_path, _coverage_report(table, coverage))
+        json_dump(coverage_path, _coverage_report(table, coverage, _expected_region_codes(canonical_root, reference_year)))
     retention = os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])
     if retention == "metadata_only":
         # Canonical and sidecar checksum/provenance now exist; only exact raster
