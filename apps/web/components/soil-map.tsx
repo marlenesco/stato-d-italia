@@ -10,6 +10,7 @@ import { territoryIstatCode, territoryLabel } from "../lib/territory-labels";
 import { focusMapForInspector } from "./map-inspector-focus";
 import { hierarchyFromProperties, TerritoryContext, type TerritoryHierarchy } from "./territory-context";
 import { TerritoryMapSeries } from "./territory-map-series";
+import { currentProfileHref } from "../lib/current-profile";
 
 type RankingRow = { territoryId: string; name: string; istatCode: string; value: number; percentile: number | null; rank: number | null };
 type Ranking = { rows: RankingRow[]; scopeLabel?: string };
@@ -32,12 +33,7 @@ function formatPeriod(periodStart: string, periodEnd: string) {
   return start === end ? start : `${start}–${end}`;
 }
 
-function territoryHref(level: string, istatCode: string) {
-  const route = level === "municipality" ? "comuni" : level === "province" ? "province" : "regioni";
-  return `/territori/${route}/${istatCode}`;
-}
-
-export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, seriesOptions, seriesStatusNote, colorRamp = "soil", comparisonNote, sharedTemporalScale = false, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; seriesOptions?: MapOption[]; seriesStatusNote?: string; colorRamp?: DomainColorName; comparisonNote?: string; sharedTemporalScale?: boolean; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
+export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, seriesOptions, seriesStatusNote, colorRamp = "soil", comparisonNote, sharedTemporalScale = false, currentTerritoryIds, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; seriesOptions?: MapOption[]; seriesStatusNote?: string; colorRamp?: DomainColorName; comparisonNote?: string; sharedTemporalScale?: boolean; currentTerritoryIds?: string[]; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
   const ramp = domainColorRamps[colorRamp];
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
@@ -231,14 +227,15 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const levelLabel = option.level === "municipality" ? "Comune" : option.level === "province" ? "Provincia" : "Regione";
   const selectionLabel = option.level === "municipality" ? "Comune selezionato" : option.level === "province" ? "Provincia selezionata" : "Regione selezionata";
   const selectedIstatCode = selectedRow?.istatCode ?? (selectedId ? territoryIstatCode(selectedId) : undefined);
-  const profileHref = selectedIstatCode ? territoryHref(option.level, selectedIstatCode) : undefined;
+  const profileHref = currentProfileHref(option.level, selectedId ?? undefined, selectedIstatCode, currentTerritoryIds);
+  const currentProfileUnavailable = Boolean(selectedId && currentTerritoryIds && !currentTerritoryIds.includes(selectedId));
 
   return <>
     <section className={`map-stage map-stage--${colorRamp}`} style={{ "--map-ramp-low": ramp.low, "--map-ramp-mid": ramp.mid, "--map-ramp-high": ramp.high, "--map-ramp-outline": ramp.outline } as CSSProperties} aria-labelledby="map-title">
       <header className="map-heading"><div><p className="eyebrow">Mappa tematica</p><h2 id="map-title">{metricLabel}</h2><p>{dataset ? `${formatPeriod(dataset.periodStart, dataset.periodEnd)} · ${dataset.unit}` : option.periodKey}</p></div><p className="map-status" aria-live="polite">{valuesLoading ? "Carico valori…" : mapError ? "Valori non disponibili" : selectedLabel ? selectedValue === undefined ? `${selectionLabel}: dato non pubblicato` : `${selectionLabel}: ${selectedLabel}` : "Seleziona un territorio"}</p></header>
       <div className="map-wrap"><div ref={container} className="map" role="img" aria-label="Mappa tematica interattiva. La tabella di confronto è disponibile sotto." />
         {min !== null && middle !== null && max !== null && <aside className="map-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore pubblicato</strong><div className="legend-scale" aria-hidden="true" /><div className="legend-values"><span>{formatNumber(min, dataset?.unit)}</span><span>{formatNumber(middle, dataset?.unit)}</span><span>{formatNumber(max, dataset?.unit)}</span></div><p>{mapValues.length} territori con valore pubblicato. Il bianco indica un valore non disponibile; il colore non è un giudizio sul territorio.</p></aside>}
-        {selectedId && <aside ref={inspector} className="territory-inspector map-selection-drawer" aria-live="polite"><p className="eyebrow">{selectionLabel}</p>{selectedRow ? <><h3>{territoryLabel(selectedRow.territoryId, selectedRow.name)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedRow.territoryId, selectedRow.istatCode)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p></> : <><h3>{territoryLabel(selectedId, selectedName)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedId)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p>{selectedValue === undefined ? "Dato non pubblicato per periodo e metrica selezionati." : formatNumber(selectedValue, dataset?.unit)}</p></>}{profileHref && <Link href={profileHref}>Apri profilo {levelLabel.toLocaleLowerCase("it")}</Link>}<TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selectedId} territoryName={selectedRow?.name ?? selectedName} selectedPeriod={option.periodKey} statusNote={seriesStatusNote} /></aside>}
+        {selectedId && <aside ref={inspector} className="territory-inspector map-selection-drawer" aria-live="polite"><p className="eyebrow">{selectionLabel}</p>{selectedRow ? <><h3>{territoryLabel(selectedRow.territoryId, selectedRow.name)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedRow.territoryId, selectedRow.istatCode)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p></> : <><h3>{territoryLabel(selectedId, selectedName)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedId)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p>{selectedValue === undefined ? "Dato non pubblicato per periodo e metrica selezionati." : formatNumber(selectedValue, dataset?.unit)}</p></>}{profileHref ? <Link href={profileHref}>Apri profilo {levelLabel.toLocaleLowerCase("it")}</Link> : currentProfileUnavailable && <p className="muted">Profilo corrente non disponibile per questa versione territoriale.</p>}<TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selectedId} territoryName={selectedRow?.name ?? selectedName} selectedPeriod={option.periodKey} statusNote={seriesStatusNote} /></aside>}
       </div>
       {mapError && <p className="map-message" role="alert">{mapError}</p>}
     </section>

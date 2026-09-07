@@ -12,7 +12,7 @@ from shapely.geometry import Polygon
 from stato_italia.cli import load_local_env
 import stato_italia.forests as forests
 from stato_italia.forests_delivery import generate_forests_delivery
-from stato_italia.forests import CORINE, HRL, _asset_periods, _catalog_snapshot, _check_catalog, _coverage_report, _expected_region_codes_from_coverage, _persist_catalog, _process_payload, _process_request_contract, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _require_numeric_tree_cover_change_coverage, _stats_payload, _valid_source_values, _write_statistical_checkpoint, forest_coverage_mode, territory_reference_year_for_period
+from stato_italia.forests import CORINE, HRL, INFC, _asset_periods, _catalog_snapshot, _check_catalog, _coverage_report, _expected_region_codes_from_coverage, _persist_catalog, _process_payload, _process_request_contract, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _require_numeric_tree_cover_change_coverage, _stats_payload, _valid_source_values, _write_statistical_checkpoint, forest_coverage_mode, territory_reference_year_for_period
 from stato_italia.territories import territory_reference_date
 
 
@@ -27,6 +27,20 @@ def test_change_raster_requires_two_reference_years() -> None:
     assert _reference_years_for_asset(asset, Path("tree-cover-change-2018-2021.tif")) == (2018, 2021)
     with pytest.raises(ValueError, match="start and end year"):
         _reference_years_for_asset(asset, Path("tree-cover-change-2021.tif"))
+
+
+def test_derived_metric_identity_includes_territory_geometry_version() -> None:
+    asset = next(item for item in HRL["assets"] if item["kind"] == "tree_cover_density") | {"source_id": HRL["source_id"]}
+    common = {"territory_id": "it:province:215", "level": "province"}
+    historical = common | {"territory_version_id": "it:province:215@2018-01-01"}
+    current = common | {"territory_version_id": "it:province:215@2021-12-31"}
+
+    first = forests._record(asset, "slice.tif", "a" * 64, historical, "tree_cover_mean", 20.0, 2021, 2021)
+    repeated = forests._record(asset, "slice.tif", "a" * 64, historical, "tree_cover_mean", 20.0, 2021, 2021)
+    changed_geometry = forests._record(asset, "slice.tif", "a" * 64, current, "tree_cover_mean", 20.0, 2021, 2021)
+
+    assert first["derived_metric_id"] == repeated["derived_metric_id"]
+    assert first["derived_metric_id"] != changed_geometry["derived_metric_id"]
 
 
 def test_statistical_payload_uses_cdse_byoc_and_equal_area_crs() -> None:
@@ -125,6 +139,32 @@ def test_statistical_jobs_use_the_historical_istat_population_for_each_snapshot(
         ("hrl_forest_type", 2021, 2021, "it:region:01@2021-12-31"),
         ("hrl_tree_cover_presence_change", 2018, 2021, "it:region:01@2021-12-31"),
     }
+
+
+def test_declared_process_slices_use_the_geometry_population_for_each_asset_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    seen_years: list[int] = []
+    monkeypatch.setenv(HRL["processing_mode_environment"], "raster")
+    monkeypatch.setattr(forests, "_expected_region_codes", lambda _canonical, year: seen_years.append(year) or {"01"})
+    for asset in (item for item in HRL["assets"] if item.get("statistical_api_enabled", True)):
+        for start, end in _asset_periods(asset):
+            manifest = forests._process_slice_path(root, asset, start, end, "01", 0, 0).parent / "slice-manifest.json"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(json.dumps({"source_id": HRL["source_id"], "asset_id": asset["id"], "period": [start, end], "region_istat_code": "01", "entries": []}))
+    for asset in INFC["assets"]:
+        raw = root / "raw" / INFC["source_id"] / f"{asset['id']}.zip"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes(b"infc")
+        raw.with_suffix(raw.suffix + ".metadata.json").write_text("{}")
+    catalog = root / "raw" / HRL["source_id"] / "catalog.json"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text("{}")
+
+    forests.declared_forest_raw_paths(root)
+
+    assert seen_years == [2018, 2021, 2023, 2018, 2021, 2021]
 
 
 def test_forest_slice_preserves_a_closed_canonical_municipality_population(

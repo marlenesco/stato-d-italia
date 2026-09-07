@@ -47,7 +47,7 @@ jobs:
       - name: Restore reusable geospatial canonical cache
         uses: actions/cache@v6.1.0
         with:
-          path: data/canonical/forests/algorithm_version=forests-zonal-statistics-v2
+          path: data/canonical/forests/algorithm_version=forests-zonal-statistics-v3
           key: forests-canonical-${{ runner.os }}-${{ github.run_id }}
           restore-keys: forests-canonical-${{ runner.os }}-
       - id: preflight

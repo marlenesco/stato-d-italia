@@ -278,18 +278,18 @@ quando richiesto dagli input semantici, `territory-insights`; il 2024 rigenera
 Dissesto e il 2019 rigenera Emissioni. Un altro anno storico senza dipendenza
 dichiarata non invalida output estranei.
 
-Le territory canonical ISTAT 2015 e 2023 sono invece input cross-scope del
-dominio Foreste: il 2015 alimenta la geometria regionale INFC; il 2023 alimenta
-geometrie, griglia/slice Process API, statistiche zonali Copernicus, delivery
-Foreste e `territory-insights`. Se il preflight data rileva un cambiamento in
-uno di questi due anni, il run scoped si interrompe prima di hydration e publish
+Le territory canonical ISTAT 2015, 2018, 2021 e 2023 sono invece input
+cross-scope del dominio Foreste: il 2015 alimenta la geometria regionale INFC;
+il Copernicus zonale usa 2018 per TCD/FTY 2018, 2021 per TCD/FTY 2021 e TCPC
+2018–2021, e 2023 per TCD 2023. Se il preflight data rileva un cambiamento in
+uno di questi anni, il run scoped si interrompe prima di hydration e publish
 con richiesta esplicita di un rebuild coordinato `scope=all`. Non avvia quel
 rebuild automaticamente e non pubblica prima i nuovi confini lasciando Foreste
 stale. La stessa guardia è ripetuta al confine di pubblicazione usando il delta
 del source state, quindi non dipende soltanto dal control flow del runner.
-Nel rebuild `scope=all`, un cambiamento 2023 forza il ricalcolo zonale sulle
-nuove territory canonical; le slice raster CDSE possono essere riusate soltanto
-se la griglia di richiesta resta identica.
+Nel rebuild `scope=all`, un cambiamento 2018, 2021 o 2023 forza il ricalcolo
+zonale sulle nuove territory canonical; le slice raster CDSE possono essere
+riusate soltanto se la griglia di richiesta resta identica.
 
 Nel dominio geospatial, un cambiamento INFC rigenera la geometria regionale 2015;
 un cambiamento Copernicus rigenera le geometrie 2023. Un aggiornamento di un anno
@@ -317,6 +317,24 @@ input necessari al carry-forward, avviare manualmente `ingest-geospatial.yml`
 con `bootstrap_all=true`. Questo esegue una ricostruzione `scope=all` senza
 carry-forward; completato il bootstrap, lasciare `bootstrap_all=false` per tutte
 le esecuzioni ordinarie scoped.
+
+## Rollout coordinato D1 Foreste
+
+Il primo rilascio production dopo il merge D1 non deve essere un run Forest
+incrementale. Da `main`, avviare `ingest-geospatial.yml` manualmente con
+`bootstrap_all=true`. La sequenza obbligatoria è:
+
+1. merge di D1 in `main`;
+2. rebuild coordinato `scope=all`;
+3. rebuild canonical ISTAT 2021 contract v3;
+4. rebuild canonical zonale Foreste v3;
+5. rebuild PMTiles storiche 2018/2021/2023;
+6. rebuild delivery Foreste e `territory-insights`;
+7. assemblaggio di un solo release descriptor completo;
+8. validazione di coerenza e provenance;
+9. aggiornamento di `manifest.json` soltanto dopo tutte le validazioni.
+
+Non esistono manifest o release Forest separati.
 
 Una modifica di provenance significativa può comunque produrre una metadata-only
 release secondo ADR 0005.

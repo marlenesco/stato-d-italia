@@ -21,7 +21,7 @@ from .delivery import generate_soil_delivery
 from .emissions import fetch_emissions, ingest_emissions
 from .emissions_delivery import generate_emissions_delivery
 from .emissions_national import fetch_national_emissions, ingest_national_emissions
-from .forests import ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
+from .forests import FOREST_ZONAL_TERRITORY_YEARS, ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
 from .forests_delivery import generate_forests_delivery
 from .ingestion_plan import (
     PLAN_SCHEMA_VERSION,
@@ -1321,7 +1321,7 @@ def _run_combined_scope_forests(
         for path in (root / "raw" / source).glob("**/*.tif")
     )
     catalog_changed = _catalog_changed_from_active(previous_source_state, forest_fetch)
-    force_zonal = args.force or 2023 in (changed_boundary_years or set())
+    force_zonal = args.force or bool(FOREST_ZONAL_TERRITORY_YEARS & set(changed_boundary_years or ()))
     if mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
         forests["zonal"] = ingest_forests(root, canonical, force=force_zonal or catalog_changed, mode=mode)
     elif zonal_raw:

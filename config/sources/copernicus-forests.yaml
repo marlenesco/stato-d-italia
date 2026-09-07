@@ -16,10 +16,8 @@ processing_modes: [statistical-api, raster]
 coverage_mode_environment: FOREST_COVERAGE_MODE
 coverage_modes: [national, development_slice]
 coverage_default: national
-# Production snapshots resolve their own ISTAT reference year from the asset
-# period. This remains only as an explicit development-slice fallback.
-territory_reference_year: 2023
 development_slice:
+  # Development-only fallback; production resolves geometry per asset/period.
   territory_reference_year: 2023
   region_istat_codes: ['03', '09', '12', '19']
 raw_retention_environment: FORESTS_RAW_RETENTION
