@@ -6,6 +6,7 @@ import type { DissestoData } from "../lib/data";
 import { ExplorerToolbar } from "./explorer-toolbar";
 import { SoilMap } from "./soil-map";
 import { resolveExplorerModel, retainTerritoryForLevel, type MappableLevel } from "../lib/explorer-model";
+import { shouldRenderMap } from "../lib/explorer-rendering";
 
 const labels: Record<string, string> = {
   hydrogeological_flood_high_hazard_area_km2: "Superficie a pericolosità idraulica elevata",
@@ -73,7 +74,7 @@ export function DissestoWorkspace({ data }: { data: DissestoData }) {
       <header className="workspace-header"><div><p className="eyebrow">ISPRA · piattaforma nazionale IdroGEO</p><h1>Dissesto</h1></div><p>Pericolosità da frana e alluvione alla scala dichiarata dalla fonte. Persone e superfici restano indicatori separati.</p><dl><div><dt>Copertura</dt><dd>Comuni · Province · Regioni</dd></div><div><dt>Snapshot</dt><dd>2020 · 2024</dd></div><div><dt>Ranking</dt><dd>Non applicato</dd></div></dl></header>
       <ExplorerToolbar label="Indicatore" value={metric ?? ""} onChange={changeMetric} items={metrics.map((id) => ({ id, label: labels[id] ?? id, meta: units[id] ?? "" }))} levels={levels.map((item) => ({ id: item, label: levelLabel(item) }))} level={level ?? ""} onLevelChange={(id) => { const next = modelFor({ level: id, period: null }); setTerritory(undefined); update({ level: next.level, period: next.periodKey, territory: undefined }); }} context={`${metric?.includes("flood") ? "Alluvioni · 2020" : "Frane · 2024"} · snapshot ufficiale`} />
       <section id="mappa" className="domain-workspace map-workspace-v2" tabIndex={-1} aria-label="Mappa del dissesto">
-        {selected ? <SoilMap option={selected} metricLabel={labels[selected.metricId] ?? selected.metricId} geometryUrl={model.geometryUrl} features={model.features} selectedTerritoryId={territory?.id} colorRamp="dissesto" onTerritorySelect={selectTerritory} /> : <p role="alert">Combinazione metrica/livello non disponibile nella release attiva.</p>}
+        {selected && shouldRenderMap(model.features.map) ? <SoilMap option={selected} metricLabel={labels[selected.metricId] ?? selected.metricId} geometryUrl={model.geometryUrl} features={model.features} selectedTerritoryId={territory?.id} currentTerritoryIds={data.currentTerritoryIds?.[selected.level]} colorRamp="dissesto" onTerritorySelect={selectTerritory} /> : <p role={model.features.map.status === "not_supported" ? "status" : "alert"}>{model.features.map.status === "not_supported" ? "Mappa non supportata per questo dominio." : "Mappa non disponibile nella release attiva."}</p>}
         <div className="map-reading-panel"><p>Il valore `-1` della fonte significa non disponibile: non diventa zero e non entra nella scala.</p></div>
         <details className="provenance"><summary>Fonte, metodo, limiti</summary><p>Valori ufficiali ISPRA IdroGEO. La scala colori mostra il valore, non un giudizio sul territorio.</p><pre>{JSON.stringify(data.provenance, null, 2)}</pre></details>
       </section>
