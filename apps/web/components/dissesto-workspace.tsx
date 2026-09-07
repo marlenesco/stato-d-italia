@@ -35,6 +35,7 @@ export function DissestoWorkspace({ data }: { data: DissestoData }) {
   const requestedPeriod = searchParams.get("period");
   const modelFor = (requested: { metric?: string | null; level?: string | null; period?: string | null } = {}) => resolveExplorerModel({
     domain: "risk", maps: data.maps, geometry: data.geometry, mapGeometry: data.mapGeometry, rankings: data.rankings,
+    currentTerritoryIds: data.currentTerritoryIds,
     requestedMetric: requested.metric ?? requestedMetric, requestedLevel: requested.level ?? requestedLevel, requestedPeriod: requested.period ?? requestedPeriod,
     preferences: { preferredLevel: "municipality" },
   });

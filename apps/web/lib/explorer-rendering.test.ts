@@ -14,11 +14,16 @@ function model(input: Partial<ExplorerModelInput>) {
 
 describe("explorer rendering guards", () => {
   it("keeps every temporal, ranking, series, and comparison affordance out of a Risk snapshot", () => {
-    const risk = model({ domain: "risk", maps: [map("hydrogeological_flood_high_hazard_area_km2", "2020-2020", "municipality")] });
+    const risk = model({
+      domain: "risk",
+      maps: [map("hydrogeological_flood_high_hazard_area_km2", "2020-2020", "municipality")],
+      currentTerritoryIds: { municipality: ["it:municipality:058091"] },
+    });
     expect(shouldRenderTimeline(risk.features.timeline)).toBe(false);
     expect(shouldRenderTerritorySeries(risk.features.territorySeries)).toBe(false);
     expect(shouldRenderRanking(risk.features.ranking)).toBe(false);
     expect(risk.features.comparison.status).toBe("not_supported");
+    expect(risk.features.profile.status).toBe("available");
   });
 
   it("renders a Forest TCPC map but not a one-item timeline or territory series", () => {
