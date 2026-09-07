@@ -10,7 +10,7 @@ import pandas as pd
 from .common import sha256_file
 
 
-DELIVERY_ALGORITHM_VERSION = "territory-identity-delivery-v1"
+DELIVERY_ALGORITHM_VERSION = "territory-identity-delivery-v2"
 _LEVELS = ("municipality", "province", "region")
 
 
@@ -96,6 +96,10 @@ def generate_territory_delivery(
         "schemaVersion": 1, "releaseId": release_id, "kind": "territory_identity_index",
         "algorithmVersion": DELIVERY_ALGORITHM_VERSION, "referenceDate": "2025-01-01",
         "canonicalSignature": signature, "shards": paths,
+        "currentIdentityIds": {
+            level: sorted(identity["territoryId"] for identity in records)
+            for level, records in identities.items()
+        },
     })
     files = sorted(root.rglob("*.json"))
     return {"changed": True, "files": files, "bytes": sum(path.stat().st_size for path in files), "territories": sum(len(items) for items in identities.values())}

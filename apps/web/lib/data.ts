@@ -53,7 +53,7 @@ type Ranking = {
 
 type SoilIndex = { maps: string[]; rankings: string[]; geometry: string[]; mapGeometry?: Record<string, string>; provenance: string; profileShards: string[] };
 
-export type SoilData = { releaseId: string; provenance: Record<string, unknown>; maps: MapOption[]; rankings: Record<string, string>; geometry: Record<string, string>; mapGeometry?: Record<string, string> };
+export type SoilData = { releaseId: string; provenance: Record<string, unknown>; maps: MapOption[]; rankings: Record<string, string>; geometry: Record<string, string>; mapGeometry?: Record<string, string>; currentTerritoryIds?: Partial<Record<TerritoryLevel, string[]>> };
 
 export type WaterObservation = { metricId: string; periodEnd: string; value: number; unit: string };
 export type WaterProfile = {
@@ -287,6 +287,9 @@ export async function loadDissestoData(): Promise<DissestoData> {
 export async function loadForestData(): Promise<ForestData> {
   const { base, release, index } = await forestsRelease();
   const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
+  const territoryIndex = release.objects.some((item) => item.logicalPath === "delivery/territories/index.json")
+    ? await fetchJson<TerritoryIdentityIndex>(asset(base, release, "delivery/territories/index.json"), 300)
+    : null;
   return {
     releaseId: release.releaseId,
     provenance,
@@ -294,6 +297,7 @@ export async function loadForestData(): Promise<ForestData> {
     rankings: Object.fromEntries(index.rankings.map((path) => [path, asset(base, release, path)])),
     geometry: geometryUrls(base, release, index.geometry),
     mapGeometry: Object.fromEntries(Object.entries(index.mapGeometry ?? {}).map(([mapPath, geometryPath]) => [mapPath, `${asset(base, release, geometryPath)}?release=${release.releaseId}`])),
+    currentTerritoryIds: territoryIndex?.currentIdentityIds,
   };
 }
 
@@ -381,7 +385,7 @@ export async function loadHomeDomainSignals(): Promise<HomeDomainSignal[]> {
   return results.map((result, index) => result.status === "fulfilled" ? result.value : fallbacks[index]);
 }
 
-type TerritoryIdentityIndex = { shards: string[] };
+type TerritoryIdentityIndex = { shards: string[]; currentIdentityIds?: Partial<Record<TerritoryLevel, string[]>> };
 type TerritoryIdentityShard = { territories: TerritoryIdentity[] };
 
 async function loadTerritoryIdentity(base: string, release: Release, level: TerritoryLevel, istatCode: string): Promise<TerritoryIdentity> {

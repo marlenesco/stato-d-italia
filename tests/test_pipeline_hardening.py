@@ -40,25 +40,19 @@ def test_workflows_serialize_publish_and_bootstrap_all_is_explicit() -> None:
     assert "--plan reports/geospatial-source-check.json" in geospatial_workflow
     assert "if: steps.preflight.outputs.changed == 'true' || inputs.force" in data_workflow
     assert "if: inputs.bootstrap_all || steps.preflight.outputs.changed == 'true' || inputs.force" in geospatial_workflow
-    assert "data/canonical/forests/algorithm_version=forests-zonal-statistics-v2" in data_workflow
+    assert "data/canonical/forests/algorithm_version=forests-zonal-statistics-v3" in data_workflow
     assert "data/raw/infc-2015-forests" in geospatial_workflow
+    assert "phase-d1" not in geospatial_workflow
+    assert "validate-national-forests" not in geospatial_workflow
+    assert "forests-cdse-raster-v3" in geospatial_workflow
 
 
-def test_national_forest_candidate_job_has_no_r2_publication_path() -> None:
+def test_geospatial_workflow_has_no_branch_specific_candidate_harness() -> None:
     workflow = (Path(__file__).parents[1] / ".github/workflows/ingest-geospatial.yml").read_text()
 
-    assert "if: github.ref_name != 'phase-d1'" in workflow
-    assert "if: github.ref_name == 'phase-d1'" in workflow
-    assert "--hydrate-from r2 --publish local --validation-only" in workflow
-    assert "production-manifest-before" in workflow
-    assert "production-manifest-after" in workflow
-    assert "actions/cache/restore@v6.1.0" in workflow
-    assert "actions/cache/save@v6.1.0" in workflow
-    assert "forests-national-candidate-v2-" in workflow
-    assert "if: ${{ always() }}" in workflow
-    assert "Fail closed on unverifiable forest catalogue" in workflow
-    assert "Forest national validation cannot continue: CDSE catalogue source is unverifiable." in workflow
-    assert ".catalog.status == \"unverifiable\"" in workflow
+    assert "phase-d1" not in workflow
+    assert "validation-only" not in workflow
+    assert "validate-national-forests" not in workflow
 
 
 def test_forest_domain_registry_is_scoped_to_its_sources_and_shared_downstream() -> None:
@@ -348,8 +342,10 @@ def test_data_scope_uses_carried_forest_input_without_fetch_or_infc_ingest(
     }
 
 
-def test_scope_all_recalculates_zonal_when_2023_boundaries_changed(
+@pytest.mark.parametrize(("boundary_year", "expected_force"), ((2018, True), (2021, True), (2023, True), (2015, False), (2022, False)))
+def test_scope_all_recalculates_zonal_for_exact_historical_boundary_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    boundary_year: int, expected_force: bool,
 ) -> None:
     root = tmp_path / "data"
     canonical = root / "canonical"
@@ -374,10 +370,10 @@ def test_scope_all_recalculates_zonal_when_2023_boundaries_changed(
 
     forests = cli._run_combined_scope_forests(
         Namespace(scope="all", offline=False, force=False), root, canonical,
-        previous_source_state=None, changed_boundary_years={2023},
+        previous_source_state=None, changed_boundary_years={boundary_year},
     )
 
-    assert calls == [(True, "raster")]
+    assert calls == [(expected_force, "raster")]
     assert forests["zonal"]["changed"] is True
 
 

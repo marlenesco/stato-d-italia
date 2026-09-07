@@ -32,7 +32,8 @@ from .territories import validate_territory_hierarchy
 HRL = load_source("copernicus-forests")
 CORINE = load_source("copernicus-corine-forests")
 INFC = load_source("infc-2015-forests")
-ZONAL_ALGORITHM_VERSION = "forests-zonal-statistics-v2"
+ZONAL_ALGORITHM_VERSION = "forests-zonal-statistics-v3"
+FOREST_ZONAL_TERRITORY_YEARS = frozenset({2018, 2021, 2023})
 MAPPABLE_LEVELS = ("municipality", "province", "region")
 CATALOG_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 CATALOG_MAX_ATTEMPTS = 5
@@ -44,10 +45,6 @@ def forest_coverage_mode() -> str:
     if mode not in HRL["coverage_modes"]:
         raise ValueError(f"Unsupported {HRL['coverage_mode_environment']}: {mode}")
     return mode
-
-
-def _territory_reference_year() -> int:
-    return int(HRL["territory_reference_year"])
 
 
 def territory_reference_year_for_period(asset: dict, start_year: int, end_year: int) -> int:
@@ -536,7 +533,8 @@ def declared_forest_raw_paths(root: Path) -> list[Path]:
         if not asset.get("statistical_api_enabled", True):
             continue
         for start_year, end_year in _asset_periods(asset):
-            for region_code in sorted(_expected_region_codes(root / "canonical", _territory_reference_year())):
+            reference_year = territory_reference_year_for_period(asset, start_year, end_year)
+            for region_code in sorted(_expected_region_codes(root / "canonical", reference_year)):
                 manifest = _process_slice_path(root, asset, start_year, end_year, region_code, 0, 0).parent / "slice-manifest.json"
                 if not manifest.is_file():
                     raise FileNotFoundError(f"Declared CDSE Process API slice manifest missing: {manifest}")
@@ -605,7 +603,7 @@ def _pixel_area_ha(dataset: rasterio.io.DatasetReader) -> float:
 def _record(asset: dict, path: Path | str, source_hash: str, territory: dict, metric_id: str, value: float, start_year: int, end_year: int) -> dict:
     units = {"forest_cover_hrl": "ha", "forest_cover_corine": "ha", "forest_area_ha": "ha", "forest_share_pct": "%", "tree_cover_mean": "%", "tree_cover_p25": "%", "tree_cover_p50": "%", "tree_cover_p75": "%", "broadleaved_area_hrl_ha": "ha", "coniferous_area_hrl_ha": "ha", "mixed_forest_area_hrl_ha": "ha", "broadleaved_area_dlt_ha": "ha", "coniferous_area_dlt_ha": "ha", "broadleaved_area_corine_ha": "ha", "coniferous_area_corine_ha": "ha", "mixed_forest_area_corine_ha": "ha", "tree_cover_gain_ha": "ha", "tree_cover_loss_ha": "ha"}
     return {
-        "derived_metric_id": stable_id(ZONAL_ALGORITHM_VERSION, source_hash, territory["territory_id"], metric_id, start_year, end_year),
+        "derived_metric_id": stable_id(ZONAL_ALGORITHM_VERSION, source_hash, territory["territory_version_id"], metric_id, start_year, end_year),
         "dataset_id": asset["source_id"], "source_asset_sha256": source_hash, "source_row_locator": f"{path}:{territory['territory_id']}",
         "metric_id": metric_id, "territory_id": territory["territory_id"], "territory_version_id": territory["territory_version_id"],
         "territory_level": territory["level"], "period_start": date(start_year, 1, 1).isoformat(), "period_end": date(end_year, 12, 31).isoformat(),

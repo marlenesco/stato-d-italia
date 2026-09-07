@@ -20,6 +20,8 @@ def test_territory_identity_delivery_is_domain_independent_and_keeps_hierarchy(t
     result = generate_territory_delivery(canonical, tmp_path / "delivery", "release-test")
     assert result["territories"] == 4
     index = json.loads((tmp_path / "delivery/territories/index.json").read_text())
+    assert index["algorithmVersion"] == "territory-identity-delivery-v2"
+    assert index["currentIdentityIds"]["province"] == ["it:province:057"]
     assert all("soil" not in path for path in index["shards"])
     municipality = json.loads((tmp_path / "delivery/territories/municipality/057.json").read_text())["territories"][0]
     assert municipality["territoryId"] == "it:municipality:057001"
