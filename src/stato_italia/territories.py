@@ -17,7 +17,7 @@ from .common import normalize_name
 from .download import download
 
 SOURCE_YEARS = (2006, 2012, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025)
-TERRITORY_CANONICAL_CONTRACT_VERSION = 2
+TERRITORY_CANONICAL_CONTRACT_VERSION = 3
 _SPECIAL_REFERENCE_DATES = {2021: "2021-12-31"}
 _OFFICIAL_MUNICIPALITY_COUNTS = {2021: 7904}
 
@@ -46,15 +46,48 @@ def _shape_file(root: Path, prefix: str | tuple[str, ...]) -> Path:
     return matches[0]
 
 
-def _candidate_codes(row: dict, names: tuple[str, ...], width: int) -> tuple[str, ...]:
-    codes = {
-        str(value).zfill(width)
-        for name in names
-        if (value := row.get(name)) not in (None, "", "-")
-    }
-    if not codes:
-        raise KeyError(f"None of expected fields exists: {names}")
-    return tuple(sorted(codes))
+_ADMINISTRATIVE_CODE_FIELDS = {
+    "cod_uts": "COD_UTS",
+    "cod_prov": "COD_PROV",
+    "cod_cm": "COD_CM",
+    "cod_pcm": "COD_PCM",
+}
+
+
+def _optional_code(row: dict, field: str, width: int = 3) -> str | None:
+    value = row.get(field)
+    return None if value in (None, "", "-") else str(value).zfill(width)
+
+
+def _source_administrative_codes(row: dict) -> dict[str, str | None]:
+    """Keep each official source field distinct; they are not interchangeable."""
+    return {name: _optional_code(row, field) for name, field in _ADMINISTRATIVE_CODE_FIELDS.items()}
+
+
+def _legacy_province_uts_code(feature: dict) -> str:
+    """Pre-2021 priority, retained from the historical source schema contract."""
+    for field in ("cod_prov", "cod_uts", "cod_pcm"):
+        if code := feature["source_codes"].get(field):
+            return code
+    raise ValueError(f"ISTAT source lacks a legacy Province/UTS code: {feature['name']}")
+
+
+def resolve_province_uts_code(feature: dict, year: int) -> str:
+    """Resolve a canonical Province/UTS identity from its year-specific schema."""
+    if year == 2021:
+        if code := feature["source_codes"].get("cod_uts"):
+            return code
+        raise ValueError(f"ISTAT 2021 Province/UTS lacks COD_UTS: {feature['name']}")
+    return _legacy_province_uts_code(feature)
+
+
+def resolve_municipality_parent_code(feature: dict, year: int) -> str:
+    """Resolve a municipality parent without conflating legacy and UTS fields."""
+    if year == 2021:
+        if code := feature["source_codes"].get("cod_uts"):
+            return code
+        raise ValueError(f"ISTAT 2021 municipality lacks COD_UTS: {feature['name']}")
+    return _legacy_province_uts_code(feature)
 
 
 def _first_present(row: dict, *names: str) -> str:
@@ -77,25 +110,25 @@ def _source_features(shp: Path, level: str) -> list[dict]:
         if level == "municipality":
             code = str(row["PRO_COM_T"]).zfill(6)
             name = str(row["COMUNE"])
-            parent_candidates = _candidate_codes(row, ("COD_UTS", "COD_PROV", "COD_PCM", "COD_CM"), 3)
             source_identity: str | tuple[str, ...] = code
         elif level == "province":
             code = None
             name = _first_present(row, "DEN_UTS", "DEN_PCM", "DEN_PROV", "DEN_CM")
-            parent_candidates = _candidate_codes(row, ("COD_UTS", "COD_PROV", "COD_PCM", "COD_CM"), 3)
-            source_identity = parent_candidates
+            source_identity = tuple(
+                f"{name}={value}" for name, value in _source_administrative_codes(row).items()
+            )
         else:
             code = str(row["COD_REG"]).zfill(2)
             name = str(row["DEN_REG"])
-            parent_candidates = ()
             source_identity = code
+        source_codes = _source_administrative_codes(row) if level != "region" else {}
         output.append({
             "level": level,
             "source_identity": source_identity,
             "istat_code": code,
             "name": name,
             "name_normalized": normalize_name(name),
-            "parent_candidates": parent_candidates,
+            "source_codes": source_codes,
             "region_code": str(row["COD_REG"]).zfill(2),
             "geometry": transform(reproject, shape(item.shape.__geo_interface__)).__geo_interface__ if reproject else item.shape.__geo_interface__,
         })
@@ -110,7 +143,7 @@ def _dissolve_source_features(features: list[dict]) -> list[dict]:
     for source_identity, pieces in grouped.items():
         first = pieces[0].copy()
         for piece in pieces[1:]:
-            for key in ("level", "istat_code", "name", "name_normalized", "parent_candidates", "region_code"):
+            for key in ("level", "istat_code", "name", "name_normalized", "source_codes", "region_code"):
                 if piece[key] != first[key]:
                     raise ValueError(f"Inconsistent ISTAT source attributes while dissolving {first['level']} {source_identity}")
         first["source_feature_count"] = len(pieces)
@@ -132,6 +165,7 @@ def _canonical_feature(feature: dict, level: str, code: str, reference_date: str
         "parent_istat_code": parent_code,
         "reference_date": reference_date,
         "source_feature_count": feature["source_feature_count"],
+        **{f"source_{field}": feature.get("source_codes", {}).get(field) for field in _ADMINISTRATIVE_CODE_FIELDS},
         "geometry": feature["geometry"],
     }
 
@@ -159,7 +193,7 @@ def validate_territory_hierarchy(frames: dict[str, pd.DataFrame]) -> dict[str, i
 
 
 def normalize_boundary_features(source_features: dict[str, list[dict]], reference_date: str) -> dict[str, list[dict]]:
-    """Resolve ISTAT source codes against the actual parent population, not field order."""
+    """Resolve source identities using the field semantics documented for each year."""
     expected = {"region", "province", "municipality"}
     if set(source_features) != expected:
         raise ValueError(f"ISTAT source lacks expected levels: {sorted(source_features)}")
@@ -169,26 +203,22 @@ def normalize_boundary_features(source_features: dict[str, list[dict]], referenc
     region_codes = {str(item["istat_code"]) for item in regions}
     if len(region_codes) != len(regions):
         raise ValueError("ISTAT source has duplicate region codes")
-    municipality_parent_candidates = {
-        code for item in municipalities for code in item["parent_candidates"]
-    }
+    year = int(reference_date[:4])
     normalized_provinces: list[dict] = []
     for item in provinces:
-        candidates = set(item["parent_candidates"]) & municipality_parent_candidates
-        if len(candidates) != 1:
-            raise ValueError(f"ISTAT province code is missing or ambiguous against municipality parents: {item['name']} {sorted(candidates)}")
+        code = resolve_province_uts_code(item, year)
         if item["region_code"] not in region_codes:
             raise ValueError(f"ISTAT province has an unknown region parent: {item['name']} {item['region_code']}")
-        normalized_provinces.append(_canonical_feature(item, "province", next(iter(candidates)), reference_date, item["region_code"]))
+        normalized_provinces.append(_canonical_feature(item, "province", code, reference_date, item["region_code"]))
     province_codes = {item["istat_code"] for item in normalized_provinces}
     if len(province_codes) != len(normalized_provinces):
         raise ValueError("ISTAT source resolves multiple province features to one canonical code")
     normalized_municipalities: list[dict] = []
     for item in municipalities:
-        candidates = set(item["parent_candidates"]) & province_codes
-        if len(candidates) != 1:
-            raise ValueError(f"ISTAT municipality parent is missing or ambiguous: {item['name']} {sorted(candidates)}")
-        normalized_municipalities.append(_canonical_feature(item, "municipality", str(item["istat_code"]), reference_date, next(iter(candidates))))
+        parent_code = resolve_municipality_parent_code(item, year)
+        if parent_code not in province_codes:
+            raise ValueError(f"ISTAT municipality parent does not exist in canonical Province/UTS population: {item['name']} {parent_code}")
+        normalized_municipalities.append(_canonical_feature(item, "municipality", str(item["istat_code"]), reference_date, parent_code))
     normalized_regions = [_canonical_feature(item, "region", str(item["istat_code"]), reference_date, None) for item in regions]
     result = {"region": normalized_regions, "province": normalized_provinces, "municipality": normalized_municipalities}
     frames = {level: pd.DataFrame(records) for level, records in result.items()}

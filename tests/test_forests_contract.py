@@ -133,7 +133,7 @@ def test_forest_slice_preserves_a_closed_canonical_municipality_population(
     monkeypatch.delenv(HRL["coverage_mode_environment"], raising=False)
     root = tmp_path / "canonical" / "territories" / "reference_year=2021"
     root.mkdir(parents=True)
-    common = {"reference_date": "2021-12-31", "canonical_contract_version": 2}
+    common = {"reference_date": "2021-12-31", "canonical_contract_version": 3}
     pd.DataFrame([{
         **common, "territory_id": "it:region:01", "territory_version_id": "it:region:01@2021-12-31",
         "level": "region", "istat_code": "01", "name": "Piemonte", "parent_istat_code": None,
@@ -159,7 +159,7 @@ def test_forest_slice_fails_instead_of_dropping_orphan_municipalities(
     monkeypatch.delenv(HRL["coverage_mode_environment"], raising=False)
     root = tmp_path / "canonical" / "territories" / "reference_year=2021"
     root.mkdir(parents=True)
-    common = {"reference_date": "2021-12-31", "canonical_contract_version": 2}
+    common = {"reference_date": "2021-12-31", "canonical_contract_version": 3}
     pd.DataFrame([{
         **common, "territory_id": "it:region:01", "territory_version_id": "it:region:01@2021-12-31",
         "level": "region", "istat_code": "01", "name": "Piemonte", "parent_istat_code": None,
