@@ -318,6 +318,7 @@ export async function loadEmissionsData(): Promise<EmissionsData> {
 export async function loadWaterData(): Promise<WaterData> {
   const { base, release, index } = await waterRelease();
   const provenance = await fetchJson<Record<string, unknown>>(asset(base, release, index.provenance), 300);
+  const currentTerritoryIds = await loadCurrentTerritoryPopulation(base, release);
   return {
     releaseId: release.releaseId,
     provenance,
@@ -326,6 +327,7 @@ export async function loadWaterData(): Promise<WaterData> {
     geometry: geometryUrls(base, release, index.geometry),
     mapGeometry: Object.fromEntries(Object.entries(index.mapGeometry ?? {}).map(([mapPath, geometryPath]) => [mapPath, `${asset(base, release, geometryPath)}?release=${release.releaseId}`])),
     profileUrls: Object.fromEntries((index.profiles ?? []).map((path) => [path.replace("delivery/water/profiles/", "").replace(".json", ""), asset(base, release, path)])),
+    currentTerritoryIds,
   };
 }
 
