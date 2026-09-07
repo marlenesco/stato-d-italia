@@ -292,8 +292,9 @@ zonale sulle nuove territory canonical; le slice raster CDSE possono essere
 riusate soltanto se la griglia di richiesta resta identica.
 
 Nel dominio geospatial, un cambiamento INFC rigenera la geometria regionale 2015;
-un cambiamento Copernicus rigenera le geometrie 2023. Un aggiornamento di un anno
-diverso non invalida la geometria storica 2015. Gli indici delivery referenziano
+Copernicus usa geometrie storiche dipendenti dal periodo: 2018, 2021 e 2023
+secondo il contratto dell'asset. Un aggiornamento di un anno diverso non invalida
+la geometria storica 2015. Gli indici delivery referenziano
 soltanto geometrie presenti nella release e le mappe dichiarano il reference year
 compatibile. Le signature delle canonical Foreste e degli input semantici di
 `territory-insights` sono ricontrollate prima del publish.
