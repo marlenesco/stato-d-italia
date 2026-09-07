@@ -33,8 +33,10 @@ delle entry regionali deve essere esattamente la popolazione ISTAT attesa e le
 popolazioni numerica e `validNoData` devono essere disgiunte. Le diagnostiche
 temporali confrontano solo territori numerici in entrambi gli snapshot e
 registrano separatamente le quattro transizioni numeric/NoData; il guardrail
-contro snapshot duplicati resta attivo solo quando anche la popolazione NoData
-è identica.
+contro snapshot duplicati opera sul payload completo dell'asset e resta attivo
+solo quando metric set, popolazioni numerica/NoData e tutti i valori sono
+identici. L'identità della source signature continua a essere verificata
+separatamente.
 
 ## Conseguenze
 

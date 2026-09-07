@@ -975,9 +975,10 @@ def _coverage_state(entries: list[dict], asset_id: str, period: str, level: str)
     return expected, numeric, nodata
 
 
-def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> list[dict]:
-    """Summarise actual payload change and reject accidental duplicate snapshots."""
+def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Report metric changes and reject only complete duplicate asset snapshots."""
     diagnostics: list[dict] = []
+    metric_diagnostics: dict[tuple[str, str, str], dict] = {}
     for (metric, level), series in table.groupby(["metric_id", "territory_level"], sort=True):
         snapshots: list[tuple[str, pd.DataFrame, dict]] = []
         asset_ids = set(series["methodology_version"].dropna().astype(str)) if "methodology_version" in series else set()
@@ -1001,6 +1002,7 @@ def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> 
                 "stablePayloadSha256": digest, "expectedCount": len(expected), "numericCount": len(numeric), "validNoDataCount": len(nodata),
             }
             diagnostics.append(diagnostic)
+            metric_diagnostics[(metric, level, period)] = diagnostic
             snapshots.append((period, rows, diagnostic))
         for (previous_period, previous, previous_diagnostic), (current_period, current, current_diagnostic) in zip(snapshots, snapshots[1:], strict=False):
             _, previous_numeric, previous_nodata = _coverage_state(coverage_entries, asset_id, previous_period, level)
@@ -1009,9 +1011,9 @@ def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> 
             delta = joined["value_decimal_current"].astype(float) - joined["value_decimal_previous"].astype(float)
             same_numeric_population = previous_numeric == current_numeric
             same_nodata_population = previous_nodata == current_nodata
-            if same_numeric_population and same_nodata_population and bool((delta == 0).all()):
-                raise ValueError(f"Forest temporal snapshots are byte-identical territorial payloads: {metric}/{level}/{previous_period}/{current_period}")
             correlation = float(joined["value_decimal_previous"].corr(joined["value_decimal_current"])) if len(joined) > 1 else None
+            metric_identical = same_numeric_population and same_nodata_population and bool((delta == 0).all())
+            current_diagnostic["identicalToPrevious"] = metric_identical
             current_diagnostic["comparisonWithPrevious"] = {
                 "period": previous_period, "numericInBoth": len(previous_numeric & current_numeric),
                 "becameNoData": len(previous_numeric & current_nodata), "becameNumeric": len(previous_nodata & current_numeric),
@@ -1020,7 +1022,66 @@ def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> 
                 "medianAbsoluteDifference": float(delta.abs().median()) if len(delta) else None,
                 "maximumAbsoluteDifference": float(delta.abs().max()) if len(delta) else None, "correlation": correlation,
             }
-    return diagnostics
+    snapshot_diagnostics: list[dict] = []
+    grouped = table.groupby(["methodology_version", "territory_level", "period_start", "period_end"], sort=True)
+    snapshots_by_identity: dict[tuple[str, str], list[dict]] = {}
+    for (asset_id, level, start, end), rows in grouped:
+        period = f"{start[:4]}-{end[:4]}"
+        expected, numeric, nodata = _coverage_state(coverage_entries, str(asset_id), period, str(level))
+        metric_values: list[tuple[str, str, float]] = []
+        metric_set: set[str] = set()
+        source_signatures = set()
+        for metric, metric_rows in rows.groupby("metric_id", sort=True):
+            metric = str(metric)
+            metric_set.add(metric)
+            row_ids = set(metric_rows["territory_id"].astype(str))
+            if row_ids != numeric:
+                raise ValueError(f"Forest numeric coverage does not match canonical rows: {metric}/{level}/{period}")
+            metric_values.extend((metric, str(item.territory_id), float(item.value_decimal)) for item in metric_rows.sort_values("territory_id").itertuples())
+            if "source_snapshot_signature" in metric_rows:
+                source_signatures.update(str(value) for value in metric_rows["source_snapshot_signature"].dropna().unique())
+        if len(source_signatures) > 1:
+            raise ValueError(f"Forest snapshot has ambiguous source signatures: {asset_id}/{level}/{period}")
+        snapshot_payload = {
+            "metrics": metric_values,
+            "numericTerritoryIds": sorted(numeric),
+            "validNoDataTerritoryIds": sorted(nodata),
+        }
+        snapshot_hash = sha256(json.dumps(snapshot_payload, separators=(",", ":")).encode()).hexdigest()
+        snapshot = {
+            "assetId": str(asset_id), "territoryLevel": str(level), "period": period,
+            "metricSet": sorted(metric_set), "snapshotPayloadSha256": snapshot_hash,
+            "sourceSnapshotSignature": next(iter(source_signatures), None),
+            "numericTerritoryIds": sorted(numeric), "validNoDataTerritoryIds": sorted(nodata),
+            "expectedCount": len(expected), "numericCount": len(numeric), "validNoDataCount": len(nodata),
+        }
+        snapshots_by_identity.setdefault((str(asset_id), str(level)), []).append(snapshot)
+    for identity, snapshots in snapshots_by_identity.items():
+        snapshots.sort(key=lambda item: item["period"])
+        for previous, current in zip(snapshots, snapshots[1:], strict=False):
+            same_metric_set = previous["metricSet"] == current["metricSet"]
+            same_numeric = previous["numericTerritoryIds"] == current["numericTerritoryIds"]
+            same_nodata = previous["validNoDataTerritoryIds"] == current["validNoDataTerritoryIds"]
+            same_population = same_numeric and same_nodata
+            identical = same_metric_set and same_population and previous["snapshotPayloadSha256"] == current["snapshotPayloadSha256"]
+            previous_signature = previous.get("sourceSnapshotSignature")
+            current_signature = current.get("sourceSnapshotSignature")
+            if previous_signature and current_signature and previous_signature == current_signature:
+                raise ValueError(f"Forest source snapshot signature reused across periods: {identity[0]}/{identity[1]}/{previous['period']}/{current['period']}")
+            identical_metrics = [
+                metric for metric in current["metricSet"]
+                if metric_diagnostics.get((metric, identity[1], current["period"]), {}).get("identicalToPrevious")
+            ]
+            current["comparisonWithPrevious"] = {
+                "period": previous["period"], "identical": identical,
+                "compatible": same_metric_set, "metricSetChanged": not same_metric_set,
+                "identicalMetrics": identical_metrics,
+                "changedMetrics": [metric for metric in current["metricSet"] if metric not in identical_metrics],
+            }
+            if identical:
+                raise ValueError(f"Forest temporal snapshots are byte-identical complete payloads: {identity[0]}/{identity[1]}/{previous['period']}/{current['period']}")
+        snapshot_diagnostics.extend(snapshots)
+    return diagnostics, snapshot_diagnostics
 
 
 def _coverage_report(table: pd.DataFrame, coverage: list[dict], expected_region_codes: set[str]) -> dict:
@@ -1037,9 +1098,10 @@ def _coverage_report(table: pd.DataFrame, coverage: list[dict], expected_region_
             "expectedCount": len(expected), "numericCount": len(numeric), "validNoDataCount": len(nodata),
             "expectedTerritoryIds": sorted(expected), "numericTerritoryIds": sorted(numeric), "validNoDataTerritoryIds": sorted(nodata),
         })
+    temporal_diagnostics, snapshot_diagnostics = _temporal_diagnostics(table, entries)
     report = {
         "schemaVersion": 1, "coverageMode": forest_coverage_mode(), "territoryReferenceYear": _territory_reference_year(),
-        "entries": entries, "temporalDiagnostics": _temporal_diagnostics(table, entries),
+        "entries": entries, "temporalDiagnostics": temporal_diagnostics, "snapshotDiagnostics": snapshot_diagnostics,
     }
     if report["coverageMode"] == "national":
         for asset_id, period in sorted({(entry["assetId"], entry["period"]) for entry in entries}):

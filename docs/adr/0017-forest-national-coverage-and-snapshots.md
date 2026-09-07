@@ -32,8 +32,9 @@ riferimento geometrico sono esposti nelle mappe.
 
 Per ogni metrica, livello e periodo vengono registrati conteggio, min/max,
 media, quantili, hash stabile del payload e confronto con lo snapshot
-precedente. Due payload territoriali consecutivi esattamente identici sono
-rifiutati. Le serie UI confrontano solo geometrie territoriali compatibili e
+precedente. Il controllo di duplicazione è a livello di snapshot completo
+dell'asset (insieme di metriche e stato di copertura), non della singola
+metrica. Le serie UI confrontano solo geometrie territoriali compatibili e
 usano una scala colore comune ai periodi della medesima metrica/livello.
 
 INFC resta una serie ufficiale distinta per Italia/Regioni: non si derivano

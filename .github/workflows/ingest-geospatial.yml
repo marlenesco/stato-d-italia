@@ -115,15 +115,15 @@ jobs:
           )
           PY
       - name: Restore resumable local CDSE slices
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: |
             data/raw/infc-2015-forests
             data/raw/copernicus-hrl-forests
             data/canonical/forests
             data/delivery/foreste
-          key: forests-national-candidate-v1-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: forests-national-candidate-v1-${{ runner.os }}-
+          key: forests-national-candidate-v2-${{ runner.os }}-forests-zonal-statistics-v2-${{ hashFiles('config/sources/copernicus-forests.yaml') }}-${{ github.run_id }}
+          restore-keys: forests-national-candidate-v2-${{ runner.os }}-forests-zonal-statistics-v2-${{ hashFiles('config/sources/copernicus-forests.yaml') }}-
       - name: Read active source state only
         run: >-
           uv run stato-data check-sources --domain forests --publish r2
@@ -134,6 +134,19 @@ jobs:
           --plan reports/forest-source-check.json
           --hydrate-from r2 --publish local --validation-only
           --workdir data --output artifacts --report reports/forest-national-validation.json
+      - name: Remove incomplete local slices before cache save
+        if: ${{ always() }}
+        run: find data/raw/copernicus-hrl-forests data/raw/infc-2015-forests data/canonical/forests data/delivery/foreste -type f -name '*.partial' -delete 2>/dev/null || true
+      - name: Save valid local candidate cache
+        if: ${{ always() }}
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            data/raw/infc-2015-forests
+            data/raw/copernicus-hrl-forests
+            data/canonical/forests
+            data/delivery/foreste
+          key: forests-national-candidate-v2-${{ runner.os }}-forests-zonal-statistics-v2-${{ hashFiles('config/sources/copernicus-forests.yaml') }}-${{ github.run_id }}
       - name: Verify production manifest remained unchanged
         if: ${{ always() && hashFiles('reports/production-manifest-before.json') != '' }}
         run: |

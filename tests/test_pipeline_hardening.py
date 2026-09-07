@@ -51,6 +51,10 @@ def test_national_forest_candidate_job_has_no_r2_publication_path() -> None:
     assert "--hydrate-from r2 --publish local --validation-only" in workflow
     assert "production-manifest-before" in workflow
     assert "production-manifest-after" in workflow
+    assert "actions/cache/restore@v6.1.0" in workflow
+    assert "actions/cache/save@v6.1.0" in workflow
+    assert "forests-national-candidate-v2-" in workflow
+    assert "if: ${{ always() }}" in workflow
 
 
 def test_forest_domain_registry_is_scoped_to_its_sources_and_shared_downstream() -> None:
