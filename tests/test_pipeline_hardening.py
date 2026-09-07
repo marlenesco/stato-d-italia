@@ -239,7 +239,13 @@ def test_validation_only_forest_run_reads_input_store_and_never_publishes(
     catalog = root / "raw/copernicus-hrl-forests/catalog.json"
     catalog.parent.mkdir(parents=True)
     catalog.write_text("{}")
+    territory_calls: list[dict[str, object]] = []
     monkeypatch.setattr(cli, "_hydrate", hydrate)
+    monkeypatch.setattr(
+        cli,
+        "ingest_boundaries",
+        lambda *_args, **kwargs: territory_calls.append(kwargs) or {"changed": True, "years": [{"year": 2021}]},
+    )
     monkeypatch.setattr(cli, "active_release", lambda store: {"releaseId": "active-r2"} if store is remote else None)
     monkeypatch.setattr(cli, "_process_geospatial_forest_sources", lambda *_args, **_kwargs: (
         {"infc": [], "catalog": {"path": str(catalog)}},
@@ -263,6 +269,7 @@ def test_validation_only_forest_run_reads_input_store_and_never_publishes(
     assert remote.writes == 0
     assert (tmp_path / "reports/validation.json").is_file()
     assert hydrated
+    assert territory_calls == [{"years": (2021,), "offline": False}]
 
 
 def test_production_activation_is_refused_outside_main(monkeypatch: pytest.MonkeyPatch) -> None:

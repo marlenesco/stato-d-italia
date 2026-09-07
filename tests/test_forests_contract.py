@@ -13,6 +13,7 @@ from stato_italia.cli import load_local_env
 import stato_italia.forests as forests
 from stato_italia.forests_delivery import generate_forests_delivery
 from stato_italia.forests import CORINE, HRL, _asset_periods, _catalog_snapshot, _check_catalog, _coverage_report, _expected_region_codes_from_coverage, _persist_catalog, _process_payload, _process_request_contract, _process_tile_grid, _read_statistical_checkpoint, _reference_years_for_asset, _require_numeric_tree_cover_change_coverage, _stats_payload, _valid_source_values, _write_statistical_checkpoint, forest_coverage_mode, territory_reference_year_for_period
+from stato_italia.territories import territory_reference_date
 
 
 def test_corine_and_hrl_keep_separate_forest_cover_metrics() -> None:
@@ -94,7 +95,7 @@ def test_statistical_jobs_use_the_historical_istat_population_for_each_snapshot(
         requested_years.append(year)
         return pd.DataFrame([{
             "territory_id": "it:region:01",
-            "territory_version_id": f"it:region:01@{year}-01-01",
+            "territory_version_id": f"it:region:01@{territory_reference_date(year)}",
             "level": "region",
         }])
 
@@ -118,12 +119,62 @@ def test_statistical_jobs_use_the_historical_istat_population_for_each_snapshot(
     assert requested_years == [2018, 2021, 2023, 2018, 2021, 2021]
     assert observed == {
         ("hrl_tree_cover_density_100m", 2018, 2018, "it:region:01@2018-01-01"),
-        ("hrl_tree_cover_density_100m", 2021, 2021, "it:region:01@2021-01-01"),
+        ("hrl_tree_cover_density_100m", 2021, 2021, "it:region:01@2021-12-31"),
         ("hrl_tree_cover_density_100m", 2023, 2023, "it:region:01@2023-01-01"),
         ("hrl_forest_type", 2018, 2018, "it:region:01@2018-01-01"),
-        ("hrl_forest_type", 2021, 2021, "it:region:01@2021-01-01"),
-        ("hrl_tree_cover_presence_change", 2018, 2021, "it:region:01@2021-01-01"),
+        ("hrl_forest_type", 2021, 2021, "it:region:01@2021-12-31"),
+        ("hrl_tree_cover_presence_change", 2018, 2021, "it:region:01@2021-12-31"),
     }
+
+
+def test_forest_slice_preserves_a_closed_canonical_municipality_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(HRL["coverage_mode_environment"], raising=False)
+    root = tmp_path / "canonical" / "territories" / "reference_year=2021"
+    root.mkdir(parents=True)
+    common = {"reference_date": "2021-12-31", "canonical_contract_version": 2}
+    pd.DataFrame([{
+        **common, "territory_id": "it:region:01", "territory_version_id": "it:region:01@2021-12-31",
+        "level": "region", "istat_code": "01", "name": "Piemonte", "parent_istat_code": None,
+    }]).to_parquet(root / "region.parquet")
+    pd.DataFrame([{
+        **common, "territory_id": "it:province:201", "territory_version_id": "it:province:201@2021-12-31",
+        "level": "province", "istat_code": "201", "name": "Torino", "parent_istat_code": "01",
+    }]).to_parquet(root / "province.parquet")
+    pd.DataFrame([{
+        **common, "territory_id": f"it:municipality:{code}", "territory_version_id": f"it:municipality:{code}@2021-12-31",
+        "level": "municipality", "istat_code": code, "name": f"Comune {code}", "parent_istat_code": "201",
+    } for code in ("001001", "001002")]).to_parquet(root / "municipality.parquet")
+
+    selected = forests._slice_territories(tmp_path / "canonical", 2021)
+
+    assert len(selected[selected["level"] == "municipality"]) == 2
+    assert selected["territory_version_id"].str.endswith("@2021-12-31").all()
+
+
+def test_forest_slice_fails_instead_of_dropping_orphan_municipalities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(HRL["coverage_mode_environment"], raising=False)
+    root = tmp_path / "canonical" / "territories" / "reference_year=2021"
+    root.mkdir(parents=True)
+    common = {"reference_date": "2021-12-31", "canonical_contract_version": 2}
+    pd.DataFrame([{
+        **common, "territory_id": "it:region:01", "territory_version_id": "it:region:01@2021-12-31",
+        "level": "region", "istat_code": "01", "name": "Piemonte", "parent_istat_code": None,
+    }]).to_parquet(root / "region.parquet")
+    pd.DataFrame([{
+        **common, "territory_id": "it:province:201", "territory_version_id": "it:province:201@2021-12-31",
+        "level": "province", "istat_code": "201", "name": "Torino", "parent_istat_code": "01",
+    }]).to_parquet(root / "province.parquet")
+    pd.DataFrame([{
+        **common, "territory_id": "it:municipality:001001", "territory_version_id": "it:municipality:001001@2021-12-31",
+        "level": "municipality", "istat_code": "001001", "name": "Orfano", "parent_istat_code": "999",
+    }]).to_parquet(root / "municipality.parquet")
+
+    with pytest.raises(ValueError, match="orphan municipalities"):
+        forests._slice_territories(tmp_path / "canonical", 2021)
 
 
 def test_catalog_queries_every_supported_asset_period_and_verifies_reference_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:

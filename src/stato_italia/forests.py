@@ -27,6 +27,7 @@ from .common import json_dump, now_iso, sha256_file, stable_id
 from .download import download
 from .ingestion_plan import planned_catalog_check
 from .registry import load_source
+from .territories import validate_territory_hierarchy
 
 HRL = load_source("copernicus-forests")
 CORINE = load_source("copernicus-corine-forests")
@@ -870,10 +871,19 @@ def ingest_infc_forests(root: Path, canonical_root: Path, force: bool = False) -
 def _slice_territories(canonical_root: Path, year: int) -> pd.DataFrame:
     """Return the national ISTAT population, or an explicitly selected dev slice."""
     frames = {level: pd.read_parquet(canonical_root / "territories" / f"reference_year={year}" / f"{level}.parquet") for level in MAPPABLE_LEVELS}
+    validate_territory_hierarchy(frames)
     selected_regions = _expected_region_codes(canonical_root, year)
     regions = frames["region"][frames["region"]["istat_code"].isin(selected_regions)]
     provinces = frames["province"][frames["province"]["parent_istat_code"].isin(selected_regions)]
     municipalities = frames["municipality"][frames["municipality"]["parent_istat_code"].isin(set(provinces["istat_code"]))]
+    province_regions = dict(zip(frames["province"]["istat_code"].astype(str), frames["province"]["parent_istat_code"].astype(str), strict=True))
+    expected_municipalities = frames["municipality"][
+        frames["municipality"]["parent_istat_code"].astype(str).map(province_regions).isin(selected_regions)
+    ]
+    if set(municipalities["territory_id"]) != set(expected_municipalities["territory_id"]):
+        raise ValueError("Forest territory selection would exclude canonical municipalities")
+    if forest_coverage_mode() == "national" and len(municipalities) != len(frames["municipality"]):
+        raise ValueError("National forest territory selection does not include every canonical municipality")
     result = pd.concat([municipalities, provinces, regions], ignore_index=True)
     if result.empty or result.duplicated(["territory_id", "territory_version_id"]).any():
         raise ValueError("Invalid configured forest territory coverage")

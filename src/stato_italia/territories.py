@@ -17,6 +17,14 @@ from .common import normalize_name
 from .download import download
 
 SOURCE_YEARS = (2006, 2012, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025)
+TERRITORY_CANONICAL_CONTRACT_VERSION = 2
+_SPECIAL_REFERENCE_DATES = {2021: "2021-12-31"}
+_OFFICIAL_MUNICIPALITY_COUNTS = {2021: 7904}
+
+
+def territory_reference_date(year: int) -> str:
+    """Return the official ISTAT reference date for a source snapshot year."""
+    return _SPECIAL_REFERENCE_DATES.get(year, date(year, 1, 1).isoformat())
 
 
 def boundary_url(year: int) -> str:
@@ -38,6 +46,17 @@ def _shape_file(root: Path, prefix: str | tuple[str, ...]) -> Path:
     return matches[0]
 
 
+def _candidate_codes(row: dict, names: tuple[str, ...], width: int) -> tuple[str, ...]:
+    codes = {
+        str(value).zfill(width)
+        for name in names
+        if (value := row.get(name)) not in (None, "", "-")
+    }
+    if not codes:
+        raise KeyError(f"None of expected fields exists: {names}")
+    return tuple(sorted(codes))
+
+
 def _first_present(row: dict, *names: str) -> str:
     for name in names:
         value = row.get(name)
@@ -46,7 +65,8 @@ def _first_present(row: dict, *names: str) -> str:
     raise KeyError(f"None of expected fields exists: {names}")
 
 
-def _features(shp: Path, level: str, reference_date: str) -> list[dict]:
+def _source_features(shp: Path, level: str) -> list[dict]:
+    """Read source attributes without choosing municipality/province hierarchy."""
     reader = shapefile.Reader(str(shp))
     source_crs = CRS.from_wkt(shp.with_suffix(".prj").read_text())
     target_crs = CRS.from_epsg(4326)
@@ -57,37 +77,146 @@ def _features(shp: Path, level: str, reference_date: str) -> list[dict]:
         if level == "municipality":
             code = str(row["PRO_COM_T"]).zfill(6)
             name = str(row["COMUNE"])
-            parent_code = _first_present(row, "COD_PROV", "COD_UTS").zfill(3)
+            parent_candidates = _candidate_codes(row, ("COD_UTS", "COD_PROV", "COD_PCM", "COD_CM"), 3)
+            source_identity: str | tuple[str, ...] = code
         elif level == "province":
-            code = _first_present(row, "COD_PROV", "COD_UTS", "COD_PCM").zfill(3)
+            code = None
             name = _first_present(row, "DEN_UTS", "DEN_PCM", "DEN_PROV", "DEN_CM")
-            parent_code = str(row["COD_REG"]).zfill(2)
+            parent_candidates = _candidate_codes(row, ("COD_UTS", "COD_PROV", "COD_PCM", "COD_CM"), 3)
+            source_identity = parent_candidates
         else:
             code = str(row["COD_REG"]).zfill(2)
             name = str(row["DEN_REG"])
-            parent_code = None
-        territory_id = f"it:{level}:{code}"
+            parent_candidates = ()
+            source_identity = code
         output.append({
-            "territory_id": territory_id,
-            "territory_version_id": f"{territory_id}@{reference_date}",
             "level": level,
+            "source_identity": source_identity,
             "istat_code": code,
             "name": name,
             "name_normalized": normalize_name(name),
-            "parent_istat_code": parent_code,
-            "reference_date": reference_date,
+            "parent_candidates": parent_candidates,
+            "region_code": str(row["COD_REG"]).zfill(2),
             "geometry": transform(reproject, shape(item.shape.__geo_interface__)).__geo_interface__ if reproject else item.shape.__geo_interface__,
         })
-    grouped: dict[str, list[dict]] = {}
-    for feature in output:
-        grouped.setdefault(feature["territory_id"], []).append(feature)
+    return output
+
+
+def _dissolve_source_features(features: list[dict]) -> list[dict]:
+    grouped: dict[str | tuple[str, ...], list[dict]] = {}
+    for feature in features:
+        grouped.setdefault(feature["source_identity"], []).append(feature)
     dissolved = []
-    for territory_id, pieces in grouped.items():
+    for source_identity, pieces in grouped.items():
         first = pieces[0].copy()
+        for piece in pieces[1:]:
+            for key in ("level", "istat_code", "name", "name_normalized", "parent_candidates", "region_code"):
+                if piece[key] != first[key]:
+                    raise ValueError(f"Inconsistent ISTAT source attributes while dissolving {first['level']} {source_identity}")
         first["source_feature_count"] = len(pieces)
         first["geometry"] = unary_union([shape(piece["geometry"]) for piece in pieces]).__geo_interface__
         dissolved.append(first)
     return dissolved
+
+
+def _canonical_feature(feature: dict, level: str, code: str, reference_date: str, parent_code: str | None) -> dict:
+    territory_id = f"it:{level}:{code}"
+    return {
+        "territory_id": territory_id,
+        "territory_version_id": f"{territory_id}@{reference_date}",
+        "canonical_contract_version": TERRITORY_CANONICAL_CONTRACT_VERSION,
+        "level": level,
+        "istat_code": code,
+        "name": feature["name"],
+        "name_normalized": feature["name_normalized"],
+        "parent_istat_code": parent_code,
+        "reference_date": reference_date,
+        "source_feature_count": feature["source_feature_count"],
+        "geometry": feature["geometry"],
+    }
+
+
+def validate_territory_hierarchy(frames: dict[str, pd.DataFrame]) -> dict[str, int]:
+    """Fail closed if a canonical snapshot is not a closed ISTAT hierarchy."""
+    required = {"region", "province", "municipality"}
+    if set(frames) != required:
+        raise ValueError(f"Territory hierarchy has unexpected levels: {sorted(frames)}")
+    for level, frame in frames.items():
+        if frame.empty or frame["istat_code"].isna().any() or frame["istat_code"].astype(str).duplicated().any():
+            raise ValueError(f"Invalid canonical {level} population")
+    regions = set(frames["region"]["istat_code"].astype(str))
+    provinces = set(frames["province"]["istat_code"].astype(str))
+    orphan_provinces = sorted(set(frames["province"]["parent_istat_code"].astype(str)) - regions)
+    orphan_municipalities = sorted(set(frames["municipality"]["parent_istat_code"].astype(str)) - provinces)
+    if orphan_provinces:
+        raise ValueError(f"Canonical territory hierarchy has orphan provinces: {orphan_provinces[:10]}")
+    if orphan_municipalities:
+        raise ValueError(f"Canonical territory hierarchy has orphan municipalities: {orphan_municipalities[:10]}")
+    return {
+        "regions": len(regions), "provinces": len(provinces), "municipalities": len(frames["municipality"]),
+        "orphan_provinces": 0, "orphan_municipalities": 0,
+    }
+
+
+def normalize_boundary_features(source_features: dict[str, list[dict]], reference_date: str) -> dict[str, list[dict]]:
+    """Resolve ISTAT source codes against the actual parent population, not field order."""
+    expected = {"region", "province", "municipality"}
+    if set(source_features) != expected:
+        raise ValueError(f"ISTAT source lacks expected levels: {sorted(source_features)}")
+    regions = _dissolve_source_features(source_features["region"])
+    provinces = _dissolve_source_features(source_features["province"])
+    municipalities = _dissolve_source_features(source_features["municipality"])
+    region_codes = {str(item["istat_code"]) for item in regions}
+    if len(region_codes) != len(regions):
+        raise ValueError("ISTAT source has duplicate region codes")
+    municipality_parent_candidates = {
+        code for item in municipalities for code in item["parent_candidates"]
+    }
+    normalized_provinces: list[dict] = []
+    for item in provinces:
+        candidates = set(item["parent_candidates"]) & municipality_parent_candidates
+        if len(candidates) != 1:
+            raise ValueError(f"ISTAT province code is missing or ambiguous against municipality parents: {item['name']} {sorted(candidates)}")
+        if item["region_code"] not in region_codes:
+            raise ValueError(f"ISTAT province has an unknown region parent: {item['name']} {item['region_code']}")
+        normalized_provinces.append(_canonical_feature(item, "province", next(iter(candidates)), reference_date, item["region_code"]))
+    province_codes = {item["istat_code"] for item in normalized_provinces}
+    if len(province_codes) != len(normalized_provinces):
+        raise ValueError("ISTAT source resolves multiple province features to one canonical code")
+    normalized_municipalities: list[dict] = []
+    for item in municipalities:
+        candidates = set(item["parent_candidates"]) & province_codes
+        if len(candidates) != 1:
+            raise ValueError(f"ISTAT municipality parent is missing or ambiguous: {item['name']} {sorted(candidates)}")
+        normalized_municipalities.append(_canonical_feature(item, "municipality", str(item["istat_code"]), reference_date, next(iter(candidates))))
+    normalized_regions = [_canonical_feature(item, "region", str(item["istat_code"]), reference_date, None) for item in regions]
+    result = {"region": normalized_regions, "province": normalized_provinces, "municipality": normalized_municipalities}
+    frames = {level: pd.DataFrame(records) for level, records in result.items()}
+    validate_territory_hierarchy(frames)
+    return result
+
+
+def _canonical_snapshot_is_current(existing: Path, year: int) -> bool:
+    paths = {level: existing / f"{level}.parquet" for level in ("municipality", "province", "region")}
+    if not all(path.is_file() for path in paths.values()):
+        return False
+    if year != 2021:
+        return True
+    try:
+        frames = {level: pd.read_parquet(path) for level, path in paths.items()}
+        reference_date = territory_reference_date(year)
+        if any(
+            "canonical_contract_version" not in frame
+            or set(frame["canonical_contract_version"].astype(int)) != {TERRITORY_CANONICAL_CONTRACT_VERSION}
+            or set(frame["reference_date"].astype(str)) != {reference_date}
+            or not frame["territory_version_id"].astype(str).str.endswith(f"@{reference_date}").all()
+            for frame in frames.values()
+        ):
+            return False
+        counts = validate_territory_hierarchy(frames)
+        return counts["municipalities"] == _OFFICIAL_MUNICIPALITY_COUNTS[year]
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def ingest_boundaries(
@@ -103,7 +232,7 @@ def ingest_boundaries(
             metadata = download(url, archive, "istat-administrative-boundaries", offline=offline)
             existing = canonical_root / "territories" / f"reference_year={year}"
             existing_files = [existing / f"{level}.parquet" for level in ("municipality", "province", "region")]
-            if metadata.get("unchanged") and not force and all(path.exists() for path in existing_files):
+            if metadata.get("unchanged") and not force and _canonical_snapshot_is_current(existing, year):
                 run["years"].append({
                     "year": year,
                     "raw": metadata,
@@ -116,10 +245,20 @@ def ingest_boundaries(
                 extract_root = Path(workdir)
                 with zipfile.ZipFile(archive) as source:
                     source.extractall(extract_root)
-                reference_date = date(year, 1, 1).isoformat()
-                record = {"year": year, "raw": metadata, "levels": {}}
-                for level, prefix in (("municipality", "Com"), ("province", ("ProvCM", "Prov")), ("region", "Reg")):
-                    features = _features(_shape_file(extract_root, prefix), level, reference_date)
+                reference_date = territory_reference_date(year)
+                source_features = {
+                    level: _source_features(_shape_file(extract_root, prefix), level)
+                    for level, prefix in (("municipality", "Com"), ("province", ("ProvCM", "Prov")), ("region", "Reg"))
+                }
+                features_by_level = normalize_boundary_features(source_features, reference_date)
+                if year in _OFFICIAL_MUNICIPALITY_COUNTS and len(features_by_level["municipality"]) != _OFFICIAL_MUNICIPALITY_COUNTS[year]:
+                    raise ValueError(
+                        f"ISTAT {year} canonical municipality count is {len(features_by_level['municipality'])}, "
+                        f"expected {_OFFICIAL_MUNICIPALITY_COUNTS[year]}"
+                    )
+                record = {"year": year, "referenceDate": reference_date, "raw": metadata, "levels": {}}
+                for level in ("municipality", "province", "region"):
+                    features = features_by_level[level]
                     attributes = pd.DataFrame([
                         {k: v for k, v in feature.items() if k not in {"geometry", "name_normalized"}} | {
                             "geometry_wkb": shape(feature["geometry"]).wkb
@@ -148,12 +287,12 @@ def load_territory_index(canonical_root: Path, year: int = 2024) -> dict[str, di
             index[properties["territory_id"]] = properties
     index["it:country:IT"] = {
         "territory_id": "it:country:IT",
-        "territory_version_id": f"it:country:IT@{year}-01-01",
+        "territory_version_id": f"it:country:IT@{territory_reference_date(year)}",
         "level": "country",
         "istat_code": "IT",
         "name": "Italia",
         "name_normalized": "italia",
         "parent_istat_code": None,
-        "reference_date": f"{year}-01-01",
+        "reference_date": territory_reference_date(year),
     }
     return index
