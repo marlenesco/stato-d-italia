@@ -11,6 +11,7 @@ import { focusMapForInspector } from "./map-inspector-focus";
 import { hierarchyFromProperties, TerritoryContext, type TerritoryHierarchy } from "./territory-context";
 import { TerritoryMapSeries } from "./territory-map-series";
 import { currentProfileHref } from "../lib/current-profile";
+import type { ExplorerFeatures } from "../lib/explorer-model";
 
 type RankingRow = { territoryId: string; name: string; istatCode: string; value: number; percentile: number | null; rank: number | null };
 type Ranking = { rows: RankingRow[]; scopeLabel?: string };
@@ -33,7 +34,10 @@ function formatPeriod(periodStart: string, periodEnd: string) {
   return start === end ? start : `${start}–${end}`;
 }
 
-export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selectedTerritoryId, seriesOptions, seriesStatusNote, colorRamp = "soil", comparisonNote, sharedTemporalScale = false, currentTerritoryIds, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; selectedTerritoryId?: string; seriesOptions?: MapOption[]; seriesStatusNote?: string; colorRamp?: DomainColorName; comparisonNote?: string; sharedTemporalScale?: boolean; currentTerritoryIds?: string[]; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
+export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, features, selectedTerritoryId, seriesOptions, seriesStatusNote, colorRamp = "soil", comparisonNote, sharedTemporalScale = false, currentTerritoryIds, onTerritorySelect }: { option: MapOption; metricLabel: string; geometryUrl?: string; rankingUrl?: string; features?: ExplorerFeatures; selectedTerritoryId?: string; seriesOptions?: MapOption[]; seriesStatusNote?: string; colorRamp?: DomainColorName; comparisonNote?: string; sharedTemporalScale?: boolean; currentTerritoryIds?: string[]; onTerritorySelect?: (territoryId: string, name?: string) => void }) {
+  const effectiveFeatures: ExplorerFeatures = features ?? {
+    map: { status: "available" }, timeline: { status: "available" }, territorySeries: { status: "available" }, comparison: { status: "available" }, ranking: rankingUrl ? { status: "available" } : { status: "not_published" }, percentile: rankingUrl ? { status: "available" } : { status: "not_published" }, profile: { status: "available" },
+  };
   const ramp = domainColorRamps[colorRamp];
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
@@ -43,7 +47,8 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   const onTerritorySelectRef = useRef(onTerritorySelect);
   const inspector = useRef<HTMLElement>(null);
   const [ranking, setRanking] = useState<Ranking | null>(null);
-  const [rankingState, setRankingState] = useState<RankingState>(rankingUrl ? "loading" : "not-applicable");
+  const rankingEnabled = effectiveFeatures.ranking.status === "available" && Boolean(rankingUrl);
+  const [rankingState, setRankingState] = useState<RankingState>(rankingEnabled ? "loading" : "not-applicable");
   const [rankingError, setRankingError] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
   const [valuesLoading, setValuesLoading] = useState(true);
@@ -205,7 +210,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
     const controller = new AbortController();
     setRanking(null);
     setRankingError(null);
-    if (!rankingUrl) {
+    if (!rankingEnabled || !rankingUrl) {
       setRankingState("not-applicable");
       return () => controller.abort();
     }
@@ -215,7 +220,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
       .then((nextRanking) => { if (!controller.signal.aborted) { setRanking(nextRanking); setRankingState("available"); } })
       .catch((caught) => { if (!controller.signal.aborted) { setRankingState("unavailable"); setRankingError(caught instanceof Error ? caught.message : "Impossibile caricare il confronto."); } });
     return () => controller.abort();
-  }, [rankingUrl]);
+  }, [rankingEnabled, rankingUrl]);
 
   const selectedRow = ranking?.rows.find((row) => row.territoryId === selectedId);
   const selectedValue = dataset?.values.find(([territoryId]) => territoryId === selectedId)?.[1];
@@ -233,14 +238,14 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, selected
   return <>
     <section className={`map-stage map-stage--${colorRamp}`} style={{ "--map-ramp-low": ramp.low, "--map-ramp-mid": ramp.mid, "--map-ramp-high": ramp.high, "--map-ramp-outline": ramp.outline } as CSSProperties} aria-labelledby="map-title">
       <header className="map-heading"><div><p className="eyebrow">Mappa tematica</p><h2 id="map-title">{metricLabel}</h2><p>{dataset ? `${formatPeriod(dataset.periodStart, dataset.periodEnd)} · ${dataset.unit}` : option.periodKey}</p></div><p className="map-status" aria-live="polite">{valuesLoading ? "Carico valori…" : mapError ? "Valori non disponibili" : selectedLabel ? selectedValue === undefined ? `${selectionLabel}: dato non pubblicato` : `${selectionLabel}: ${selectedLabel}` : "Seleziona un territorio"}</p></header>
-      <div className="map-wrap"><div ref={container} className="map" role="img" aria-label="Mappa tematica interattiva. La tabella di confronto è disponibile sotto." />
+      <div className="map-wrap"><div ref={container} className="map" role="img" aria-label="Mappa tematica interattiva." />
         {min !== null && middle !== null && max !== null && <aside className="map-legend" aria-label={`Legenda ${metricLabel}`}><strong>Valore pubblicato</strong><div className="legend-scale" aria-hidden="true" /><div className="legend-values"><span>{formatNumber(min, dataset?.unit)}</span><span>{formatNumber(middle, dataset?.unit)}</span><span>{formatNumber(max, dataset?.unit)}</span></div><p>{mapValues.length} territori con valore pubblicato. Il bianco indica un valore non disponibile; il colore non è un giudizio sul territorio.</p></aside>}
-        {selectedId && <aside ref={inspector} className="territory-inspector map-selection-drawer" aria-live="polite"><p className="eyebrow">{selectionLabel}</p>{selectedRow ? <><h3>{territoryLabel(selectedRow.territoryId, selectedRow.name)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedRow.territoryId, selectedRow.istatCode)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p></> : <><h3>{territoryLabel(selectedId, selectedName)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedId)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p>{selectedValue === undefined ? "Dato non pubblicato per periodo e metrica selezionati." : formatNumber(selectedValue, dataset?.unit)}</p></>}{profileHref ? <Link href={profileHref}>Apri profilo {levelLabel.toLocaleLowerCase("it")}</Link> : currentProfileUnavailable && <p className="muted">Profilo corrente non disponibile per questa versione territoriale.</p>}<TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selectedId} territoryName={selectedRow?.name ?? selectedName} selectedPeriod={option.periodKey} statusNote={seriesStatusNote} /></aside>}
+        {selectedId && <aside ref={inspector} className="territory-inspector map-selection-drawer" aria-live="polite"><p className="eyebrow">{selectionLabel}</p>{selectedRow ? <><h3>{territoryLabel(selectedRow.territoryId, selectedRow.name)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedRow.territoryId, selectedRow.istatCode)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p><strong>{formatNumber(selectedRow.value, dataset?.unit)}</strong>{effectiveFeatures.ranking.status === "available" && selectedRow.rank !== null && <> · posizione {selectedRow.rank}</>}</p></> : <><h3>{territoryLabel(selectedId, selectedName)}</h3><p className="territory-istat-code">Codice ISTAT · {territoryIstatCode(selectedId)}</p><TerritoryContext level={option.level} hierarchy={selectedHierarchy ?? undefined} /><p>{selectedValue === undefined ? "Dato non pubblicato per periodo e metrica selezionati." : formatNumber(selectedValue, dataset?.unit)}</p></>}{profileHref ? <Link href={profileHref}>Apri profilo {levelLabel.toLocaleLowerCase("it")}</Link> : currentProfileUnavailable && <p className="muted">Profilo corrente non disponibile per questa versione territoriale.</p>}{effectiveFeatures.territorySeries.status === "available" && <TerritoryMapSeries options={seriesOptions ?? [option]} territoryId={selectedId} territoryName={selectedRow?.name ?? selectedName} selectedPeriod={option.periodKey} statusNote={seriesStatusNote} comparisonStatus={effectiveFeatures.comparison.status} />}</aside>}
       </div>
       {mapError && <p className="map-message" role="alert">{mapError}</p>}
     </section>
-    <section className="ranking" aria-labelledby="ranking-title"><div className="section-heading"><div><p className="eyebrow">Confronto</p><h2 id="ranking-title">Territori nello stesso periodo</h2></div><p>{ranking?.scopeLabel ?? comparisonNote ?? "Alternativa testuale alla mappa"}</p></div>
-      {rankingState === "available" && ranking ? <div className="table-scroll"><table><thead><tr><th>Territorio</th><th>Valore</th><th>Posizione</th><th>Percentile</th></tr></thead><tbody>{ranking.rows.slice(0, 25).map((row) => <tr key={row.territoryId} className={row.territoryId === selectedId ? "is-selected" : undefined}><th scope="row"><button type="button" onClick={() => { setSelectedId(row.territoryId); setSelectedName(row.name); setSelectedHierarchy(undefined); onTerritorySelect?.(row.territoryId, row.name); }}>{row.name}</button></th><td>{formatNumber(row.value, dataset?.unit)}</td><td>{row.rank ?? "—"}</td><td>{row.percentile === null ? "—" : row.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div> : rankingState === "loading" ? <p className="state-copy" role="status">Carico il confronto territoriale pubblicato…</p> : rankingState === "not-applicable" ? <p className="state-copy">Per questa combinazione di metrica, livello e periodo non è pubblicato un confronto territoriale.</p> : <p className="state-copy" role="alert">Il confronto non è momentaneamente disponibile. {rankingError}</p>}
-    </section>
+    {effectiveFeatures.ranking.status !== "not_supported" && <section className="ranking" aria-labelledby="ranking-title"><div className="section-heading"><div><p className="eyebrow">Confronto</p><h2 id="ranking-title">Territori nello stesso periodo</h2></div><p>{ranking?.scopeLabel ?? comparisonNote ?? "Alternativa testuale alla mappa"}</p></div>
+      {rankingState === "available" && ranking ? <div className="table-scroll"><table><thead><tr><th>Territorio</th><th>Valore</th><th>Posizione</th>{effectiveFeatures.percentile.status === "available" && <th>Percentile</th>}</tr></thead><tbody>{ranking.rows.slice(0, 25).map((row) => <tr key={row.territoryId} className={row.territoryId === selectedId ? "is-selected" : undefined}><th scope="row"><button type="button" onClick={() => { setSelectedId(row.territoryId); setSelectedName(row.name); setSelectedHierarchy(undefined); onTerritorySelect?.(row.territoryId, row.name); }}>{row.name}</button></th><td>{formatNumber(row.value, dataset?.unit)}</td><td>{row.rank ?? "—"}</td>{effectiveFeatures.percentile.status === "available" && <td>{row.percentile === null ? "—" : row.percentile.toLocaleString("it-IT", { maximumFractionDigits: 1 })}</td>}</tr>)}</tbody></table></div> : rankingState === "loading" ? <p className="state-copy" role="status">Carico il confronto territoriale pubblicato…</p> : rankingState === "not-applicable" ? <p className="state-copy">Per questa combinazione di metrica, livello e periodo non è pubblicato un confronto territoriale.</p> : <p className="state-copy" role="alert">Il confronto non è momentaneamente disponibile. {rankingError}</p>}
+    </section>}
   </>;
 }
