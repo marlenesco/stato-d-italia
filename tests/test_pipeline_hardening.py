@@ -1082,6 +1082,27 @@ def test_scope_all_accepts_cross_scope_boundary_delta_without_carrying_obsolete_
     assert "raw/istat-administrative-boundaries/2023/limiti-2023-generalized.zip" in logical_paths
 
 
+def test_scope_all_declares_forest_zonal_statistics_and_verified_coverage_together(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    declared = cli._all_scope_forest_canonical_declarations(canonical)
+    root = canonical.parent
+    for path in declared:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"forest")
+    source_state = root / "metadata/source-state.json"
+    source_state.parent.mkdir(parents=True)
+    source_state.write_text("{}")
+
+    logical_paths = {
+        artifact.logical_path
+        for artifact in cli._release_artifacts(root, list(declared), source_state)
+    }
+
+    zonal_root = f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}"
+    assert f"{zonal_root}/zonal_statistics.parquet" in logical_paths
+    assert f"{zonal_root}/zonal_statistics.coverage.json" in logical_paths
+
+
 def test_changed_data_family_hydrates_only_its_unchanged_raw_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
