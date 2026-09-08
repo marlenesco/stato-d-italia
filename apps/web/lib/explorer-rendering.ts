@@ -12,6 +12,10 @@ export function shouldRenderTerritorySeries(feature: ExplorerFeature) {
   return feature.status === "available";
 }
 
+export function shouldRenderComparison(status: ExplorerFeature["status"]) {
+  return status === "available";
+}
+
 export function shouldRenderRanking(feature: ExplorerFeature) {
   return feature.status !== "not_supported";
 }

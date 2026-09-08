@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DOMAIN_CAPABILITIES } from "./domain-capabilities";
 import { resolveExplorerModel, type ExplorerModelInput } from "./explorer-model";
-import { profileUnavailableCopy, shouldRenderMap, shouldRenderProfileLink, shouldRenderRanking, shouldRenderTerritorySeries, shouldRenderTimeline } from "./explorer-rendering";
+import { profileUnavailableCopy, shouldRenderComparison, shouldRenderMap, shouldRenderProfileLink, shouldRenderRanking, shouldRenderTerritorySeries, shouldRenderTimeline } from "./explorer-rendering";
 
 function map(metricId: string, periodKey: string, level: "municipality" | "province" | "region") {
   const logicalPath = `delivery/maps/${metricId}/${periodKey}/${level}.json`;
@@ -41,6 +41,7 @@ describe("explorer rendering guards", () => {
     expect(shouldRenderTimeline(forest.features.timeline)).toBe(true);
     expect(shouldRenderTerritorySeries(forest.features.territorySeries)).toBe(true);
     expect(forest.features.comparison.status).toBe("not_published");
+    expect(shouldRenderComparison(forest.features.comparison.status)).toBe(false);
   });
 
   it("enforces map and profile policy before a component can render an affordance", () => {

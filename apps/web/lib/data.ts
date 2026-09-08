@@ -80,8 +80,9 @@ export type EmissionsOverview = {
 };
 export type EmissionsNationalSeries = { id: string; metricId: string; metricLabel: string; dimensionCode: string; dimensionLabel: string; sourceUnit: string; unit: string; values: Array<[number, number]> };
 export type EmissionsNationalDataset = { kind: "official_national_series"; series: EmissionsNationalSeries[] };
-export type EmissionsProvincialCombination = { id: string; metricId: string; pollutantCode: string; pollutantLabel: string; snapCode: string; snapLabel: string; unit: string; mapPaths: Record<string, string> };
-export type EmissionsData = { overview: EmissionsOverview; nationalUrls: { greenhouseGases: string; airPollutantsNfr: string }; provincial: EmissionsProvincialCombination[]; geometryByPeriod: Record<string, string> };
+export type EmissionsMapAsset = { logicalPath: string; url: string };
+export type EmissionsProvincialCombination = { id: string; metricId: string; pollutantCode: string; pollutantLabel: string; snapCode: string; snapLabel: string; unit: string; mapAssets: Record<string, EmissionsMapAsset> };
+export type EmissionsData = { overview: EmissionsOverview; nationalUrls: { greenhouseGases: string; airPollutantsNfr: string }; provincial: EmissionsProvincialCombination[]; geometryByPeriod: Record<string, string>; currentTerritoryIds?: Partial<Record<TerritoryLevel, string[]>> };
 
 export type HomeOverview = {
   releaseId: string;
@@ -306,12 +307,14 @@ export async function loadForestData(): Promise<ForestData> {
 
 export async function loadEmissionsData(): Promise<EmissionsData> {
   const { base, release, index } = await emissionsRelease();
-  const provincialCatalog = await fetchJson<{ combinations: Array<Omit<EmissionsProvincialCombination, "mapPaths"> & { mapPaths: Record<string, string> }> }>(asset(base, release, index.provincialCatalog), 300);
+  const provincialCatalog = await fetchJson<{ combinations: Array<Omit<EmissionsProvincialCombination, "mapAssets"> & { mapPaths: Record<string, string> }> }>(asset(base, release, index.provincialCatalog), 300);
+  const currentTerritoryIds = await loadCurrentTerritoryPopulation(base, release);
   return {
     overview: await fetchJson<EmissionsOverview>(asset(base, release, index.overview), 300),
     nationalUrls: { greenhouseGases: asset(base, release, index.national.greenhouseGases), airPollutantsNfr: asset(base, release, index.national.airPollutantsNfr) },
-    provincial: provincialCatalog.combinations.map((item) => ({ ...item, mapPaths: Object.fromEntries(Object.entries(item.mapPaths).map(([year, path]) => [year, asset(base, release, path)])) })),
+    provincial: provincialCatalog.combinations.map(({ mapPaths, ...item }) => ({ ...item, mapAssets: Object.fromEntries(Object.entries(mapPaths).map(([year, logicalPath]) => [year, { logicalPath, url: asset(base, release, logicalPath) }])) })),
     geometryByPeriod: Object.fromEntries((index.geometry ?? []).map((path) => [path.match(/istat-province-(\d{4})/)?.[1] ?? "unknown", `${asset(base, release, path)}?release=${release.releaseId}`])),
+    currentTerritoryIds,
   };
 }
 
