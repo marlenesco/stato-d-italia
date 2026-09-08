@@ -1329,6 +1329,16 @@ def _run_combined_scope_forests(
     return forests
 
 
+def _all_scope_forest_canonical_declarations(canonical: Path) -> tuple[Path, Path, Path]:
+    forest_root = canonical / "forests"
+    zonal_root = forest_root / f"algorithm_version={ZONAL_ALGORITHM_VERSION}"
+    return (
+        forest_root / "dataset_version=infc2015-published-tables" / "observations.parquet",
+        zonal_root / "zonal_statistics.parquet",
+        zonal_root / "zonal_statistics.coverage.json",
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     clear_ingestion_plan()
     _require_main_for_production_activation(args.publish)
@@ -1546,10 +1556,7 @@ def run(args: argparse.Namespace) -> int:
         canonical / "emissions" / "national" / "air-pollutants-nfr" / "dataset_version=2026-1990-2024" / "observations.parquet",
     ]
     if args.scope == "all":
-        canonical_declarations.extend((
-            canonical / "forests" / "dataset_version=infc2015-published-tables" / "observations.parquet",
-            canonical / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet",
-        ))
+        canonical_declarations.extend(_all_scope_forest_canonical_declarations(canonical))
     declared_paths = [
         *raw_declarations, *canonical_declarations,
         derived / "soil" / "algorithm_version=soil-analytics-v1" / "analytics.parquet",
