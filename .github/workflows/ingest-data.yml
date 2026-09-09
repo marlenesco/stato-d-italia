@@ -11,6 +11,12 @@ on:
         type: boolean
         default: false
 
+      rebuild_historical_bigbang:
+        description: Rebuild historical BIGBANG and water delivery using active release inputs
+        required: false
+        type: boolean
+        default: false
+
 permissions:
   contents: read
 
@@ -56,8 +62,9 @@ jobs:
           uv run stato-data check-sources --scope data --publish r2 --report reports/data-source-check.json
           echo "changed=$(jq -r .changed reports/data-source-check.json)" >> "$GITHUB_OUTPUT"
       - name: Ingest changed data sources atomically
-        if: steps.preflight.outputs.changed == 'true' || inputs.force
+        if: steps.preflight.outputs.changed == 'true' || inputs.force || inputs.rebuild_historical_bigbang
         run: >-
           uv run stato-data run --publish r2 --scope data
           --plan reports/data-source-check.json
           ${{ inputs.force && '--force' || '' }}
+          ${{ inputs.rebuild_historical_bigbang && '--rebuild-historical-bigbang' || '' }}
