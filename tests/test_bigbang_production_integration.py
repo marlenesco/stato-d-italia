@@ -641,7 +641,13 @@ def test_explicit_historical_only_run_with_unchanged_preflight(tmp_path, monkeyp
     }))
     calls = []
     hydrated = []
-    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda *_: {"schemaVersion": 1, "sources": []})
+    previous_state = {"schemaVersion": 1, "sources": [
+        {**_state_entry("infc-2015-forests/tables.xlsx", "a" * 64), "source_id": "infc-2015-forests"},
+        _state_entry("ispra-bigbang-10/TP_ANNUAL_1951-2025.zip", "b" * 64),
+    ]}
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda *_: previous_state)
+    # Synthetic artifacts bypass domain coherence only; exercise real state merge and local publication.
+    monkeypatch.setattr(cli, "_validate_release_coherence", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "_hydrate", lambda store, root, paths: hydrated.extend(paths))
     monkeypatch.setattr(cli, "_hydrate_planned_raw_dependencies", lambda store, root, families: calls.append(("raw", families)))
     monkeypatch.setattr(cli, "_planned_noop_report", lambda *a, **kw: calls.append("noop") or 0)
@@ -663,15 +669,23 @@ def test_explicit_historical_only_run_with_unchanged_preflight(tmp_path, monkeyp
     delivery_file = root / "delivery/water/index.json"
     def delivery(*args, **kwargs):
         calls.append("water_delivery")
+        delivery_file.parent.mkdir(parents=True, exist_ok=True)
+        delivery_file.write_text("{}")
         return {"changed": True, "files": [delivery_file]}
     monkeypatch.setattr(cli, "generate_water_delivery", delivery)
+    publish_scoped = cli._publish_scoped
     def publish(**kwargs):
         assert kwargs["affected_families"] == {"water_historical", "water_delivery"}
         assert set(kwargs["declared_paths"]) == {root / HISTORICAL_DERIVED_LOGICAL_PATH, delivery_file}
-        assert kwargs["current_state"]["sources"] == []
+        assert kwargs["current_state"] == {"schemaVersion": 1, "sources": []}
         assert kwargs["changed"] is True
         calls.append("publish")
-        return {"releaseId": "r2"}, {}, {"changed": True, "carried": []}
+        result = publish_scoped(**kwargs)
+        assert result[2]["source_state"] == previous_state
+        assert result[0]["releaseId"] == "r2"
+        assert active_release(store)["releaseId"] == "r2"
+        assert json.loads((output / "release-metadata/r2-source-state.json").read_text()) == previous_state
+        return result
     monkeypatch.setattr(cli, "_publish_scoped", publish)
     try:
         assert cli.run(Namespace(
