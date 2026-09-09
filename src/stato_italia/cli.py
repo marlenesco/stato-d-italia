@@ -1304,7 +1304,7 @@ def _run_incremental_data(
     changed_source_ids = {
         str(entry["source_id"]) for entry in planned_entries() if entry.get("status") == "changed"
     }
-    insights_changed = args.force or 2025 in boundary_years or bool(changed_source_ids & {
+    insights_changed = historical_rebuild or args.force or 2025 in boundary_years or bool(changed_source_ids & {
         "ispra-soil-2025", "ispra-bigbang-10",
         "ispra-idrogeo-risk-2024", "ispra-emissions-provincial-2026",
     })
