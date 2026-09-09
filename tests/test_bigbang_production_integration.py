@@ -602,3 +602,20 @@ def test_duplicate_historical_logical_path_fails_before_manifest_update(tmp_path
             ReleaseArtifact(derived, HISTORICAL_DERIVED_LOGICAL_PATH),
         ])
     assert store.read_json("manifest.json") == before
+
+
+def test_historical_reuse_hydrates_active_bytes_and_ignores_unpublished_local(tmp_path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    root = tmp_path / "runner"
+    local = root / HISTORICAL_DERIVED_LOGICAL_PATH
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"unpublished developer artifact")
+    assert cli._hydrate_historical_for_reuse(store, root) is None
+    published = tmp_path / "published.parquet"
+    pd.DataFrame({"reference_year": [2006, 2012]}).to_parquet(published, index=False)
+    publish_release(store, "r1", [ReleaseArtifact(published, HISTORICAL_DERIVED_LOGICAL_PATH)])
+    assert cli._hydrate_historical_for_reuse(store, root) == local
+    assert local.read_bytes() == published.read_bytes()
+    local.unlink()
+    assert cli._hydrate_historical_for_reuse(store, root) == local
+    assert local.read_bytes() == published.read_bytes()

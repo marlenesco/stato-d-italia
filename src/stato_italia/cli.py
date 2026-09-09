@@ -988,6 +988,17 @@ def _historical_boundary_years_from_references(references: Iterable[str | None])
     return years
 
 
+def _hydrate_historical_for_reuse(
+    store: LocalObjectStore | R2ObjectStore, root: Path,
+) -> Path | None:
+    """Ignore runner-local history unless it matches the authoritative active release."""
+    if not _active_release_has_historical(store):
+        return None
+    destination = root / HISTORICAL_DERIVED_LOGICAL_PATH
+    hydrate_active_artifact(store, HISTORICAL_DERIVED_LOGICAL_PATH, destination)
+    return destination
+
+
 def _active_historical_boundary_years(
     store: LocalObjectStore | R2ObjectStore, root: Path,
 ) -> set[int] | None:
@@ -1192,6 +1203,7 @@ def _run_incremental_data(
         run_bigbang_historical_processing(
             root / "raw" / "ispra-bigbang-10", canonical, derived,
             output / "reports" / "bigbang-historical-processing.json",
+            existing_artifact=_hydrate_historical_for_reuse(store, root),
         ) | {"changed": True}
         if historical_rebuild else {"changed": False, "carried": True}
     )
@@ -1498,6 +1510,7 @@ def run(args: argparse.Namespace) -> int:
         run_bigbang_historical_processing(
             root / "raw" / "ispra-bigbang-10", canonical, derived,
             output / "reports" / "bigbang-historical-processing.json",
+            existing_artifact=_hydrate_historical_for_reuse(store, root),
         ) | {"changed": True}
         if historical_rebuild else {"changed": False, "carried": True}
     )

@@ -220,3 +220,124 @@ def test_regional_structural_scale_mismatch_fails_closed() -> None:
     })
     with pytest.raises(ValueError, match="unit-scale mismatch"):
         _reject_structural_regional_mismatch(comparison, "TP", 2015)
+
+
+SUPPORTED_YEARS = [*range(2002, 2011), *range(2012, 2021), *range(2022, 2026)]
+PREVIOUS_YEARS = [2006, 2012, *range(2015, 2021), *range(2022, 2026)]
+
+
+def test_policy_exactly_22_years_including_nonannual_snapshot_exclusions() -> None:
+    from stato_italia.territories import territory_reference_date
+
+    versions = [replace(v, territory_reference_date=territory_reference_date(v.reference_year))
+                for v in _versions(tuple(range(2002, 2027)))]
+    plan = build_bigbang_historical_processing_plan(versions)
+    assert [e.reference_year for e in plan if e.process_provinces] == SUPPORTED_YEARS
+    for year in (2011, 2021):
+        assert next(e for e in plan if e.reference_year == year).support_status == "unsupported_missing_exact_geometry"
+
+
+def _incremental_fixture(tmp_path: Path, years: list[int]):
+    geometry = _write_raster(tmp_path / "grid.asc")
+    canonical = tmp_path / "canonical"
+    _write_historical_canonical(canonical, geometry)
+    for year in years:
+        _write_snapshot(canonical, year, "province", 2 if year != 2016 else 3, geometry)
+    archives = tmp_path / "archives"
+    archives.mkdir()
+    spec = _historical_spec(archives)
+    def run(existing=None):
+        return run_bigbang_historical_processing(
+            archives, canonical, tmp_path / "derived", tmp_path / "report.json",
+            metric_specs={"TP": spec}, existing_artifact=existing,
+        )
+    return geometry, canonical, run
+
+
+def test_expansion_reuses_12_schedules_10_and_future_policy_work(tmp_path, monkeypatch) -> None:
+    import stato_italia.bigbang_historical_processing as processing
+
+    geometry, canonical, run = _incremental_fixture(tmp_path, PREVIOUS_YEARS)
+    bootstrap = run()
+    assert bootstrap["processedProvinceYears"] == PREVIOUS_YEARS
+    assert bootstrap["reusedProvinceYears"] == []
+    path = Path(bootstrap["derivedArtifact"])
+    before = pd.read_parquet(path)
+    for year in sorted(set(SUPPORTED_YEARS) - set(PREVIOUS_YEARS)):
+        _write_snapshot(canonical, year, "province", 2, geometry)
+    calls = []
+    extract = processing.extract_raster
+    def track(*args, **kwargs):
+        calls.append(args[3])
+        return extract(*args, **kwargs)
+    monkeypatch.setattr(processing, "extract_raster", track)
+    report = run(path)
+    expected_new = sorted(set(SUPPORTED_YEARS) - set(PREVIOUS_YEARS))
+    assert calls == report["processedProvinceYears"] == expected_new
+    assert report["reusedProvinceYears"] == PREVIOUS_YEARS
+    merged = pd.read_parquet(path)
+    assert sorted(merged.reference_year.unique()) == SUPPORTED_YEARS
+    assert not merged.duplicated(["reference_year", "territory_version_id", "derived_metric_id"]).any()
+    pd.testing.assert_frame_equal(
+        merged[merged.reference_year.isin(PREVIOUS_YEARS)].reset_index(drop=True), before,
+    )
+    calls.clear()
+    unchanged_sha = sha256_file(path)
+    assert run(path)["processedProvinceYears"] == []
+    assert calls == []
+    assert sha256_file(path) == unchanged_sha
+    _write_snapshot(canonical, 2001, "province", 2, geometry)
+    future = run(path)
+    assert future["processedProvinceYears"] == calls == [2001]
+    assert future["reusedProvinceYears"] == SUPPORTED_YEARS
+
+
+@pytest.mark.parametrize(("column", "value"), [
+    ("source_dataset_version", "stale"), ("source_dataset_id", "stale"),
+    ("algorithm_version", "stale"), ("unit_ucum", "m"),
+    ("derived_metric_id", "stale"), ("source_asset_sha256", "a" * 64),
+    ("source_raster_sha256", "b" * 64), ("source_raster_locator", "wrong-year.asc"),
+    ("territory_geometry_reference", "canonical/territories/reference_year=2025/province.parquet"),
+    ("territory_geometry_sha256", "c" * 64),
+    ("territory_version_id", "it:province:001@2025-01-01"),
+    ("derived_observation_id", "stale"), ("value_decimal", None),
+])
+def test_incompatible_year_is_recomputed(tmp_path, column, value) -> None:
+    _, _, run = _incremental_fixture(tmp_path, [2015, 2016])
+    path = Path(run()["derivedArtifact"])
+    rows = pd.read_parquet(path)
+    rows.loc[rows.reference_year == 2015, column] = value
+    rows.to_parquet(path, index=False)
+    report = run(path)
+    assert report["processedProvinceYears"] == [2015]
+    assert report["reusedProvinceYears"] == [2016]
+
+
+@pytest.mark.parametrize("damage", ["duplicate", "missing", "geometry"])
+def test_incomplete_or_changed_geometry_year_rebuilt(tmp_path, damage) -> None:
+    _, canonical, run = _incremental_fixture(tmp_path, [2015, 2016])
+    path = Path(run()["derivedArtifact"])
+    rows = pd.read_parquet(path)
+    if damage == "duplicate":
+        rows = pd.concat([rows, rows.iloc[:1]], ignore_index=True)
+    elif damage == "missing":
+        rows = rows.iloc[1:]
+    else:
+        _write_snapshot(canonical, 2015, "province", 2, box(10, 45, 10.005, 45.005))
+    rows.to_parquet(path, index=False)
+    assert run(path)["processedProvinceYears"] == [2015]
+
+
+def test_failed_rebuild_keeps_previous_artifact(tmp_path, monkeypatch) -> None:
+    import stato_italia.bigbang_historical_processing as processing
+
+    geometry, canonical, run = _incremental_fixture(tmp_path, [2015, 2016])
+    path = Path(run()["derivedArtifact"])
+    before = path.read_bytes()
+    _write_snapshot(canonical, 2014, "province", 2, geometry)
+    def fail(*args, **kwargs):
+        raise ValueError("synthetic processing failure")
+    monkeypatch.setattr(processing, "extract_raster", fail)
+    with pytest.raises(ValueError, match="synthetic processing failure"):
+        run(path)
+    assert path.read_bytes() == before
