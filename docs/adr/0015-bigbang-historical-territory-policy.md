@@ -16,14 +16,24 @@ delivery e non pubblica su R2.
 ## Inventario canonical locale
 
 L'ispezione di `data/canonical/territories/` ha trovato i reference year
-`2006`, `2012`, `2015`–`2025`. Per ogni snapshot sono presenti i livelli
+`2002`–`2010` e `2012`–`2026`. Per ogni snapshot sono presenti i livelli
 `region`, `province` e `municipality`; la geometria è nel rispettivo
 `canonical/territories/reference_year=YYYY/{level}.parquet`.
 
 | Reference year | Regioni | Province | Comuni |
 | --- | ---: | ---: | ---: |
+| 2002 | 20 | 103 | 8.102 |
+| 2003 | 20 | 103 | 8.101 |
+| 2004 | 20 | 103 | 8.100 |
+| 2005 | 20 | 103 | 8.101 |
 | 2006 | 20 | 107 | 8.101 |
+| 2007 | 20 | 107 | 8.101 |
+| 2008 | 20 | 107 | 8.101 |
+| 2009 | 20 | 107 | 8.100 |
+| 2010 | 20 | 110 | 8.094 |
 | 2012 | 20 | 110 | 8.092 |
+| 2013 | 20 | 110 | 8.092 |
+| 2014 | 20 | 110 | 8.071 |
 | 2015 | 20 | 110 | 8.048 |
 | 2016 | 20 | 110 | 8.003 |
 | 2017 | 20 | 107 | 7.983 |
@@ -35,15 +45,16 @@ L'ispezione di `data/canonical/territories/` ha trovato i reference year
 | 2023 | 20 | 107 | 7.901 |
 | 2024 | 20 | 107 | 7.899 |
 | 2025 | 20 | 107 | 7.896 |
+| 2026 | 20 | 110 | 7.896 |
 
 Ogni feature conserva un `territory_version_id` nel formato
 `it:{level}:{istat_code}@{reference_date}`; l'artifact di supporto registra per
 ogni snapshot il pattern, un campione di ID e la geometry reference.
 
-Il canonical locale etichetta il file 2021 con `reference_date=2021-01-01`.
-La fonte ISTAT dichiara invece il 31 dicembre 2021. La policy lo esclude fino a
-un re-ingest che allinei metadata e `territory_version_id`: non è lecito
-reinterpretare implicitamente quel file.
+La fonte ISTAT dichiara il 2011 come snapshot censuario al 9 ottobre e il 2021
+come snapshot al 31 dicembre. Anche con metadata e `territory_version_id`
+corretti, questi snapshot puntuali non dimostrano da soli una validità ufficiale
+per l'intero periodo annuale BIGBANG e restano esclusi dalla policy annuale.
 
 ## Fonti ufficiali ISTAT verificate
 
@@ -69,9 +80,11 @@ Non scarica raster, non calcola zonal statistics e non pubblica.
 | Comuni | `unsupported_methodology`: fuori scope per il gate BIGBANG `> 100 km2` già accettato in ADR 0014. |
 
 Una versione exact-year è valida solo se `territory_reference_date` coincide con
-la data ISTAT ufficialmente attesa: per il 2021 è `2021-12-31`, negli snapshot
-annuali ordinari è `YYYY-01-01`. Una data diversa è un errore fail-closed, anche
-quando il `reference_year` coincide.
+la data ISTAT ufficialmente attesa: per il 2011 è `2011-10-09`, per il 2021 è
+`2021-12-31`, negli snapshot annuali ordinari è `YYYY-01-01`. Una data diversa è
+un errore fail-closed, anche quando il `reference_year` coincide. Gli snapshot
+puntuali 2011 e 2021 non abilitano una derivazione annuale in assenza di un
+intervallo di validità ufficiale documentato.
 
 Non esistono fallback nearest-year, current-boundary backfill o crosswalk
 inventati. Exact-year e intervallo documentato non hanno priorità reciproca:
@@ -79,10 +92,10 @@ più versioni esatte, più intervalli sovrapposti oppure una versione exact-year
 insieme a un intervallo valido per lo stesso anno sono ambiguità e fanno fallire
 la policy, non una scelta arbitraria.
 
-Con l'inventario corrente risultano supportate per le Province 12 annualità:
-`2006`, `2012`, `2015`–`2020`, `2022`–`2025`. Restano non supportate 63
-annualità, incluso il 2021 per l'incoerenza metadata descritta sopra. Non sono
-stati registrati intervalli ufficiali documentati nel progetto.
+Con l'inventario corrente risultano supportate per le Province 22 annualità:
+`2002`–`2010`, `2012`–`2020`, `2022`–`2025`. Restano non supportate 53
+annualità, inclusi il 2011 e il 2021 perché snapshot non annuali. Non sono stati
+registrati intervalli ufficiali documentati nel progetto.
 
 ## Support matrix locale
 
@@ -105,8 +118,8 @@ La matrice contiene 300 righe (75 anni × Italia, Regioni, Province e Comuni) co
   matrice dichiara `derived_supported` al momento della sua esecuzione.
 - L'eventuale acquisizione di altri confini ISTAT deve aggiungere contratti,
   provenance, date di riferimento esatte e test prima di cambiare la matrice.
-- Il riallineamento del metadata 2021 richiede un re-ingest esplicito e non una
-  correzione retroattiva silenziosa dei risultati.
+- L'acquisizione corretta degli snapshot 2011 e 2021 non li rende automaticamente
+  geometrie annuali BIGBANG; servirebbe un intervallo ufficiale documentato.
 - Non viene prodotto alcun dato BIGBANG comunale.
 
 ## Implementazione locale Task 4
