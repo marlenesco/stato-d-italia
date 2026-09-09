@@ -132,11 +132,47 @@ def test_bigbang_source_state_bootstrap_adds_only_missing_registered_assets() ->
         assert {source_family(entry["source_id"]) for entry in changed_source_entries(complete, candidate)} == {"water"}
 
 
-def test_historical_rebuild_dependency_is_water_or_boundaries_only() -> None:
-    assert cli._historical_water_affected({"water"}) is True
-    assert cli._historical_water_affected({"boundaries"}) is True
-    assert cli._historical_water_affected({"soil"}) is False
-    assert cli._historical_water_affected({"dissesto", "emissions"}) is False
+def test_historical_boundary_years_are_extracted_from_exact_canonical_references() -> None:
+    assert cli._historical_boundary_years_from_references([
+        "canonical/territories/reference_year=2006/province.parquet",
+        "canonical/territories/reference_year=2015/province.parquet#some-fragment",
+        "canonical/territories/reference_year=2025/province.parquet",
+        None,
+    ]) == {2006, 2015, 2025}
+
+
+@pytest.mark.parametrize("reference", [
+    "canonical/territories/2006/province.parquet",
+    "canonical/territories/reference_year=2006ish/province.parquet",
+    "canonical/territories/reference_year=2006/unknown.geojson",
+    "elsewhere/reference_year=2006/province.parquet",
+])
+def test_historical_boundary_dependency_parser_fails_closed(reference: str) -> None:
+    with pytest.raises(ValueError, match="Malformed BIGBANG historical territory geometry reference"):
+        cli._historical_boundary_years_from_references([reference])
+
+
+def test_active_historical_boundary_years_hydrates_authoritative_release(
+    tmp_path: Path,
+) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    published = tmp_path / "published.parquet"
+    pd.DataFrame({"territory_geometry_reference": [
+        "canonical/territories/reference_year=2006/province.parquet",
+        "canonical/territories/reference_year=2015/province.parquet#it:province:001@2015-01-01",
+    ]}).to_parquet(published, index=False)
+    publish_release(store, "r1", [ReleaseArtifact(published, HISTORICAL_DERIVED_LOGICAL_PATH)])
+    root = tmp_path / "data"
+    stale = root / HISTORICAL_DERIVED_LOGICAL_PATH
+    stale.parent.mkdir(parents=True)
+    pd.DataFrame({"territory_geometry_reference": [
+        "canonical/territories/reference_year=2025/province.parquet",
+    ]}).to_parquet(stale, index=False)
+
+    assert cli._active_historical_boundary_years(store, root) == {2006, 2015}
+    assert cli._historical_boundary_years_from_references(
+        pd.read_parquet(stale)["territory_geometry_reference"].tolist()
+    ) == {2006, 2015}
 
 
 def test_historical_rebuild_policy_covers_full_scope_all_and_legacy_bootstrap() -> None:
@@ -147,9 +183,6 @@ def test_historical_rebuild_policy_covers_full_scope_all_and_legacy_bootstrap() 
         scope="data", incremental=True, affected_source_families={"water"}, active_release_has_historical=True,
     ) is True
     assert cli.should_build_historical_water(
-        scope="data", incremental=True, affected_source_families={"boundaries"}, active_release_has_historical=True,
-    ) is True
-    assert cli.should_build_historical_water(
         scope="data", incremental=False, affected_source_families=set(), active_release_has_historical=True,
     ) is True
     assert cli.should_build_historical_water(
@@ -158,6 +191,121 @@ def test_historical_rebuild_policy_covers_full_scope_all_and_legacy_bootstrap() 
     assert cli.should_build_historical_water(
         scope="data", incremental=True, affected_source_families={"soil"}, active_release_has_historical=False,
     ) is True
+
+
+def test_incremental_historical_rebuild_uses_active_boundary_dependency_intersection() -> None:
+    h1e_years = {2002, 2003, 2004, 2005, 2007, 2008, 2009, 2010, 2013, 2014, 2026}
+    active_years = {2006, 2012, 2015, 2016, 2017, 2018, 2019, 2020, 2022, 2023, 2024, 2025}
+
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"boundaries"},
+        active_release_has_historical=True, changed_boundary_years=h1e_years,
+        active_historical_boundary_years=active_years,
+    ) is False
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"boundaries"},
+        active_release_has_historical=True, changed_boundary_years={2015},
+        active_historical_boundary_years=active_years,
+    ) is True
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"boundaries"},
+        active_release_has_historical=True, changed_boundary_years={2021},
+        active_historical_boundary_years=active_years,
+    ) is False
+    assert cli.should_build_historical_water(
+        scope="data", incremental=True, affected_source_families={"boundaries"},
+        active_release_has_historical=True, changed_boundary_years={2002},
+        active_historical_boundary_years={*active_years, 2002},
+    ) is True
+
+
+def test_incremental_boundary_rebuild_decision_requires_published_dependencies() -> None:
+    with pytest.raises(ValueError, match="lacks active historical dependencies"):
+        cli.should_build_historical_water(
+            scope="data", incremental=True, affected_source_families={"boundaries"},
+            active_release_has_historical=True, changed_boundary_years={2002},
+        )
+
+
+def test_h1e_boundary_only_incremental_run_carries_historical_without_processing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    output = tmp_path / "artifacts"
+    store = LocalObjectStore(output / "object-store")
+    active_years = (2006, 2012, 2015, 2016, 2017, 2018, 2019, 2020, 2022, 2023, 2024, 2025)
+    published = tmp_path / "active-historical.parquet"
+    pd.DataFrame({"territory_geometry_reference": [
+        f"canonical/territories/reference_year={year}/province.parquet#test"
+        for year in active_years
+    ]}).to_parquet(published, index=False)
+    publish_release(store, "r1", [ReleaseArtifact(published, HISTORICAL_DERIVED_LOGICAL_PATH)])
+    active_historical = next(
+        item for item in active_release(store)["objects"]
+        if item["logicalPath"] == HISTORICAL_DERIVED_LOGICAL_PATH
+    )
+    h1e_years = (2002, 2003, 2004, 2005, 2007, 2008, 2009, 2010, 2013, 2014, 2026)
+    plan_path = tmp_path / "h1e-plan.json"
+    plan_path.write_text(json.dumps({
+        "schemaVersion": 1,
+        "activeReleaseId": "r1",
+        "scope": "data",
+        "sourceChecks": len(h1e_years),
+        "sourcesChanged": len(h1e_years),
+        "sourcesUnchanged": 0,
+        "sourcesUnverifiable": 0,
+        "changed": True,
+        "sources": [{
+            "source_id": cli.BOUNDARY_SOURCE_ID,
+            "asset_path": cli.boundary_asset_path(year),
+            "status": "changed",
+        } for year in h1e_years],
+    }))
+    load_ingestion_plan(plan_path, scope="data", active_release_id="r1", raw_root=root / "raw")
+    processing_calls: list[object] = []
+    publication: dict[str, object] = {}
+    monkeypatch.setattr(cli, "_hydrate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "ingest_boundaries", lambda *_args, **_kwargs: {
+        "changed": True, "years": [], "errors": [],
+    })
+    monkeypatch.setattr(cli, "run_bigbang_historical_processing", lambda *_args, **_kwargs: processing_calls.append(True))
+    monkeypatch.setattr(cli, "build_source_state_from_metadata_paths", lambda *_args, **_kwargs: {
+        "schemaVersion": 1, "sources": [],
+    })
+
+    def fake_publish_scoped(**kwargs: object) -> tuple[dict, dict, dict]:
+        affected = set(kwargs["affected_families"])
+        declared = list(kwargs["declared_paths"])
+        carried = carry_forward_active_artifacts(
+            store, set(), scope="data", affected_families=affected,
+        )
+        publication.update({"affected": affected, "declared": declared, "carried": carried})
+        return {"releaseId": "r2"}, {}, {
+            "changed": True, "carried": [item.logical_path for item in carried],
+        }
+
+    monkeypatch.setattr(cli, "_publish_scoped", fake_publish_scoped)
+    try:
+        assert cli._run_incremental_data(
+            type("Args", (), {
+                "force": False, "offline": False, "report": str(tmp_path / "report.json"),
+            })(),
+            root=root, output=output, canonical=root / "canonical", derived=root / "derived",
+            delivery=root / "delivery", store=store, previous_state={"schemaVersion": 1, "sources": []},
+            release_id="r2", started=0.0, started_at="2026-09-09T00:00:00Z",
+        ) == 0
+    finally:
+        clear_ingestion_plan()
+
+    assert processing_calls == []
+    assert "water_historical" not in publication["affected"]
+    assert root / HISTORICAL_DERIVED_LOGICAL_PATH not in publication["declared"]
+    carried_historical = next(
+        item for item in publication["carried"]
+        if item.logical_path == HISTORICAL_DERIVED_LOGICAL_PATH
+    )
+    assert carried_historical.key == active_historical["key"]
+    assert carried_historical.sha256 == active_historical["sha256"]
 
 
 def test_canonical_water_provenance_accepts_only_the_two_workbooks(tmp_path: Path) -> None:

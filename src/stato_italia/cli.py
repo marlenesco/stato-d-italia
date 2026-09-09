@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 from collections.abc import Iterable
@@ -970,20 +971,61 @@ _DATA_DELIVERY_FAMILY = {
 }
 
 _FOREST_BOUNDARY_REFERENCE_YEARS = frozenset({2015, 2018, 2021, 2023})
+_HISTORICAL_TERRITORY_REFERENCE = re.compile(
+    r"^canonical/territories/reference_year=(?P<year>\d{4})/"
+    r"(?:municipality|province|region)\.parquet(?:#.*)?$"
+)
 
 
-def _historical_water_affected(source_families: set[str]) -> bool:
-    """Historical provincial zonals depend on both BIGBANG water and ISTAT boundaries."""
-    return bool({"water", "boundaries"} & source_families)
+def _historical_boundary_years_from_references(references: Iterable[str | None]) -> set[int]:
+    years: set[int] = set()
+    for reference in references:
+        if reference is None:
+            continue
+        if not isinstance(reference, str) or not (match := _HISTORICAL_TERRITORY_REFERENCE.fullmatch(reference)):
+            raise ValueError(f"Malformed BIGBANG historical territory geometry reference: {reference!r}")
+        years.add(int(match.group("year")))
+    return years
+
+
+def _active_historical_boundary_years(
+    store: LocalObjectStore | R2ObjectStore, root: Path,
+) -> set[int] | None:
+    """Read exact boundary dependencies from the active published historical artifact."""
+    release = active_release(store)
+    if release is None:
+        return None
+    matches = [
+        item for item in release.get("objects", [])
+        if item.get("logicalPath") == HISTORICAL_DERIVED_LOGICAL_PATH
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Active release has duplicate BIGBANG historical derived artifacts")
+    destination = root / HISTORICAL_DERIVED_LOGICAL_PATH
+    hydrate_active_artifact(store, HISTORICAL_DERIVED_LOGICAL_PATH, destination)
+    references = pd.read_parquet(
+        destination, columns=["territory_geometry_reference"],
+    )["territory_geometry_reference"]
+    return _historical_boundary_years_from_references(references.dropna().tolist())
 
 
 def should_build_historical_water(
-    *, scope: str, incremental: bool, affected_source_families: set[str], active_release_has_historical: bool,
+    *, scope: str, incremental: bool, affected_source_families: set[str],
+    active_release_has_historical: bool, changed_boundary_years: set[int] | None = None,
+    active_historical_boundary_years: set[int] | None = None,
 ) -> bool:
     """Decide historical BIGBANG membership without depending on local artifacts."""
     if scope == "all" or not incremental or not active_release_has_historical:
         return True
-    return _historical_water_affected(affected_source_families)
+    if "water" in affected_source_families:
+        return True
+    if "boundaries" not in affected_source_families:
+        return False
+    if changed_boundary_years is None or active_historical_boundary_years is None:
+        raise ValueError("Incremental boundary rebuild decision lacks active historical dependencies")
+    return bool(changed_boundary_years & active_historical_boundary_years)
 
 
 def _active_release_has_historical(store: LocalObjectStore | R2ObjectStore) -> bool:
@@ -1102,9 +1144,17 @@ def _run_incremental_data(
         families = {"boundaries", "soil", "water", "dissesto", "emissions"}
         boundary_years = set(SOURCE_YEARS)
     delivery_families, geometry_families = _data_downstream_families(families, boundary_years)
+    active_has_historical = _active_release_has_historical(store)
+    active_historical_boundary_years = (
+        _active_historical_boundary_years(store, root)
+        if active_has_historical and "boundaries" in families and "water" not in families
+        else None
+    )
     historical_rebuild = should_build_historical_water(
         scope="data", incremental=True, affected_source_families=families,
-        active_release_has_historical=_active_release_has_historical(store),
+        active_release_has_historical=active_has_historical,
+        changed_boundary_years=boundary_years,
+        active_historical_boundary_years=active_historical_boundary_years,
     )
     if historical_rebuild:
         delivery_families.add("water_delivery")
