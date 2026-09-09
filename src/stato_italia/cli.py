@@ -37,7 +37,7 @@ from .dissesto_delivery import generate_dissesto_delivery
 from .release import CarriedArtifact, LocalObjectStore, R2ObjectStore, ReleaseArtifact, active_release, active_source_state, artifact_scope, carry_forward_active_artifacts, hydrate_active_artifact, publish_release, rollback
 from .source_state import SOURCE_STATE_LOGICAL_PATH, build_source_state_from_metadata_paths, changed_source_entries, check_persisted_sources, comparable_state, merge_source_families, merge_source_states, scoped_source_state, source_family, source_state_changed, source_state_counts, source_state_entry
 from .soil import ingest_soil
-from .territories import SOURCE_YEARS, ingest_boundaries
+from .territories import BOUNDARY_SOURCE_ID, SOURCE_YEARS, boundary_asset_path, ingest_boundaries
 from .water import bigbang_raw_assets, ingest_water
 from .water_delivery import generate_water_delivery
 from .tiles import build_pmtiles, is_readable_pmtiles
@@ -224,23 +224,41 @@ def _hydrate_planned_raw_dependencies(
     _hydrate(store, root, sorted(set(logical_paths)))
 
 
-def _missing_bigbang_source_plan_entries(state: dict | None) -> list[dict]:
-    """Make new registry assets visible to preflight before their first release."""
+def _missing_registered_source_plan_entries(
+    state: dict | None, *, source_id: str, asset_paths: Iterable[str],
+) -> list[dict]:
+    """Make newly registered assets visible before their first persisted release."""
     existing = {
-        str(entry.get("asset_path"))
+        str(entry.get("asset_path", entry.get("assetPath")))
         for entry in (state or {}).get("sources", [])
-        if entry.get("source_id") == "ispra-bigbang-10"
+        if entry.get("source_id", entry.get("sourceId")) == source_id
     }
     return [
         {
-            "source_id": "ispra-bigbang-10",
-            "asset_path": f"ispra-bigbang-10/{name}",
+            "source_id": source_id,
+            "asset_path": asset_path,
             "status": "changed",
             "reason": "registered_asset_missing_from_persisted_source_state",
         }
-        for name in bigbang_raw_assets()
-        if f"ispra-bigbang-10/{name}" not in existing
+        for asset_path in asset_paths
+        if asset_path not in existing
     ]
+
+
+def _missing_bigbang_source_plan_entries(state: dict | None) -> list[dict]:
+    return _missing_registered_source_plan_entries(
+        state,
+        source_id="ispra-bigbang-10",
+        asset_paths=(f"ispra-bigbang-10/{name}" for name in bigbang_raw_assets()),
+    )
+
+
+def _missing_boundary_source_plan_entries(state: dict | None) -> list[dict]:
+    return _missing_registered_source_plan_entries(
+        state,
+        source_id=BOUNDARY_SOURCE_ID,
+        asset_paths=(boundary_asset_path(year) for year in SOURCE_YEARS),
+    )
 
 
 def _planned_noop_report(
@@ -1054,6 +1072,24 @@ def _data_downstream_families(
     return delivery_families, geometry_families
 
 
+def _incremental_territory_hydration_years(
+    source_families: set[str], boundary_years: set[int], *, historical_rebuild: bool,
+) -> set[int]:
+    """Hydrate reusable snapshots, never new/changed boundary years absent upstream."""
+    years: set[int] = set(SOURCE_YEARS) if "boundaries" in source_families else set()
+    if "soil" in source_families or "water" in source_families:
+        years.add(2025)
+    if "dissesto" in source_families:
+        years.add(2024)
+    if "emissions" in source_families:
+        years.update((2019, 2023))
+    if historical_rebuild:
+        years.update(SOURCE_YEARS)
+    if "boundaries" in source_families:
+        years.difference_update(boundary_years)
+    return years
+
+
 def _run_incremental_data(
     args: argparse.Namespace, *, root: Path, output: Path, canonical: Path, derived: Path, delivery: Path,
     store: LocalObjectStore | R2ObjectStore, previous_state: dict | None, release_id: str,
@@ -1075,15 +1111,9 @@ def _run_incremental_data(
     # Historical BIGBANG uses all five archives even when only boundaries changed.
     _hydrate_planned_raw_dependencies(store, root, families | ({"water"} if historical_rebuild else set()))
 
-    territory_years: set[int] = set(SOURCE_YEARS) if "boundaries" in families else set()
-    if "soil" in families or "water" in families:
-        territory_years.add(2025)
-    if "dissesto" in families:
-        territory_years.add(2024)
-    if "emissions" in families:
-        territory_years.update((2019, 2023))
-    if historical_rebuild:
-        territory_years.update(SOURCE_YEARS)
+    territory_years = _incremental_territory_hydration_years(
+        families, boundary_years, historical_rebuild=historical_rebuild,
+    )
     if territory_years:
         _hydrate(store, root, _territory_logical_paths(sorted(territory_years)))
 
@@ -1711,13 +1741,20 @@ def main() -> int:
         if domain is not None:
             result["domain"] = domain.name
         if args.scope == "data":
+            missing_boundaries = _missing_boundary_source_plan_entries(persisted)
             missing_bigbang = _missing_bigbang_source_plan_entries(persisted)
-            if missing_bigbang:
-                result["sources"].extend(missing_bigbang)
-                result["sourceChecks"] += len(missing_bigbang)
-                result["sourcesChanged"] += len(missing_bigbang)
+            missing_registered = [*missing_boundaries, *missing_bigbang]
+            if missing_registered:
+                result["sources"].extend(missing_registered)
+                result["sourceChecks"] += len(missing_registered)
+                result["sourcesChanged"] += len(missing_registered)
                 result["changed"] = True
-                result["reason"] = "registered_bigbang_assets_missing_from_persisted_source_state"
+                if missing_boundaries and missing_bigbang:
+                    result["reason"] = "registered_assets_missing_from_persisted_source_state"
+                elif missing_boundaries:
+                    result["reason"] = "registered_boundary_assets_missing_from_persisted_source_state"
+                else:
+                    result["reason"] = "registered_bigbang_assets_missing_from_persisted_source_state"
         result["schemaVersion"] = PLAN_SCHEMA_VERSION
         result["activeReleaseId"] = release.get("releaseId") if release else None
         if args.scope == "geospatial":

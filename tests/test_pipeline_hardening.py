@@ -426,6 +426,79 @@ def _raw(root: Path, logical_path: str) -> tuple[Path, Path]:
     return raw, sidecar
 
 
+def test_boundary_source_state_bootstrap_adds_only_new_registered_years() -> None:
+    new_years = {2002, 2003, 2004, 2005, 2007, 2008, 2009, 2010, 2013, 2014, 2026}
+    persisted = {"schemaVersion": 1, "sources": [
+        _entry(
+            "istat-administrative-boundaries",
+            cli.boundary_asset_path(year),
+            f"{index:x}" * 64,
+        )
+        for index, year in enumerate((year for year in cli.SOURCE_YEARS if year not in new_years), start=1)
+    ]}
+
+    missing = cli._missing_boundary_source_plan_entries(persisted)
+
+    assert [entry["asset_path"] for entry in missing] == [
+        cli.boundary_asset_path(year) for year in cli.SOURCE_YEARS if year in new_years
+    ]
+    assert {entry["status"] for entry in missing} == {"changed"}
+    complete = {"schemaVersion": 1, "sources": [
+        _entry("istat-administrative-boundaries", cli.boundary_asset_path(year), "a" * 64)
+        for year in cli.SOURCE_YEARS
+    ]}
+    assert cli._missing_boundary_source_plan_entries(complete) == []
+
+
+def test_data_preflight_marks_missing_boundary_assets_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    new_years = {2002, 2003, 2004, 2005, 2007, 2008, 2009, 2010, 2013, 2014, 2026}
+    persisted = {"schemaVersion": 1, "sources": [
+        *[
+            _entry("istat-administrative-boundaries", cli.boundary_asset_path(year), "a" * 64)
+            for year in cli.SOURCE_YEARS if year not in new_years
+        ],
+        *[
+            _entry("ispra-bigbang-10", f"ispra-bigbang-10/{name}", "b" * 64)
+            for name in cli.bigbang_raw_assets()
+        ],
+    ]}
+    monkeypatch.setattr(cli, "load_local_env", lambda: None)
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda _store: persisted)
+    monkeypatch.setattr(cli, "active_release", lambda _store: {"releaseId": "r1"})
+    monkeypatch.setattr(cli, "check_persisted_sources", lambda *_args, **_kwargs: {
+        "scope": "data", "sourceChecks": 0, "sourcesChanged": 0,
+        "sourcesUnchanged": 0, "sourcesUnverifiable": 0, "changed": False, "sources": [],
+    })
+    monkeypatch.setattr(sys, "argv", [
+        "stato-data", "check-sources", "--scope", "data", "--workdir", str(tmp_path),
+    ])
+
+    assert cli.main() == 0
+
+    report = json.loads(capsys.readouterr().out)
+    missing = [
+        entry for entry in report["sources"]
+        if entry["source_id"] == "istat-administrative-boundaries"
+    ]
+    assert report["changed"] is True
+    assert report["reason"] == "registered_boundary_assets_missing_from_persisted_source_state"
+    assert report["sourcesChanged"] == len(new_years)
+    assert {cli._boundary_reference_year(entry["asset_path"]) for entry in missing} == new_years
+
+
+def test_incremental_hydration_excludes_new_or_changed_boundary_snapshots() -> None:
+    changed = {2002, 2005, 2010, 2026}
+
+    hydrated = cli._incremental_territory_hydration_years(
+        {"boundaries"}, changed, historical_rebuild=True,
+    )
+
+    assert hydrated == set(cli.SOURCE_YEARS) - changed
+    assert {2006, 2012, 2021, 2025} <= hydrated
+
+
 def test_legacy_active_release_bootstraps_source_state_from_raw_sidecars(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path / "store")
     raw = tmp_path / "source.xlsx"
