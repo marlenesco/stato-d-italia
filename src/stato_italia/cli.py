@@ -1161,7 +1161,7 @@ def _run_incremental_data(
         if active_has_historical and "boundaries" in families and "water" not in families
         else None
     )
-    historical_rebuild = should_build_historical_water(
+    historical_rebuild = getattr(args, "rebuild_historical_bigbang", False) or should_build_historical_water(
         scope="data", incremental=True, affected_source_families=families,
         active_release_has_historical=active_has_historical,
         changed_boundary_years=boundary_years,
@@ -1345,7 +1345,10 @@ def _run_incremental_data(
         "dissesto": dissesto_fetch,
     })
     metadata_paths = [path for path in raw_declarations if path.name.endswith(".metadata.json")]
-    current_state = build_source_state_from_metadata_paths(root / "raw", metadata_paths)
+    current_state = (
+        build_source_state_from_metadata_paths(root / "raw", metadata_paths)
+        if families else previous_state
+    )
     canonical_by_family = {
         "boundaries": [*_territory_paths(canonical)],
         "soil": [canonical / "soil/dataset_version=2025-2024-observations/observations.parquet", derived / "soil/algorithm_version=soil-analytics-v1/analytics.parquet"],
@@ -1442,6 +1445,10 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("Validation-only runs require local candidate output")
     domain = _domain_processing(args)
     args.scope = _execution_scope(args, domain)
+    if getattr(args, "rebuild_historical_bigbang", False) and (
+        args.scope != "data" or domain is not None or not getattr(args, "plan", None)
+    ):
+        raise ValueError("--rebuild-historical-bigbang requires --scope data and --plan without --domain")
     started = time.monotonic()
     started_at = now_iso()
     root = Path(args.workdir)
@@ -1466,7 +1473,7 @@ def run(args: argparse.Namespace) -> int:
         )
         if domain is not None:
             _validate_domain_plan(domain)
-        if not active_ingestion_plan().get("changed") and not args.force:
+        if not active_ingestion_plan().get("changed") and not args.force and not getattr(args, "rebuild_historical_bigbang", False):
             return _planned_noop_report(
                 args, store, reference_store=hydrate_store, started=started, started_at=started_at,
             )
@@ -1752,6 +1759,7 @@ def main() -> int:
     run_parser.add_argument("--hydrate-from", choices=("local", "r2"), default="local", help="read active artifacts from a separate store; R2 is read-only candidate input")
     run_parser.add_argument("--validation-only", action="store_true", help="write candidate files locally without creating a release or updating any manifest")
     run_parser.add_argument("--force", action="store_true", help="reprocess unchanged source assets; manual recovery only")
+    run_parser.add_argument("--rebuild-historical-bigbang", action="store_true", help="rebuild historical BIGBANG and water delivery; requires --scope data and --plan")
     run_parser.add_argument("--offline", action="store_true", help="use only pre-existing official raw assets; never make HTTP requests")
     run_parser.add_argument("--scope", choices=("all", "data", "geospatial"), default="all", help="workflow ownership; data reuses validated geospatial canonical")
     run_parser.add_argument("--domain", choices=tuple(DOMAIN_PROCESSING), help="process one domain without widening to its whole scope")

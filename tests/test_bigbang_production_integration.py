@@ -619,3 +619,72 @@ def test_historical_reuse_hydrates_active_bytes_and_ignores_unpublished_local(tm
     local.unlink()
     assert cli._hydrate_historical_for_reuse(store, root) == local
     assert local.read_bytes() == published.read_bytes()
+
+
+@pytest.mark.parametrize("rebuild", [False, True])
+def test_explicit_historical_only_run_with_unchanged_preflight(tmp_path, monkeypatch, rebuild) -> None:
+    from argparse import Namespace
+
+    root = tmp_path / "data"
+    output = tmp_path / "artifacts"
+    store = LocalObjectStore(output / "object-store")
+    published = tmp_path / "history.parquet"
+    pd.DataFrame({"territory_geometry_reference": [
+        "canonical/territories/reference_year=2006/province.parquet#test",
+    ]}).to_parquet(published, index=False)
+    publish_release(store, "r1", [ReleaseArtifact(published, HISTORICAL_DERIVED_LOGICAL_PATH)])
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schemaVersion": 1, "activeReleaseId": "r1", "scope": "data",
+        "sourceChecks": 0, "sourcesChanged": 0, "sourcesUnchanged": 0,
+        "sourcesUnverifiable": 0, "changed": False, "sources": [],
+    }))
+    calls = []
+    hydrated = []
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda *_: {"schemaVersion": 1, "sources": []})
+    monkeypatch.setattr(cli, "_hydrate", lambda store, root, paths: hydrated.extend(paths))
+    monkeypatch.setattr(cli, "_hydrate_planned_raw_dependencies", lambda store, root, families: calls.append(("raw", families)))
+    monkeypatch.setattr(cli, "_planned_noop_report", lambda *a, **kw: calls.append("noop") or 0)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Historical trigger must not run unrelated processing or source ingestion")
+    for name in (
+        "ingest_boundaries", "ingest_soil", "ingest_water", "ingest_emissions",
+        "ingest_national_emissions", "ingest_dissesto", "fetch_dissesto", "build_soil_analytics",
+        "generate_soil_delivery", "generate_dissesto_delivery", "generate_emissions_delivery",
+        "generate_territory_delivery", "generate_territory_insights_delivery", "build_pmtiles",
+    ):
+        monkeypatch.setattr(cli, name, forbidden)
+    def process(archives, canonical, derived, report, *, existing_artifact):
+        assert existing_artifact == root / HISTORICAL_DERIVED_LOGICAL_PATH
+        assert existing_artifact.read_bytes() == published.read_bytes()
+        calls.append("historical")
+        return {"derivedArtifact": str(existing_artifact)}
+    monkeypatch.setattr(cli, "run_bigbang_historical_processing", process)
+    delivery_file = root / "delivery/water/index.json"
+    def delivery(*args, **kwargs):
+        calls.append("water_delivery")
+        return {"changed": True, "files": [delivery_file]}
+    monkeypatch.setattr(cli, "generate_water_delivery", delivery)
+    def publish(**kwargs):
+        assert kwargs["affected_families"] == {"water_historical", "water_delivery"}
+        assert set(kwargs["declared_paths"]) == {root / HISTORICAL_DERIVED_LOGICAL_PATH, delivery_file}
+        assert kwargs["current_state"]["sources"] == []
+        assert kwargs["changed"] is True
+        calls.append("publish")
+        return {"releaseId": "r2"}, {}, {"changed": True, "carried": []}
+    monkeypatch.setattr(cli, "_publish_scoped", publish)
+    try:
+        assert cli.run(Namespace(
+            publish="local", scope="data", domain=None, plan=str(plan),
+            workdir=str(root), output=str(output), report=str(tmp_path / "report.json"),
+            release_id="r2", force=False, offline=False, rebuild_historical_bigbang=rebuild,
+        )) == 0
+    finally:
+        clear_ingestion_plan()
+    if rebuild:
+        assert calls == [("raw", {"water"}), "historical", "water_delivery", "publish"]
+        assert "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet" in hydrated
+        assert set(cli._territory_logical_paths(cli.SOURCE_YEARS)).issubset(hydrated)
+    else:
+        assert calls == ["noop"]
+        assert hydrated == []
