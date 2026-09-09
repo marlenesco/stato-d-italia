@@ -388,11 +388,9 @@ def _validate_cross_fields(
     if breaks:
         if capabilities["timeseries"]["status"] == "allowed":
             _fail("capabilities.timeseries", "series breaks require annotated or disabled timeseries")
-        comparison_break = any(item["effect"] in {"segment", "block_comparison"} for item in breaks)
-        if comparison_break:
-            for name in ("delta", "trend"):
-                if _capability_enabled(capabilities, name):
-                    _fail(f"capabilities.{name}", "cannot cross a segmenting or comparison-blocking break")
+        for name in ("delta", "trend"):
+            if _capability_enabled(capabilities, name):
+                _fail(f"capabilities.{name}", "cannot cross a declared series break")
 
 
 def validate_historical_contract(payload: dict[str, Any]) -> dict[str, Any]:

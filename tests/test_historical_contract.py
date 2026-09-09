@@ -220,6 +220,23 @@ def test_multiple_historical_break_dimensions_survive_validation() -> None:
     ]
 
 
+def test_annotated_timeseries_remains_valid_across_annotated_break() -> None:
+    payload = _base_contract()
+    payload["series_breaks_before"] = [_break("methodology", "annotate")]
+    payload["capabilities"]["timeseries"] = _capability(
+        "allowed_with_annotation",
+        reason_code="series_break_methodology",
+        reason="Series exposes the documented methodology transition",
+        evidence=["methodology:transition"],
+    )
+
+    result = validate_historical_contract(payload)
+
+    assert result["capabilities"]["timeseries"]["status"] == "allowed_with_annotation"
+    assert result["capabilities"]["delta"]["status"] == "blocked"
+    assert result["capabilities"]["trend"]["status"] == "blocked"
+
+
 def test_blocked_and_unresolved_reason_codes_survive_validation() -> None:
     payload = _base_contract()
     payload["capabilities"]["timeseries"] = _capability(
@@ -446,6 +463,34 @@ def test_rejects_comparison_enabled_across_blocking_break() -> None:
         evidence=["methodology:transition"],
     )
     payload["capabilities"]["delta"] = _capability("allowed", evidence=["metric:comparison"])
+    with pytest.raises(ValueError):
+        validate_historical_contract(payload)
+
+
+@pytest.mark.parametrize(
+    ("capability", "status"),
+    [
+        ("delta", "allowed"),
+        ("trend", "allowed"),
+        ("delta", "allowed_with_annotation"),
+        ("trend", "allowed_with_annotation"),
+    ],
+)
+def test_rejects_comparison_across_annotated_break(capability: str, status: str) -> None:
+    payload = _base_contract()
+    payload["series_breaks_before"] = [_break("methodology", "annotate")]
+    payload["capabilities"]["timeseries"] = _capability(
+        "allowed_with_annotation",
+        reason_code="series_break_methodology",
+        reason="Series exposes the documented methodology transition",
+        evidence=["methodology:transition"],
+    )
+    payload["capabilities"][capability] = _capability(
+        status,
+        reason_code="series_break_methodology" if status == "allowed_with_annotation" else None,
+        reason="Comparison annotated" if status == "allowed_with_annotation" else None,
+        evidence=["methodology:transition"],
+    )
     with pytest.raises(ValueError):
         validate_historical_contract(payload)
 
