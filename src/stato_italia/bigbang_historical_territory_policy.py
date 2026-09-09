@@ -18,6 +18,7 @@ LAST_BIGBANG_YEAR = 2025
 TERRITORY_LEVELS = ("country", "region", "province", "municipality")
 ISTAT_BOUNDARIES_SOURCE = "ISTAT Confini delle unita amministrative a fini statistici"
 ISTAT_BOUNDARIES_URL = "https://www.istat.it/notizia/confini-delle-unita-amministrative-a-fini-statistici-al-1-gennaio-2018-2/"
+NON_ANNUAL_EXACT_SNAPSHOT_YEARS = frozenset({2011, 2021})
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,19 @@ def resolve_bigbang_territory_policy(
         raise ValueError(f"Ambiguous documented territory intervals for {reference_year}")
     if exact_candidates and interval_candidates:
         raise ValueError(f"Ambiguous exact territory version and documented interval for {territory_level}/{reference_year}")
+    if reference_year in NON_ANNUAL_EXACT_SNAPSHOT_YEARS and exact_candidates:
+        return TerritoryPolicyDecision(
+            reference_year=reference_year,
+            territory_level=territory_level,
+            support_status="unsupported_missing_exact_geometry",
+            data_kind="raster_derived",
+            territory_reference_date=None,
+            territory_source=ISTAT_BOUNDARIES_SOURCE,
+            reason=(
+                "The ISTAT census or date-specific snapshot does not establish an official validity interval "
+                "covering the full BIGBANG annual reference period."
+            ),
+        )
     candidates = exact_candidates + interval_candidates
     selected = candidates[0] if candidates else None
     if selected:

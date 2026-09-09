@@ -34,14 +34,29 @@ def test_exact_province_geometry_is_derived_supported() -> None:
     assert result.geometry_reference == "canonical/territories/reference_year=2015/province.parquet"
 
 
-def test_resolver_rejects_invalid_istat_2021_date_and_accepts_documented_date() -> None:
+def test_resolver_rejects_invalid_istat_2021_date_and_keeps_documented_snapshot_unsupported() -> None:
     with pytest.raises(ValueError, match="documented ISTAT date 2021-12-31"):
         resolve_bigbang_territory_policy(2021, "province", [_province_version(2021)])
     result = resolve_bigbang_territory_policy(2021, "province", [
         _province_version(2021, reference_date="2021-12-31"),
     ])
-    assert result.support_status == "derived_supported"
-    assert result.territory_reference_date == "2021-12-31"
+    assert result.support_status == "unsupported_missing_exact_geometry"
+    assert result.territory_reference_date is None
+    assert "does not establish an official validity interval" in result.reason
+
+
+@pytest.mark.parametrize(("year", "reference_date"), [(2011, "2011-10-09"), (2021, "2021-12-31")])
+def test_non_annual_istat_snapshots_do_not_authorize_annual_bigbang_geometry(
+    year: int,
+    reference_date: str,
+) -> None:
+    result = resolve_bigbang_territory_policy(
+        year,
+        "province",
+        [_province_version(year, reference_date=reference_date)],
+    )
+    assert result.support_status == "unsupported_missing_exact_geometry"
+    assert result.geometry_reference is None
 
 
 def test_province_never_selects_nearest_or_current_geometry() -> None:
