@@ -1347,7 +1347,7 @@ def _run_incremental_data(
     metadata_paths = [path for path in raw_declarations if path.name.endswith(".metadata.json")]
     current_state = (
         build_source_state_from_metadata_paths(root / "raw", metadata_paths)
-        if families else previous_state
+        if families else {"schemaVersion": 1, "sources": []}
     )
     canonical_by_family = {
         "boundaries": [*_territory_paths(canonical)],
