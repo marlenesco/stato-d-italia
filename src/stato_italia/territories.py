@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Iterable
@@ -16,10 +17,16 @@ from shapely.ops import transform, unary_union
 from .common import normalize_name
 from .download import download
 
-SOURCE_YEARS = (2006, 2012, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025)
+BOUNDARY_SOURCE_ID = "istat-administrative-boundaries"
+SOURCE_YEARS = (
+    2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
+    2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020,
+    2021, 2022, 2023, 2024, 2025, 2026,
+)
 TERRITORY_CANONICAL_CONTRACT_VERSION = 3
-_SPECIAL_REFERENCE_DATES = {2021: "2021-12-31"}
+_SPECIAL_REFERENCE_DATES = {2011: "2011-10-09", 2021: "2021-12-31"}
 _OFFICIAL_MUNICIPALITY_COUNTS = {2021: 7904}
+_H1E_SOURCE_YEARS = frozenset({2002, 2003, 2004, 2005, 2007, 2008, 2009, 2010, 2013, 2014, 2026})
 
 
 def territory_reference_date(year: int) -> str:
@@ -38,6 +45,10 @@ def boundary_url(year: int) -> str:
     return f"{base}/Limiti0101{year}_g.zip"
 
 
+def boundary_asset_path(year: int) -> str:
+    return f"{BOUNDARY_SOURCE_ID}/{year}/limiti-{year}-generalized.zip"
+
+
 def _shape_file(root: Path, prefix: str | tuple[str, ...]) -> Path:
     prefixes = (prefix,) if isinstance(prefix, str) else prefix
     matches = list({candidate for current in prefixes for candidate in root.rglob(f"{current}*.shp")})
@@ -54,6 +65,86 @@ _ADMINISTRATIVE_CODE_FIELDS = {
 }
 
 
+@dataclass(frozen=True)
+class _BoundarySourceSchema:
+    name: str
+    municipality_fields: frozenset[str]
+    province_fields: frozenset[str]
+    province_code_field: str
+    municipality_parent_field: str
+    province_name_field: str
+
+
+_LEGACY_SCHEMA = _BoundarySourceSchema(
+    name="legacy_cod_prov_2002_2014",
+    municipality_fields=frozenset({"COD_REG", "COD_PROV", "PRO_COM_T", "COMUNE"}),
+    province_fields=frozenset({"COD_REG", "COD_PROV", "DEN_PROV"}),
+    province_code_field="COD_PROV",
+    municipality_parent_field="COD_PROV",
+    province_name_field="DEN_PROV",
+)
+_PCM_SCHEMA = _BoundarySourceSchema(
+    name="province_metropolitan_city_cod_pcm_2015_2018",
+    municipality_fields=frozenset({
+        "COD_REG", "COD_PROV", "COD_CM", "COD_PCM", "PRO_COM_T", "COMUNE",
+    }),
+    province_fields=frozenset({
+        "COD_REG", "COD_PROV", "COD_CM", "COD_PCM", "DEN_PCM",
+    }),
+    province_code_field="COD_PROV",
+    municipality_parent_field="COD_PROV",
+    province_name_field="DEN_PCM",
+)
+_UTS_LEGACY_IDENTITY_SCHEMA = _BoundarySourceSchema(
+    name="uts_fields_with_legacy_province_identity",
+    municipality_fields=frozenset({
+        "COD_REG", "COD_PROV", "COD_CM", "COD_UTS", "PRO_COM_T", "COMUNE",
+    }),
+    province_fields=frozenset({
+        "COD_REG", "COD_PROV", "COD_CM", "COD_UTS", "DEN_UTS",
+    }),
+    province_code_field="COD_PROV",
+    municipality_parent_field="COD_PROV",
+    province_name_field="DEN_UTS",
+)
+_UTS_2021_SCHEMA = _BoundarySourceSchema(
+    name="uts_2021",
+    municipality_fields=frozenset({"COD_REG", "COD_UTS", "PRO_COM_T", "COMUNE"}),
+    province_fields=frozenset({
+        "COD_REG", "COD_PROV", "COD_CM", "COD_UTS", "DEN_UTS",
+    }),
+    province_code_field="COD_UTS",
+    municipality_parent_field="COD_UTS",
+    province_name_field="DEN_UTS",
+)
+_UTS_2026_SCHEMA = _BoundarySourceSchema(
+    name="uts_2026_sardinia_reform",
+    municipality_fields=frozenset({
+        "COD_REG", "COD_PROV", "COD_CM", "COD_UTS", "PRO_COM_T", "COMUNE",
+    }),
+    province_fields=frozenset({
+        "COD_REG", "COD_PROV", "COD_CM", "COD_UTS", "DEN_UTS",
+    }),
+    province_code_field="COD_UTS",
+    municipality_parent_field="COD_UTS",
+    province_name_field="DEN_UTS",
+)
+
+
+def _boundary_source_schema(year: int) -> _BoundarySourceSchema:
+    if 2002 <= year <= 2014:
+        return _LEGACY_SCHEMA
+    if 2015 <= year <= 2018:
+        return _PCM_SCHEMA
+    if year in {2019, 2020, 2022, 2023, 2024, 2025}:
+        return _UTS_LEGACY_IDENTITY_SCHEMA
+    if year == 2021:
+        return _UTS_2021_SCHEMA
+    if year == 2026:
+        return _UTS_2026_SCHEMA
+    raise ValueError(f"Unsupported ISTAT boundary source schema year: {year}")
+
+
 def _optional_code(row: dict, field: str, width: int = 3) -> str | None:
     value = row.get(field)
     return None if value in (None, "", "-") else str(value).zfill(width)
@@ -64,43 +155,41 @@ def _source_administrative_codes(row: dict) -> dict[str, str | None]:
     return {name: _optional_code(row, field) for name, field in _ADMINISTRATIVE_CODE_FIELDS.items()}
 
 
-def _legacy_province_uts_code(feature: dict) -> str:
-    """Pre-2021 priority, retained from the historical source schema contract."""
-    for field in ("cod_prov", "cod_uts", "cod_pcm"):
-        if code := feature["source_codes"].get(field):
-            return code
-    raise ValueError(f"ISTAT source lacks a legacy Province/UTS code: {feature['name']}")
+def _required_source_code(feature: dict, field: str, schema: _BoundarySourceSchema) -> str:
+    key = field.lower()
+    if code := feature["source_codes"].get(key):
+        return code
+    raise ValueError(f"ISTAT schema {schema.name} lacks {field}: {feature['name']}")
 
 
 def resolve_province_uts_code(feature: dict, year: int) -> str:
     """Resolve a canonical Province/UTS identity from its year-specific schema."""
-    if year == 2021:
-        if code := feature["source_codes"].get("cod_uts"):
-            return code
-        raise ValueError(f"ISTAT 2021 Province/UTS lacks COD_UTS: {feature['name']}")
-    return _legacy_province_uts_code(feature)
+    schema = _boundary_source_schema(year)
+    return _required_source_code(feature, schema.province_code_field, schema)
 
 
 def resolve_municipality_parent_code(feature: dict, year: int) -> str:
     """Resolve a municipality parent without conflating legacy and UTS fields."""
-    if year == 2021:
-        if code := feature["source_codes"].get("cod_uts"):
-            return code
-        raise ValueError(f"ISTAT 2021 municipality lacks COD_UTS: {feature['name']}")
-    return _legacy_province_uts_code(feature)
+    schema = _boundary_source_schema(year)
+    return _required_source_code(feature, schema.municipality_parent_field, schema)
 
 
-def _first_present(row: dict, *names: str) -> str:
-    for name in names:
-        value = row.get(name)
-        if value not in (None, "", "-"):
-            return str(value)
-    raise KeyError(f"None of expected fields exists: {names}")
-
-
-def _source_features(shp: Path, level: str) -> list[dict]:
+def _source_features(shp: Path, level: str, year: int) -> list[dict]:
     """Read source attributes without choosing municipality/province hierarchy."""
+    schema = _boundary_source_schema(year)
     reader = shapefile.Reader(str(shp))
+    source_fields = {field[0] for field in reader.fields[1:]}
+    required_fields = {
+        "municipality": schema.municipality_fields,
+        "province": schema.province_fields,
+        "region": frozenset({"COD_REG", "DEN_REG"}),
+    }.get(level)
+    if required_fields is None:
+        raise ValueError(f"Unsupported ISTAT boundary level: {level}")
+    if missing := required_fields - source_fields:
+        raise ValueError(
+            f"ISTAT schema {schema.name}/{level} lacks required fields: {sorted(missing)}"
+        )
     source_crs = CRS.from_wkt(shp.with_suffix(".prj").read_text())
     target_crs = CRS.from_epsg(4326)
     reproject = None if source_crs.equals(target_crs) else Transformer.from_crs(source_crs, target_crs, always_xy=True).transform
@@ -113,7 +202,7 @@ def _source_features(shp: Path, level: str) -> list[dict]:
             source_identity: str | tuple[str, ...] = code
         elif level == "province":
             code = None
-            name = _first_present(row, "DEN_UTS", "DEN_PCM", "DEN_PROV", "DEN_CM")
+            name = str(row[schema.province_name_field])
             source_identity = tuple(
                 f"{name}={value}" for name, value in _source_administrative_codes(row).items()
             )
@@ -230,7 +319,7 @@ def _canonical_snapshot_is_current(existing: Path, year: int) -> bool:
     paths = {level: existing / f"{level}.parquet" for level in ("municipality", "province", "region")}
     if not all(path.is_file() for path in paths.values()):
         return False
-    if year != 2021:
+    if year not in _H1E_SOURCE_YEARS and year != 2021:
         return True
     try:
         frames = {level: pd.read_parquet(path) for level, path in paths.items()}
@@ -244,7 +333,9 @@ def _canonical_snapshot_is_current(existing: Path, year: int) -> bool:
         ):
             return False
         counts = validate_territory_hierarchy(frames)
-        return counts["municipalities"] == _OFFICIAL_MUNICIPALITY_COUNTS[year]
+        if year in _OFFICIAL_MUNICIPALITY_COUNTS:
+            return counts["municipalities"] == _OFFICIAL_MUNICIPALITY_COUNTS[year]
+        return True
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -257,9 +348,9 @@ def ingest_boundaries(
     run = {"source_id": "istat-administrative-boundaries", "years": [], "errors": [], "changed": False}
     for year in years:
         url = boundary_url(year)
-        archive = raw_root / "raw" / "istat-administrative-boundaries" / str(year) / f"limiti-{year}-generalized.zip"
+        archive = raw_root / "raw" / boundary_asset_path(year)
         try:
-            metadata = download(url, archive, "istat-administrative-boundaries", offline=offline)
+            metadata = download(url, archive, BOUNDARY_SOURCE_ID, offline=offline)
             existing = canonical_root / "territories" / f"reference_year={year}"
             existing_files = [existing / f"{level}.parquet" for level in ("municipality", "province", "region")]
             if metadata.get("unchanged") and not force and _canonical_snapshot_is_current(existing, year):
@@ -277,7 +368,7 @@ def ingest_boundaries(
                     source.extractall(extract_root)
                 reference_date = territory_reference_date(year)
                 source_features = {
-                    level: _source_features(_shape_file(extract_root, prefix), level)
+                    level: _source_features(_shape_file(extract_root, prefix), level, year)
                     for level, prefix in (("municipality", "Com"), ("province", ("ProvCM", "Prov")), ("region", "Reg"))
                 }
                 features_by_level = normalize_boundary_features(source_features, reference_date)
