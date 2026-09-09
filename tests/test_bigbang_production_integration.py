@@ -657,7 +657,7 @@ def test_explicit_historical_only_run_with_unchanged_preflight(tmp_path, monkeyp
         "ingest_boundaries", "ingest_soil", "ingest_water", "ingest_emissions",
         "ingest_national_emissions", "ingest_dissesto", "fetch_dissesto", "build_soil_analytics",
         "generate_soil_delivery", "generate_dissesto_delivery", "generate_emissions_delivery",
-        "generate_territory_delivery", "generate_territory_insights_delivery", "build_pmtiles",
+        "generate_territory_delivery", "build_pmtiles",
     ):
         monkeypatch.setattr(cli, name, forbidden)
     def process(archives, canonical, derived, report, *, existing_artifact):
@@ -673,10 +673,18 @@ def test_explicit_historical_only_run_with_unchanged_preflight(tmp_path, monkeyp
         delivery_file.write_text("{}")
         return {"changed": True, "files": [delivery_file]}
     monkeypatch.setattr(cli, "generate_water_delivery", delivery)
+    insights_file = root / "delivery/territory-insights/index.json"
+    def insights(*args, **kwargs):
+        assert kwargs["derived_water_path"] == root / HISTORICAL_DERIVED_LOGICAL_PATH
+        calls.append("territory_insights")
+        insights_file.parent.mkdir(parents=True, exist_ok=True)
+        insights_file.write_text("{}")
+        return {"changed": True, "files": [insights_file]}
+    monkeypatch.setattr(cli, "generate_territory_insights_delivery", insights)
     publish_scoped = cli._publish_scoped
     def publish(**kwargs):
-        assert kwargs["affected_families"] == {"water_historical", "water_delivery"}
-        assert set(kwargs["declared_paths"]) == {root / HISTORICAL_DERIVED_LOGICAL_PATH, delivery_file}
+        assert kwargs["affected_families"] == {"water_historical", "water_delivery", "territory_insights"}
+        assert set(kwargs["declared_paths"]) == {root / HISTORICAL_DERIVED_LOGICAL_PATH, delivery_file, insights_file}
         assert kwargs["current_state"] == {"schemaVersion": 1, "sources": []}
         assert kwargs["changed"] is True
         calls.append("publish")
@@ -696,7 +704,7 @@ def test_explicit_historical_only_run_with_unchanged_preflight(tmp_path, monkeyp
     finally:
         clear_ingestion_plan()
     if rebuild:
-        assert calls == [("raw", {"water"}), "historical", "water_delivery", "publish"]
+        assert calls == [("raw", {"water"}), "historical", "water_delivery", "territory_insights", "publish"]
         assert "canonical/water/dataset_version=bigbang-10-1951-2025/observations.parquet" in hydrated
         assert set(cli._territory_logical_paths(cli.SOURCE_YEARS)).issubset(hydrated)
     else:
