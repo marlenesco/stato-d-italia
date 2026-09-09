@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import zipfile
 import tempfile
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -22,6 +24,8 @@ from .bigbang_raster_poc import (
     SOURCE,
     RasterMetricSpec,
     _coverage_summary,
+    _geometry_sha256,
+    resolve_raster_members,
     _write_parquet_atomic,
     compare_official_regions,
     derive_prepared_territories,
@@ -30,7 +34,7 @@ from .bigbang_raster_poc import (
     prepare_territories_for_zonal,
     validate_archive_structure,
 )
-from .common import json_dump, sha256_file
+from .common import json_dump, sha256_file, stable_id
 
 
 HISTORICAL_DERIVED_LOGICAL_PATH = (
@@ -135,6 +139,63 @@ def _historical_destination(derived_root: Path) -> Path:
     return derived_root.parent / HISTORICAL_DERIVED_LOGICAL_PATH
 
 
+def _reusable_year(
+    rows: pd.DataFrame, entry: HistoricalProcessingPlanEntry,
+    provinces: pd.DataFrame, metric_specs: Mapping[str, RasterMetricSpec],
+    archives: Mapping[str, Path],
+) -> bool:
+    """Reuse only a complete year with the current source, semantics and exact geometries."""
+    required = {
+        "derived_observation_id", "derived_metric_id", "reference_year", "territory_id",
+        "territory_version_id", "territory_name", "territory_level", "value_decimal",
+        "unit_ucum", "source_dataset_id", "source_dataset_version", "source_asset_sha256",
+        "source_raster_sha256", "source_raster_locator", "territory_geometry_reference",
+        "territory_geometry_sha256", "algorithm_version", "coverage_ratio",
+        "valid_intersection_area_m2", "intersecting_cell_count", "valid_cell_count",
+        "quality_flags", "official_status",
+    }
+    if not required.issubset(rows.columns) or len(rows) != len(provinces) * len(metric_specs):
+        return False
+    if rows[list(required - {"quality_flags"})].isna().any().any():
+        return False
+    if set(rows["derived_metric_id"]) != {s.derived_metric_id for s in metric_specs.values()}:
+        return False
+    expected_territories = provinces.set_index("territory_version_id")
+    for symbol, spec in metric_specs.items():
+        selected = rows[rows["derived_metric_id"] == spec.derived_metric_id]
+        if selected["territory_version_id"].duplicated().any() or set(selected["territory_version_id"]) != set(expected_territories.index):
+            return False
+        member, _ = resolve_raster_members(spec, entry.reference_year)
+        # Verify annual member bytes without extracting or running zonal processing.
+        with zipfile.ZipFile(archives[symbol]) as archive, archive.open(member) as source:
+            raster_sha = hashlib.file_digest(source, "sha256").hexdigest()
+        constants = {
+            "source_dataset_id": SOURCE["source_id"],
+            "source_dataset_version": SOURCE["dataset_version"],
+            "algorithm_version": ALGORITHM_VERSION, "unit_ucum": spec.unit_ucum,
+            "territory_level": "province", "official_status": "derived_by_stato_italia",
+            "source_asset_sha256": spec.contract["archive_sha256"],
+            "source_raster_sha256": raster_sha,
+            "source_raster_locator": f"{spec.contract['archive_name']}!{member}",
+        }
+        if any(not selected[column].eq(value).all() for column, value in constants.items()):
+            return False
+        for row in selected.to_dict("records"):
+            version_id = row["territory_version_id"]
+            territory = expected_territories.loc[version_id]
+            if (
+                row["territory_id"] != territory["territory_id"]
+                or row["territory_name"] != territory["name"]
+                or row["territory_geometry_reference"] != f"{entry.geometry_reference}#{version_id}"
+                or row["territory_geometry_sha256"] != _geometry_sha256(territory["geometry_wkb"])
+                or row["derived_observation_id"] != stable_id(
+                    ALGORITHM_VERSION, spec.derived_metric_id, entry.reference_year, raster_sha, version_id,
+                )
+            ):
+                return False
+    return True
+
+
 def run_bigbang_historical_processing(
     archive_dir: Path,
     canonical_root: Path,
@@ -142,6 +203,7 @@ def run_bigbang_historical_processing(
     report_path: Path,
     *,
     metric_specs: Mapping[str, RasterMetricSpec] = METRIC_SPECS,
+    existing_artifact: Path | None = None,
 ) -> dict:
     versions, inventory = inspect_canonical_territories(canonical_root)
     plan = build_bigbang_historical_processing_plan(versions)
@@ -152,6 +214,9 @@ def run_bigbang_historical_processing(
     official_path = canonical_root / f"water/dataset_version={SOURCE['dataset_version']}/observations.parquet"
     official_sha256_before = sha256_file(official_path)
     official = pd.read_parquet(official_path)
+    existing = pd.read_parquet(existing_artifact) if existing_artifact is not None else pd.DataFrame()
+    reused_years: list[int] = []
+    processed_years: list[int] = []
     records: list[pd.DataFrame] = []
     metric_reports = {
         symbol: {
@@ -180,6 +245,21 @@ def run_bigbang_historical_processing(
                 territory_reference_date=entry.territory_reference_date,
                 geometry_reference=entry.geometry_reference,
             )
+            previous = (
+                existing[existing["reference_year"] == reference_year]
+                if "reference_year" in existing else pd.DataFrame()
+            )
+            if _reusable_year(previous, entry, provinces, metric_specs, archives):
+                records.append(previous)
+                reused_years.append(reference_year)
+                for symbol in metric_specs:
+                    metric_reports[symbol]["years"][str(reference_year)] = {
+                        "referenceYear": reference_year,
+                        "status": "reused_active_observations",
+                        "provinceGeometryReference": entry.geometry_reference,
+                    }
+                continue
+            processed_years.append(reference_year)
             regional_version = _exact_geometry_version(versions, reference_year, "region")
             regions = None
             if regional_version is not None:
@@ -265,13 +345,19 @@ def run_bigbang_historical_processing(
         raise ValueError("Historical BIGBANG derived observation IDs collide")
     if set(output["official_status"]) != {"derived_by_stato_italia"}:
         raise ValueError("Historical BIGBANG observations have an unexpected official status")
+    if set(output["reference_year"]) != {entry.reference_year for entry in supported}:
+        raise ValueError("Historical BIGBANG coverage differs from policy")
+    output = output.sort_values(semantic_key, kind="stable").reset_index(drop=True)
     destination = _historical_destination(derived_root)
-    _write_parquet_atomic(output, destination)
     official_sha256_after = sha256_file(official_path)
     if official_sha256_after != official_sha256_before:
         raise ValueError("Official BIGBANG canonical changed during historical derived processing")
 
+    _write_parquet_atomic(output, destination)
+
     report = {
+        "reusedProvinceYears": reused_years,
+        "processedProvinceYears": processed_years,
         "schemaVersion": 1,
         "processing": "BIGBANG historical provincial area-weighted zonal mean",
         "algorithmVersion": ALGORITHM_VERSION,
