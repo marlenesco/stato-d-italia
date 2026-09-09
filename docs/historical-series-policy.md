@@ -488,7 +488,7 @@ H1C.
 | Priorità | Candidate | Stato | Gate prima dell'implementazione |
 | --- | --- | --- | --- |
 | P0 | Contratto metadata/capability H1C | `requires_new_contract` | trasformare il modello concettuale in schema, validator e reason code |
-| P0 | Confini ISTAT 2002–2010, 2012–2014 e 2026 | `ready_to_implement` | acquisizione versionata, date esatte, gerarchia e SHA-256; 2011 resta snapshot censuario separato |
+| P0 | Confini ISTAT 2002–2005, 2007–2010, 2013–2014 e 2026 | `ready_to_implement` | acquisizione versionata, date esatte, gerarchia e SHA-256; 2011 resta snapshot censuario separato |
 | P0 | Emissioni provinciali 2005/2010/2015 | `requires_identity_audit` | join uno-a-uno per codici/nomi/gerarchie e struttura sarda |
 | P1 | BIGBANG provinciali per ulteriori anni exact-year | `requires_territory_evidence` | confini materializzati e matrice fail-closed; escludere 2011 senza intervallo ufficiale |
 | P1 | HRL status aggiuntivi, incluso 2024 | `requires_source_registration` | versioni prodotto, acquisizione, geometrie e break espliciti |
