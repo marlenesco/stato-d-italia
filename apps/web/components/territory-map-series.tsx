@@ -1,5 +1,7 @@
 "use client";
 
+import { formatPeriodLabel } from "../lib/period-label";
+
 import { useEffect, useMemo, useState } from "react";
 import type { MapOption } from "../lib/data";
 import { territoryLabel } from "../lib/territory-labels";
@@ -111,7 +113,7 @@ export function TerritoryMapSeries({ options, territoryId, territoryName, select
 
   return <section className="territory-series territory-series--drawer" aria-live="polite">
     <h3>Andamento nel periodo disponibile</h3>
-    {geometry && <figure className="territory-trend"><svg viewBox="0 0 280 88" role="img" aria-label={`Trend pubblicato di ${label}`}><path d="M12 72H268" className="chart-axis" />{geometry.paths.map((path, index) => <polyline key={index} points={path} className="territory-trend-line" />)}{geometry.points.map((point, index) => point && <circle key={index} cx={point.x} cy={point.y} r={index === selectedIndex ? 4.6 : 2.2} className={index === selectedIndex ? "territory-trend-point territory-trend-point--selected" : "territory-trend-point"} />)}</svg><figcaption><span>{options[0]?.periodKey}</span><span>{selectedPeriod ?? options.at(-1)?.periodKey}</span></figcaption></figure>}
+    {geometry && <figure className="territory-trend"><svg viewBox="0 0 280 88" role="img" aria-label={`Trend pubblicato di ${label}`}><path d="M12 72H268" className="chart-axis" />{geometry.paths.map((path, index) => <polyline key={index} points={path} className="territory-trend-line" />)}{geometry.points.map((point, index) => point && <circle key={index} cx={point.x} cy={point.y} r={index === selectedIndex ? 4.6 : 2.2} className={index === selectedIndex ? "territory-trend-point territory-trend-point--selected" : "territory-trend-point"} />)}</svg><figcaption><span>{formatPeriodLabel(options[0]?.periodKey)}</span><span>{formatPeriodLabel(selectedPeriod ?? options.at(-1)?.periodKey)}</span></figcaption></figure>}
     {!current ? <p className="sidebar-context"><strong>{label}</strong> Dato non pubblicato per periodo selezionato. Territorio resta selezionato.</p> : <><dl className="territory-summary"><div><dt>Selezionato</dt><dd>{format(current.value, current.unit)}</dd></div>{comparisonEnabled && <div><dt>Confronto precedente</dt><dd><DeltaGauge result={result} /></dd></div>}</dl>{comparisonEnabled ? <p className="sidebar-context"><strong>{direction}.</strong> {result ? `${result.change > 0 ? "+" : ""}${format(result.change, current.unit)} rispetto a ${previous?.period}.` : previous ? sameGeometry ? "Periodi non comparabili." : "Geometrie territoriali differenti: confronto non comparabile, senza interpolazione o crosswalk." : "Manca periodo precedente pubblicato."}</p> : <p className="sidebar-context">{comparisonStatus === "not_supported" ? "Confronto non supportato dalla capability del dominio." : "Confronto non disponibile nella release: mancano evidenze di comparabilità."}</p>}<small className="territory-series-note">{statusNote} {result && `${TEMPORAL_COMPARISON_UI_VERSION}: valore ${current.period} − valore ${previous?.period}.`}</small></>}
   </section>;
 }
