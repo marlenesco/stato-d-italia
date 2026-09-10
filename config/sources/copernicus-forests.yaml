@@ -36,7 +36,7 @@ assets:
     process_resolution_m: 100
     process_max_pixels: 2048
     process_no_data: -9999
-    years: [2018, 2021, 2023]
+    years: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
     byoc_collection_id: edd3c5f5-da8e-463f-8c9a-712aa451d37e
     band: TCD
     catalog_name_contains_template: _TCD_S{end_year}_R100m_
@@ -49,7 +49,7 @@ assets:
     process_resolution_m: 100
     process_max_pixels: 2048
     process_no_data: -9999
-    years: [2018, 2021]
+    years: [2018, 2021, 2024]
     byoc_collection_id: d267ca76-6afb-4992-99d6-67c67df4820c
     band: FTY
     catalog_name_contains_template: _FTY_S{end_year}_R100m_

@@ -342,7 +342,7 @@ def test_data_scope_uses_carried_forest_input_without_fetch_or_infc_ingest(
     }
 
 
-@pytest.mark.parametrize(("boundary_year", "expected_force"), ((2018, True), (2021, True), (2023, True), (2015, False), (2022, False)))
+@pytest.mark.parametrize(("boundary_year", "expected_force"), ((2018, True), (2019, True), (2021, True), (2023, True), (2024, True), (2015, False), (2017, False), (2022, True)))
 def test_scope_all_recalculates_zonal_for_exact_historical_boundary_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     boundary_year: int, expected_force: bool,
@@ -362,7 +362,7 @@ def test_scope_all_recalculates_zonal_for_exact_historical_boundary_dependencies
     calls: list[tuple[bool, str]] = []
     monkeypatch.setattr(
         cli, "ingest_forests",
-        lambda *_args, **kwargs: calls.append((bool(kwargs["force"]), str(kwargs["mode"])))
+        lambda *_args, **kwargs: calls.append((bool(kwargs["changed_boundary_years"]), str(kwargs["mode"])))
         or {"changed": True},
     )
     monkeypatch.setattr(cli, "_catalog_changed_from_active", lambda *_args, **_kwargs: False)
@@ -833,7 +833,7 @@ def test_forest_downstream_dependencies_distinguish_infc_and_copernicus() -> Non
         "infc", "forest_delivery", "forest_geometry_2015", "territory_insights",
     }
     assert _geospatial_downstream_families({"copernicus"}) == {
-        "copernicus", "forest_delivery", "forest_geometry_2018", "forest_geometry_2021", "forest_geometry_2023", "territory_insights",
+        "copernicus", "forest_delivery", "territory_insights", *(f"forest_geometry_{year}" for year in range(2018, 2025)),
     }
 
 
@@ -1239,6 +1239,7 @@ def test_infc_only_run_hydrates_only_infc_raw_and_copernicus_zonal_dependency(
 def test_copernicus_only_run_does_not_hydrate_process_slices_and_reuses_infc_canonical(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(cli, "_hydrate_forest_zonal_for_reuse", lambda *_: ("a" * 64, "b" * 64))
     current = "raw/copernicus-hrl-forests/tree-cover-density/2021-2021/01/tile-r0-c0.tif"
     obsolete = "raw/copernicus-hrl-forests/tree-cover-density/2018-2018/01/obsolete.tif"
     sources = [
@@ -1366,7 +1367,7 @@ def test_copernicus_only_change_does_not_acquire_or_ingest_infc(
     finally:
         clear_ingestion_plan()
 
-    assert calls == [("fetch", True), ("copernicus", True)]
+    assert calls == [("fetch", True), ("copernicus", False)]
     assert infc == {"changed": False, "mode": "active_release"}
     assert zonal["changed"] is True
 
@@ -1464,3 +1465,23 @@ def test_geospatial_noop_contacts_neither_forest_source_family(
 
     assert infc["changed"] is False
     assert zonal["changed"] is False
+
+
+def test_forest_reuse_hydrates_active_canonical_and_coverage_over_local_files(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "store")
+    root = tmp_path / "data"
+    prefix = f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}"
+    paths = [f"{prefix}/zonal_statistics.parquet", f"{prefix}/zonal_statistics.coverage.json"]
+    published = []
+    for index, logical in enumerate(paths):
+        artifact = tmp_path / f"published-{index}"
+        artifact.write_bytes(f"published-{index}".encode())
+        published.append(ReleaseArtifact(artifact, logical))
+        local = root / logical
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(b"unpublished-local")
+    # An empty active store never authorizes runner-local canonical reuse.
+    assert cli._hydrate_forest_zonal_for_reuse(store, root) is None
+    publish_release(store, "forest-active", published)
+    assert cli._hydrate_forest_zonal_for_reuse(store, root) == tuple(cli.sha256_file(item.path) for item in published)
+    assert [(root / logical).read_bytes() for logical in paths] == [item.path.read_bytes() for item in published]

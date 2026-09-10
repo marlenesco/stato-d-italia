@@ -22,7 +22,7 @@ from .delivery import generate_soil_delivery
 from .emissions import fetch_emissions, ingest_emissions
 from .emissions_delivery import generate_emissions_delivery
 from .emissions_national import fetch_national_emissions, ingest_national_emissions
-from .forests import FOREST_ZONAL_TERRITORY_YEARS, ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
+from .forests import forest_zonal_territory_years, ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
 from .forests_delivery import generate_forests_delivery
 from .ingestion_plan import (
     PLAN_SCHEMA_VERSION,
@@ -494,7 +494,7 @@ def _validate_delivery_dependencies(
     if affected_families is not None:
         required_downstream = {
             "infc": {"forest_delivery", "forest_geometry_2015", "territory_insights"},
-            "copernicus": {"forest_delivery", "forest_geometry_2018", "forest_geometry_2021", "forest_geometry_2023", "territory_insights"},
+            "copernicus": {"forest_delivery", "territory_insights", *(f"forest_geometry_{year}" for year in forest_zonal_territory_years())},
             "soil": {"soil_delivery", "territory_insights"},
             "water": {"water_delivery", "territory_insights"},
             "dissesto": {"dissesto_delivery", "territory_insights"},
@@ -746,8 +746,20 @@ def _publish_scoped(
     return manifest, metrics, {"changed": changed, "source_state": source_state, "carried": len(carried)}
 
 
+def _hydrate_forest_zonal_for_reuse(store: LocalObjectStore | R2ObjectStore, root: Path) -> tuple[str, str] | None:
+    """Authorize reuse only after both canonical artifacts match the active release."""
+    prefix = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}"
+    paths = [f"{prefix}/zonal_statistics.parquet", f"{prefix}/zonal_statistics.coverage.json"]
+    release = active_release(store)
+    if release is None or not set(paths) <= {item["logicalPath"] for item in release.get("objects", [])}:
+        return None
+    _hydrate(store, root, paths)
+    return sha256_file(root / paths[0]), sha256_file(root / paths[1])
+
+
 def _process_geospatial_forest_sources(
     args: argparse.Namespace, *, root: Path, canonical: Path, previous_state: dict | None,
+    active_canonical: tuple[str, str] | None = None,
 ) -> tuple[dict, dict, dict]:
     """Acquire and rebuild only the changed Forest source family."""
     plan = active_ingestion_plan()
@@ -773,11 +785,12 @@ def _process_geospatial_forest_sources(
         if process_infc
         else _reused_canonical(infc_path, mode="active_release")
     )
+    mode = os.getenv("FOREST_PROCESSING_MODE", "raster")
     catalog_was_changed = _catalog_changed_from_active(previous_state, forest_fetch)
     zonal = (
         ingest_forests(
-            root, canonical, force=args.force or catalog_was_changed,
-            mode=os.getenv("FOREST_PROCESSING_MODE", "raster"),
+            root, canonical, force=args.force or (mode == "statistical-api" and catalog_was_changed),
+            mode=mode, active_canonical=active_canonical,
         )
         if process_copernicus
         else _reused_canonical(zonal_path, mode="active_release")
@@ -804,7 +817,7 @@ def _run_geospatial(
         _hydrate(input_store, root, _active_infc_logical_paths(previous_state))
     if args.force:
         families = allowed_families
-    _hydrate(input_store, root, _territory_logical_paths((2015, 2018, 2021, 2023)))
+    _hydrate(input_store, root, _territory_logical_paths(sorted({2015, *forest_zonal_territory_years()})))
     # The 2021 ISTAT resolver correction is intentionally rebuilt from the
     # official source only for the local Forest validation candidate. It cannot
     # be silently carried from the active release, and validation-only prevents
@@ -822,14 +835,15 @@ def _run_geospatial(
         _hydrate(input_store, root, [infc_logical])
     if "copernicus" not in families:
         _hydrate(input_store, root, [zonal_logical, zonal_coverage_logical])
+    active_forest = _hydrate_forest_zonal_for_reuse(input_store, root) if "copernicus" in families else None
     forest_fetch, infc, zonal = _process_geospatial_forest_sources(
-        args, root=root, canonical=canonical, previous_state=previous_state,
+        args, root=root, canonical=canonical, previous_state=previous_state, active_canonical=active_forest,
     )
     fresh_geometry: list[Path] = []
     forests_pmtiles = {
         **{
             f"{level}_{year}": {"path": str(delivery / "foreste/geometry" / f"istat-{level}-{year}.pmtiles"), "carried": True}
-            for year in (2018, 2021, 2023) for level in ("municipality", "province", "region")
+            for year in sorted(forest_zonal_territory_years()) for level in ("municipality", "province", "region")
         },
         "region_2015": {"path": str(delivery / "foreste/geometry/istat-region-2015.pmtiles"), "carried": True},
     }
@@ -840,7 +854,7 @@ def _run_geospatial(
         )
         fresh_geometry.append(path)
     if "copernicus" in families:
-        for year in (2018, 2021, 2023):
+        for year in sorted(forest_zonal_territory_years()):
             for level in ("municipality", "province", "region"):
                 path = delivery / "foreste/geometry" / f"istat-{level}-{year}.pmtiles"
                 forests_pmtiles[f"{level}_{year}"] = build_pmtiles(
@@ -933,7 +947,7 @@ def _geospatial_downstream_families(source_families: set[str]) -> set[str]:
     if source_families & {"infc", "copernicus"}:
         affected.add("territory_insights")
     if "copernicus" in source_families:
-        affected.update({"forest_geometry_2018", "forest_geometry_2021", "forest_geometry_2023"})
+        affected.update(f"forest_geometry_{year}" for year in forest_zonal_territory_years())
     return affected
 
 
@@ -970,7 +984,6 @@ _DATA_DELIVERY_FAMILY = {
     "emissions": "emissions_delivery",
 }
 
-_FOREST_BOUNDARY_REFERENCE_YEARS = frozenset({2015, 2018, 2021, 2023})
 _HISTORICAL_TERRITORY_REFERENCE = re.compile(
     r"^canonical/territories/reference_year=(?P<year>\d{4})/"
     r"(?:municipality|province|region)\.parquet(?:#.*)?$"
@@ -1055,7 +1068,7 @@ def _boundary_reference_year(asset_path: str) -> int:
 
 
 def _refuse_scoped_forest_boundary_changes(years: set[int]) -> None:
-    affected = sorted(years & _FOREST_BOUNDARY_REFERENCE_YEARS)
+    affected = sorted(years & {2015, *forest_zonal_territory_years()})
     if not affected:
         return
     references = "/".join(str(year) for year in affected)
@@ -1397,7 +1410,7 @@ def _run_incremental_data(
 
 def _run_combined_scope_forests(
     args: argparse.Namespace, root: Path, canonical: Path, previous_source_state: dict | None,
-    *, changed_boundary_years: set[int] | None = None,
+    *, changed_boundary_years: set[int] | None = None, active_canonical: tuple[str, str] | None = None,
 ) -> dict:
     """Run Forest only when the combined pipeline owns the geospatial scope."""
     if args.scope == "data":
@@ -1416,11 +1429,11 @@ def _run_combined_scope_forests(
         for path in (root / "raw" / source).glob("**/*.tif")
     )
     catalog_changed = _catalog_changed_from_active(previous_source_state, forest_fetch)
-    force_zonal = args.force or bool(FOREST_ZONAL_TERRITORY_YEARS & set(changed_boundary_years or ()))
+    force_zonal = args.force or bool(forest_zonal_territory_years() & set(changed_boundary_years or ()))
     if mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
         forests["zonal"] = ingest_forests(root, canonical, force=force_zonal or catalog_changed, mode=mode)
     elif zonal_raw:
-        forests["zonal"] = ingest_forests(root, canonical, force=force_zonal, mode="raster")
+        forests["zonal"] = ingest_forests(root, canonical, force=args.force, mode="raster", active_canonical=active_canonical, changed_boundary_years=set(changed_boundary_years or ()) & forest_zonal_territory_years())
     return forests
 
 
@@ -1527,6 +1540,7 @@ def run(args: argparse.Namespace) -> int:
     forests = _run_combined_scope_forests(
         args, root, canonical, previous_source_state,
         changed_boundary_years=changed_boundary_years,
+        active_canonical=_hydrate_forest_zonal_for_reuse(hydrate_store or store, root) if args.scope != "data" else None,
     )
     forest_fetch = forests["fetch"]
     changed = boundaries["changed"] or soil["changed"] or water["changed"] or emissions["changed"] or dissesto["changed"] or bool(dissesto_fetch and dissesto_fetch["changed"]) or analytics["changed"] or historical["changed"] or bool(forests.get("infc", {}).get("changed")) or bool(forests.get("zonal", {}).get("changed"))
@@ -1559,7 +1573,7 @@ def run(args: argparse.Namespace) -> int:
     emissions_geometry_changed = any(not info.get("skipped", False) for info in emissions_pmtiles.values())
     forests_pmtiles: dict[str, dict] = {}
     if args.scope != "data" and "zonal" in forests:
-        for reference_year in (2018, 2021, 2023):
+        for reference_year in sorted(forest_zonal_territory_years()):
             for level in ("municipality", "province", "region"):
                 path = delivery / "foreste" / "geometry" / f"istat-{level}-{reference_year}.pmtiles"
                 if boundaries["changed"] or forests["zonal"]["changed"] or not is_readable_pmtiles(path):
