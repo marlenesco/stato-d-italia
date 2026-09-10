@@ -233,13 +233,13 @@ export default async function ForestsPage() {
                 {
                   id: "extent",
                   label: "Estensione del bosco",
-                  meta: "Copernicus HRL Forest Type · 2018, 2021, 2024",
+                  meta: "Copernicus HRL Forest Type · 2018, 2021",
                   metricIds: ["forest_area_ha", "forest_share_pct"],
                 },
                 {
                   id: "composition",
                   label: "Composizione",
-                  meta: "Copernicus HRL Forest Type · 2018, 2021, 2024",
+                  meta: "Copernicus HRL Forest Type · 2018, 2021",
                   metricIds: [
                     "broadleaved_area_hrl_ha",
                     "coniferous_area_hrl_ha",
@@ -249,13 +249,13 @@ export default async function ForestsPage() {
                 {
                   id: "cover",
                   label: "Copertura delle chiome",
-                  meta: "Tree Cover Density · 2018–2024",
+                  meta: "Tree Cover Density · 2018, 2021, 2023",
                   metricIds: ["tree_cover_mean"],
                 },
                 {
                   id: "distribution",
                   label: "Distribuzione della copertura",
-                  meta: "Tree Cover Density · 2018–2024",
+                  meta: "Tree Cover Density · 2018, 2021, 2023",
                   metricIds: [
                     "tree_cover_p25",
                     "tree_cover_p50",
