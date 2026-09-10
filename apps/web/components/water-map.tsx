@@ -88,6 +88,7 @@ export function WaterMap({ option, metricLabel, geometryUrl, territoryLevel, der
     async function createMap() {
       try {
         const [maplibregl, { PMTiles, Protocol }] = await Promise.all([import("maplibre-gl"), import("pmtiles")]);
+        maplibregl.setWorkerUrl(`/vendor/maplibre/${maplibregl.getVersion()}/maplibre-gl-worker.mjs`);
         if (disposed) return;
         if (!protocol) {
           protocol = new Protocol();

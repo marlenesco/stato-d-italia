@@ -84,6 +84,7 @@ export function SoilMap({ option, metricLabel, geometryUrl, rankingUrl, features
     async function createMap() {
       try {
         const [maplibregl, { PMTiles, Protocol }] = await Promise.all([import("maplibre-gl"), import("pmtiles")]);
+        maplibregl.setWorkerUrl(`/vendor/maplibre/${maplibregl.getVersion()}/maplibre-gl-worker.mjs`);
         if (disposed) return;
         if (!protocol) {
           protocol = new Protocol();
