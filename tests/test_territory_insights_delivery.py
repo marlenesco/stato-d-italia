@@ -55,6 +55,8 @@ def test_delivery_aggregates_real_domain_availability_by_level(tmp_path) -> None
 
     assert municipal["soil"]["availability"] == municipal["forests"]["availability"] == municipal["risk"]["availability"] == "available"
     assert municipal["water"]["reason"] == municipal["emissions"]["reason"] == "source_not_published_at_this_level"
+    assert provincial["water"]["href"] == f"/acqua?level=province&metric=water_total_precipitation_mm_zonal_mean&period=2025&territory={province}#atlante"
+    assert regional["water"]["href"] == f"/acqua?level=region&metric=water_total_precipitation_mm&period=2025&territory={region}#atlante"
     assert provincial["water"]["kind"] == "derived_metric"
     assert [point["periodEnd"][:4] for point in provincial["water"]["series"]] == ["2020", "2022", "2025"]
     assert provincial["water"]["comparison"]["reason"] == "geometry_changed"

@@ -11,6 +11,16 @@ import { WaterMap } from "./water-map";
 import { WaterOverview } from "./water-overview";
 import { TimelineControl } from "./timeline-control";
 
+export function normalizedWaterPeriodQuery(queryString: string, model: WaterExplorerModel): string | undefined {
+  const query = new URLSearchParams(queryString);
+  const requestedPeriod = query.get("period");
+  if (requestedPeriod === null || !model.periodKey || requestedPeriod === model.periodKey || model.features.map.status !== "available") return;
+  query.set("period", model.periodKey);
+  const requestedLevel = query.get("level");
+  if (requestedLevel && requestedLevel !== model.level) query.delete("territory");
+  return query.toString();
+}
+
 export function WaterWorkspace({ data, overview }: { data: WaterData; overview: WaterOverviewData }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -33,6 +43,11 @@ export function WaterWorkspace({ data, overview }: { data: WaterData; overview: 
   useEffect(() => {
     setTerritory((current) => requestedTerritory ? current?.id === requestedTerritory ? current : { id: requestedTerritory } : undefined);
   }, [requestedTerritory]);
+
+  useEffect(() => {
+    const query = normalizedWaterPeriodQuery(searchParams.toString(), model);
+    if (query !== undefined) router.replace(`${pathname}?${query}${window.location.hash}`, { scroll: false });
+  }, [model, pathname, router, searchParams]);
 
   function update(next: WaterExplorerModel, nextTerritory?: string) {
     if (!next.level || !next.metricId || !next.periodKey) return;
