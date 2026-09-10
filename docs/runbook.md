@@ -278,18 +278,20 @@ quando richiesto dagli input semantici, `territory-insights`; il 2024 rigenera
 Dissesto e il 2019 rigenera Emissioni. Un altro anno storico senza dipendenza
 dichiarata non invalida output estranei.
 
-Le territory canonical ISTAT 2015, 2018, 2021 e 2023 sono invece input
-cross-scope del dominio Foreste: il 2015 alimenta la geometria regionale INFC;
-il Copernicus zonale usa 2018 per TCD/FTY 2018, 2021 per TCD/FTY 2021 e TCPC
-2018–2021, e 2023 per TCD 2023. Se il preflight data rileva un cambiamento in
-uno di questi anni, il run scoped si interrompe prima di hydration e publish
-con richiesta esplicita di un rebuild coordinato `scope=all`. Non avvia quel
-rebuild automaticamente e non pubblica prima i nuovi confini lasciando Foreste
-stale. La stessa guardia è ripetuta al confine di pubblicazione usando il delta
-del source state, quindi non dipende soltanto dal control flow del runner.
-Nel rebuild `scope=all`, un cambiamento 2018, 2021 o 2023 forza il ricalcolo
-zonale sulle nuove territory canonical; le slice raster CDSE possono essere
-riusate soltanto se la griglia di richiesta resta identica.
+Le territory canonical ISTAT sono input cross-scope del dominio Foreste:
+INFC continua a usare il canonical regionale 2015; gli anni territoriali
+Copernicus moderni derivano dai periodi degli asset HRL abilitati e, con il
+config H1H, sono 2018–2024. TCD annuale usa la geometria dello stesso anno;
+FTY usa le geometrie corrispondenti a 2018, 2021 e 2024; TCPC 2018–2021 usa
+la geometria di fine periodo 2021. Se il preflight data rileva un cambiamento
+in uno di questi anni attivi, il run scoped si interrompe prima di hydration
+e publish e richiede un rebuild coordinato `scope=all`, senza avviarlo
+automaticamente né pubblicare nuovi confini lasciando Foreste stale. La guardia
+è ripetuta al confine di pubblicazione sul delta del source state. Nel rebuild,
+il contratto incrementale invalida e rielabora soltanto i periodi Foreste
+interessati, dove supportato; INFC mantiene la dipendenza separata dal 2015.
+Le slice raster CDSE sono riusabili soltanto con griglia e contratto di
+richiesta ancora identici.
 
 Nel dominio geospatial, un cambiamento INFC rigenera la geometria regionale 2015;
 Copernicus usa geometrie storiche dipendenti dal periodo: 2018, 2021 e 2023
