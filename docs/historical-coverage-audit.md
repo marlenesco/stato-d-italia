@@ -1,8 +1,10 @@
 # Audit della copertura storica
 
+Aggiornamento H1G: inventario territoriale post-H1E e copertura provinciale BIGBANG verificata in produzione nella release `2026-09-09T231326Z-local`. Le altre sezioni conservano le evidenze H1A.
+
 Baseline H1A generata da `af94f22c3813c07aaa876ed8c314817cab2e5428` sul branch `phase-h1-historical-audit`.
 
-Questo documento descrive soltanto ciò che il repository registra, trasforma e pubblica oggi. Non prova l'esistenza di sorgenti esterne non registrate e non autorizza nuove acquisizioni, elaborazioni, comparazioni o funzionalità. La verifica della pubblicazione corrente è stata eseguita in sola lettura sulla release attiva `2026-09-08T143313Z-local`; i path `data/...` indicano i corrispondenti path logici di lavoro, mentre i path `delivery/...` indicano gli asset della release.
+Questo documento descrive soltanto ciò che il repository registra, trasforma e pubblica oggi. Non prova l'esistenza di sorgenti esterne non registrate e non autorizza nuove acquisizioni, elaborazioni, comparazioni o funzionalità. La verifica H1A della pubblicazione è stata eseguita in sola lettura sulla release `2026-09-08T143313Z-local`; i path `data/...` indicano i corrispondenti path logici di lavoro, mentre i path `delivery/...` indicano gli asset della release.
 
 ## Matrice esecutiva
 
@@ -10,7 +12,7 @@ Questo documento descrive soltanto ciò che il repository registra, trasforma e 
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Suolo | Workbook ISPRA 2025 | variazioni 2006–2024; stock 2024 | uguale | Italia, regioni, province, comuni | geografia della sorgente al 2025-01-01 | LOW | storia ulteriore sconosciuta |
 | Acqua | BIGBANG ufficiale | 1951–2025 annuale | 1951–2025 annuale | Italia, regioni | osservazioni ufficiali; mappa regionale su geometria 2025 | LOW | nessun gap noto nel contratto registrato |
-| Acqua | BIGBANG provinciale derivato | raster 1951–2025 | 2006, 2012, 2015–2025 | province | geometria ISTAT esatta dell'anno | HIGH | geometrie mancanti per gli altri anni |
+| Acqua | BIGBANG provinciale derivato | raster 1951–2025 | 2002–2010, 2012–2020, 2022–2025 (22 anni) | province | geometria ISTAT esatta dell'anno | HIGH | geometrie mancanti per gli altri anni |
 | Foreste | INFC | 2015 | 2015 | Italia, regioni | snapshot esatto 2015; mappa regionale | UNKNOWN | altre edizioni non note al repository |
 | Foreste | Copernicus TCD | 2018, 2021, 2023 | 2018, 2021, 2023 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | storia ulteriore sconosciuta |
 | Foreste | Copernicus FTY | 2018, 2021 | 2018, 2021 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | nessun prodotto post-2021 registrato |
@@ -116,7 +118,13 @@ config/sources/ispra-bigbang.yaml#raster_products
                └─ frontend Acqua e `water-explorer-model.ts`/capability condivisi
 ```
 
-La sorgente raster dichiara 1951–2025; il derivato provinciale pubblica soltanto `2006`, `2012` e `2015–2025`, cioè gli anni con geometria canonica esatta. Il 2021 corrente è valido con data `2021-12-31` e contratto territoriale v3. Le fixture negative che costruiscono un 2021 a `2021-01-01` dimostrano il fail-closed; non descrivono la release attuale.
+La sorgente raster dichiara 1951–2025; il derivato provinciale pubblica esattamente `2002–2010`, `2012–2020`, `2022–2025`: 22 anni. L'artefatto storico contiene 11.780 record provinciali, senza valori mancanti, per tutte le cinque metriche BIGBANG (TP, AE, IF, GR, RF). Verifica di produzione H1F: release `2026-09-09T231326Z-local`, con 12 anni esistenti riusati e 10 nuovi anni elaborati.
+
+Restano non supportati:
+
+- `1951–2001`: nessuna geometria provinciale canonica annuale esatta nell'inventario corrente del progetto;
+- `2011`: snapshot censuario `2011-10-09`, non ordinario e non accettato come geometria esatta per l'intero anno BIGBANG;
+- `2021`: snapshot `2021-12-31`, valido per usi coerenti con quella data ma non per l'aggregazione provinciale BIGBANG dell'intero anno 2021.
 
 ADR 0015 vieta nearest-year, current-boundary backfill e intervalli non documentati. Il comune resta fuori per il vincolo metodologico `> 100 km²`. `territory_version_id` cambia con l'anno; una serie può mostrare punti su geometrie diverse, ma il delta viene bloccato se l'evidenza geometrica o metodologica cambia. Ranking non autorizzato. Opportunità `HIGH`: molta storia raster è registrata, ma non è pubblicabile senza geometrie esatte o intervalli ufficiali documentati.
 
@@ -225,31 +233,35 @@ config/sources/ispra-emissions-provincial-2026.yaml
                └─ frontend Emissioni e adapter/capability condivisi
 ```
 
-La sorgente dichiara otto snapshot: `1990`, `1995`, `2000`, `2005`, `2010`, `2015`, `2019`, `2023`. Il contratto di ingest e la pubblicazione trattengono soltanto `2019` e `2023`, gli unici anni con mapping esplicito alla versione ISTAT nel config. Il 2010 e il 2015 includono inoltre quattro province sarde obsolete; 1990–2005 precedono l'inventario territoriale materializzato dal repository. La griglia è fuori dalla slice amministrativa.
+La sorgente dichiara otto snapshot: `1990`, `1995`, `2000`, `2005`, `2010`, `2015`, `2019`, `2023`. Il contratto di ingest e la pubblicazione trattengono soltanto `2019` e `2023`, gli unici anni con mapping esplicito alla versione ISTAT nel config. Il 2010 e il 2015 includono inoltre quattro province sarde obsolete; 1990, 1995 e 2000 precedono l'inventario territoriale materializzato dal repository; il 2005 è ora presente nell’inventario H1E, senza modificare il mapping del contratto emissioni. La griglia è fuori dalla slice amministrativa.
 
 Le mappe richiedono selezione esatta di inquinante e attività SNAP e geometria provinciale esatta dell'anno. Display e serie a due punti sì; confronto e ranking no. Opportunità `HIGH`, ma subordinata a strutture territoriali ufficiali e a eventuali crosswalk documentati: non è autorizzato rimappare alle province correnti.
 
 ## Inventario territoriale canonico
 
-Il source config ISTAT dichiara disponibilità 2002–2026; il codice materializza soltanto `2006`, `2012` e `2015–2025`. Per ogni anno materializzato esistono Parquet di regioni, province e comuni. L'identità Italia è sintetizzata nell'indice territoriale e non ha un file geometrico separato. `territory_id` è l'identità stabile quando l'entità resta la stessa; `territory_version_id` include la data e cambia fra versioni.
+Il source config ISTAT dichiara disponibilità 2002–2026; gli snapshot storici materializzati coprono `2002–2010` e `2012–2026`, per 24 source year totali. Il 2011 è lo snapshot censuario `2011-10-09`, non un confine annuale ordinario al 1° gennaio e non fa parte dell’inventario annuale H1E. Per ogni anno materializzato esistono Parquet di regioni, province e comuni. L'identità Italia è sintetizzata nell'indice territoriale e non ha un file geometrico separato. `territory_id` è l'identità stabile quando l'entità resta la stessa; `territory_version_id` include la data e cambia fra versioni.
 
 | Anno | Italia | Regioni | Province | Comuni | Data riferimento | Nota metadata | Uso pubblicato |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2002–2005 | sì | sì | sì | sì | 1° gennaio del rispettivo anno | — | Acqua derivata |
 | 2006 | sì | sì | sì | sì | 2006-01-01 | — | Acqua derivata |
+| 2007–2010 | sì | sì | sì | sì | 1° gennaio del rispettivo anno | — | Acqua derivata |
 | 2012 | sì | sì | sì | sì | 2012-01-01 | — | Acqua derivata |
+| 2013–2014 | sì | sì | sì | sì | 1° gennaio del rispettivo anno | — | Acqua derivata |
 | 2015 | sì | sì | sì | sì | 2015-01-01 | — | Acqua derivata, INFC |
 | 2016 | sì | sì | sì | sì | 2016-01-01 | — | Acqua derivata |
 | 2017 | sì | sì | sì | sì | 2017-01-01 | — | Acqua derivata |
 | 2018 | sì | sì | sì | sì | 2018-01-01 | — | Acqua derivata, TCD, FTY |
 | 2019 | sì | sì | sì | sì | 2019-01-01 | — | Acqua derivata, emissioni provinciali |
 | 2020 | sì | sì | sì | sì | 2020-01-01 | — | Acqua derivata |
-| 2021 | sì | sì | sì | sì | 2021-12-31 | v3 e semantica `COD_UTS`; artefatti `2021-01-01`/v2 respinti | Acqua derivata, TCD, FTY, fine TCPC |
+| 2021 | sì | sì | sì | sì | 2021-12-31 | v3 e semantica `COD_UTS`; artefatti `2021-01-01`/v2 respinti | TCD, FTY, fine TCPC; escluso BIGBANG provinciale annuale |
 | 2022 | sì | sì | sì | sì | 2022-01-01 | — | Acqua derivata |
 | 2023 | sì | sì | sì | sì | 2023-01-01 | — | Acqua derivata, TCD, emissioni provinciali |
 | 2024 | sì | sì | sì | sì | 2024-01-01 | — | Acqua derivata, Dissesto |
 | 2025 | sì | sì | sì | sì | 2025-01-01 | — | Acqua derivata, Suolo, mappa regionale Acqua ufficiale |
+| 2026 | sì | sì | sì | sì | 2026-01-01 | inventario H1E | fuori dalla copertura BIGBANG 1951–2025 |
 
-Non sono presenti geometrie materializzate per `1990`, `1995`, `2000` e `2005`; il 2006 non autorizza alcun backfill verso tali anni. Il 2021 non è oggi invalido: è valido soltanto con la data speciale e il contratto v3 documentati da ADR 0020 e 0021.
+Non sono presenti geometrie materializzate per `1990`, `1995` e `2000`; gli anni disponibili non autorizzano alcun backfill. Il 2021 canonico esiste con riferimento `2021-12-31` e contratto v3 documentati da ADR 0020 e 0021: valido per usi coerenti con quello snapshot, non per BIGBANG provinciale full-year 2021.
 
 ## Capacità storiche correnti
 
@@ -292,7 +304,7 @@ I codici usati sono specifici: `source_period_not_ingested`, `territory_geometry
 | 0008 | pienamente applicabile | dimensioni ufficiali preservate, essenziali per NFR/SNAP | — |
 | 0009 | da chiarire in seguito | regola il calcolo effimero del delta, ma si sovrappone al gate di capacità/evidenza di 0022 | H1D: esplicitare precedenza e requisiti metodo/geometria |
 | 0014 | domain-specific | autorizza derivazione BIGBANG limitata e separa ufficiale/derivato | — |
-| 0015 | applicabile con dettaglio successivo | exact-year/intervallo ufficiale; niente fallback. Il problema 2021 è stato risolto senza indebolire la policy | mantenere matrice derivata dall'inventario corrente |
+| 0015 | applicabile con dettaglio successivo | exact-year/intervallo ufficiale; niente fallback. Il canonical 2021 è valido al 2021-12-31, ma resta escluso dal BIGBANG provinciale full-year | mantenere matrice derivata dall'inventario corrente |
 | 0017 | parzialmente superato | l'identificazione TCDCL è corretta da 0018; copertura nazionale e integrità snapshot restano | leggere insieme a 0018 |
 | 0018 | domain-specific | contratto TCD 100 m e NoData valido | — |
 | 0019 | domain-specific | TCPC è intervallo 2018–2021 su geometria di fine periodo | — |
@@ -322,7 +334,7 @@ Sono domande, non risposte presunte:
 
 ## Output machine-readable
 
-Il report strutturato locale è `artifacts/reports/historical-coverage-audit.json`. Contiene dieci sorgenti, tredici famiglie dataset, tredici anni territoriali, la revisione ADR, i gap tipizzati e la coda H1B. È intenzionalmente ignorato da Git secondo la convenzione `/artifacts/` e non è un file da pubblicare in R2.
+Il report strutturato locale è `artifacts/reports/historical-coverage-audit.json`. Fotografa H1A e non è stato rigenerato in H1G: i tredici anni territoriali di quel report non rappresentano l’inventario post-H1E di 24 source year. Contiene dieci sorgenti, tredici famiglie dataset, la revisione ADR, i gap tipizzati e la coda H1B. È intenzionalmente ignorato da Git secondo la convenzione `/artifacts/` e non è un file da pubblicare in R2.
 
 ## Limiti e sicurezza H1A
 

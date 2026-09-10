@@ -219,7 +219,7 @@ def _water_domain(official: TableIndex, derived: pd.DataFrame, territory_id: str
     if not series:
         return _unavailable("water", level)
     latest = series[-1]
-    period = f"{latest['periodStart'][:4]}-{latest['periodEnd'][:4]}"
+    period = latest["periodEnd"][:4]
     return {
         "id": "water", "title": "Acqua", "availability": "available", "label": definition["label"],
         "source": "Elaborazione Stato d’Italia su raster ISPRA BIGBANG 10.0" if is_derived else "Stima modellistica ufficiale ISPRA BIGBANG 10.0",
