@@ -14,8 +14,8 @@ Questo documento descrive soltanto ciò che il repository registra, trasforma e 
 | Acqua | BIGBANG ufficiale | 1951–2025 annuale | 1951–2025 annuale | Italia, regioni | osservazioni ufficiali; mappa regionale su geometria 2025 | LOW | nessun gap noto nel contratto registrato |
 | Acqua | BIGBANG provinciale derivato | raster 1951–2025 | 2002–2010, 2012–2020, 2022–2025 (22 anni) | province | geometria ISTAT esatta dell'anno | HIGH | geometrie mancanti per gli altri anni |
 | Foreste | INFC | 2015 | 2015 | Italia, regioni | snapshot esatto 2015; mappa regionale | UNKNOWN | altre edizioni non note al repository |
-| Foreste | Copernicus TCD | 2018, 2021, 2023 | 2018, 2021, 2023 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | storia ulteriore sconosciuta |
-| Foreste | Copernicus FTY | 2018, 2021 | 2018, 2021 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | nessun prodotto post-2021 registrato |
+| Foreste | Copernicus TCD | 2018–2024 annuale (config H1H) | 2018, 2021, 2023 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | storia ulteriore sconosciuta |
+| Foreste | Copernicus FTY | 2018, 2021, 2024 (config H1H) | 2018, 2021 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | 2024 configurato; materializzazione H1H da eseguire |
 | Foreste | Copernicus DLT | 2018, 2021, 2023 | nessuna | raster registrato | non ancora applicata | HIGH | processing disabilitato |
 | Foreste | Copernicus TCPC | 2018–2021 | 2018–2021 | regioni, province, comuni | geometria di fine periodo, 2021-12-31 | MEDIUM | altri intervalli non noti |
 | Foreste | CORINE classi forestali | 1990, 2000, 2006, 2012, 2018 | nessuna | raster registrato | non ancora applicata | HIGH | non acquisito/elaborato/pubblicato |
@@ -150,6 +150,10 @@ config/sources/infc-2015-forests.yaml
 Snapshot ufficiale 2015: Italia e regioni nel canonical; mappe regionali su geometria esatta 2015. Nessuna estensione silenziosa a province o comuni. Display sì, serie temporale/delta no per singolo snapshot, ranking regionale se pubblicato. Opportunità `UNKNOWN` finché H1B non verifica altre edizioni ufficiali e comparabilità.
 
 ### Copernicus TCD, FTY e TCPC
+
+H1H prepara codice e configurazione per il ciclo moderno HR-VLCC: TCD annuale `2018–2024`, FTY `2018`, `2021`, `2024`, TCPC esclusivamente `2018–2021`. DLT resta non operativo (`statistical_api_enabled: false`). HRL legacy `2012`/`2015` resta rinviato per la discontinuità metodologica e di risoluzione; CORINE e INFC non vengono estesi.
+
+Questa preparazione non costituisce materializzazione o pubblicazione H1H. Le annualità pubblicate riportate sotto restano quelle verificate prima dell'espansione. Il prossimo run potrà riusare soltanto asset-periodi del canonical attivo idratato con metriche, copertura numerica/NoData, versioni territoriali, firme snapshot e richieste raster ancora compatibili. Periodi mancanti o incompatibili vengono ricalcolati singolarmente; il canonical ordinato e il sidecar finale descrivono l'intero inventario abilitato. Il sidecar H1H aggiunge una firma per asset-periodo che include contratto e geometrie, senza includere la lista degli anni.
 
 ```text
 config/sources/copernicus-forests.yaml#<asset>

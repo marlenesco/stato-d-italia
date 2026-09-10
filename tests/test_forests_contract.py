@@ -130,14 +130,14 @@ def test_statistical_jobs_use_the_historical_istat_population_for_each_snapshot(
         (asset["id"], start, end, territory["territory_version_id"])
         for asset, start, end, _snapshot, territory in jobs
     }
-    assert requested_years == [2018, 2021, 2023, 2018, 2021, 2021]
+    assert requested_years == [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2018, 2021, 2024, 2021]
     assert observed == {
-        ("hrl_tree_cover_density_100m", 2018, 2018, "it:region:01@2018-01-01"),
-        ("hrl_tree_cover_density_100m", 2021, 2021, "it:region:01@2021-12-31"),
-        ("hrl_tree_cover_density_100m", 2023, 2023, "it:region:01@2023-01-01"),
-        ("hrl_forest_type", 2018, 2018, "it:region:01@2018-01-01"),
-        ("hrl_forest_type", 2021, 2021, "it:region:01@2021-12-31"),
-        ("hrl_tree_cover_presence_change", 2018, 2021, "it:region:01@2021-12-31"),
+        (asset_id, start, end, f"it:region:01@{territory_reference_date(end)}")
+        for asset_id, periods in {
+            "hrl_tree_cover_density_100m": [(year, year) for year in range(2018, 2025)],
+            "hrl_forest_type": [(2018, 2018), (2021, 2021), (2024, 2024)],
+            "hrl_tree_cover_presence_change": [(2018, 2021)],
+        }.items() for start, end in periods
     }
 
 
@@ -164,7 +164,7 @@ def test_declared_process_slices_use_the_geometry_population_for_each_asset_peri
 
     forests.declared_forest_raw_paths(root)
 
-    assert seen_years == [2018, 2021, 2023, 2018, 2021, 2021]
+    assert seen_years == [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2018, 2021, 2024, 2021]
 
 
 def test_forest_slice_preserves_a_closed_canonical_municipality_population(
@@ -226,7 +226,7 @@ def test_catalog_queries_every_supported_asset_period_and_verifies_reference_tim
 
         def json(self) -> dict:
             query = calls[-1]["params"]["$filter"]
-            years = [year for year in (2018, 2021, 2023) if f"{year}-01-01" in query]
+            years = [year for year in range(2018, 2025) if f"{year}-01-01" in query]
             year = years[0]
             contains = query.split("contains(Name,'", 1)[1].split("')", 1)[0]
             asset = next(item for item in HRL["assets"] if item["catalog_name_contains_template"].format(start_year=2018 if "C2018-2021" in contains else year, end_year=2021 if "C2018-2021" in contains else year) == contains)
@@ -241,8 +241,8 @@ def test_catalog_queries_every_supported_asset_period_and_verifies_reference_tim
     monkeypatch.setattr(forests.requests, "get", get)
     products = forests._catalog_products(HRL)
 
-    assert len(products) == 9  # TCD (3), FTY (2), DLT (3), TCPC (1)
-    assert {tuple(item["period"]) for item in products if item["asset_id"] == "hrl_tree_cover_density_100m"} == {(2018, 2018), (2021, 2021), (2023, 2023)}
+    assert len(products) == 14  # TCD (7), FTY (3), disabled DLT catalogue (3), TCPC (1)
+    assert {tuple(item["period"]) for item in products if item["asset_id"] == "hrl_tree_cover_density_100m"} == {(year, year) for year in range(2018, 2025)}
     assert all("ContentDate/Start ge" in call["params"]["$filter"] for call in calls)
     assert all(call["headers"] == {"Accept": "application/json"} for call in calls)
 
@@ -521,15 +521,23 @@ def test_derived_delivery_maps_each_snapshot_to_its_historical_geometry(tmp_path
     rows: list[dict] = []
     coverage_entries: list[dict] = []
     geometry: dict[str, Path] = {}
-    for year in (2018, 2021):
+    for year in range(2018, 2025):
         territories = canonical / "territories" / f"reference_year={year}"
         territories.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"territory_id": "it:region:01", "name": "Piemonte", "istat_code": "01"}]).to_parquet(territories / "region.parquet")
-        rows.append({"metric_id": "tree_cover_mean", "territory_id": "it:region:01", "territory_version_id": f"it:region:01@{year}-01-01", "territory_level": "region", "period_start": f"{year}-01-01", "period_end": f"{year}-12-31", "value_decimal": 20.0, "unit_ucum": "%", "official_status": "derived_by_stato_italia", "methodology_version": "hrl_tree_cover_density_100m"})
-        coverage_entries.append({"assetId": "hrl_tree_cover_density_100m", "period": f"{year}-{year}", "territoryLevel": "region", "territoryReferenceYear": year, "territoryGeometryReference": f"istat-region-{year}.pmtiles", "expectedTerritoryIds": ["it:region:01"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": []})
         path = tmp_path / f"istat-region-{year}.pmtiles"
         path.touch()
         geometry[str(year)] = path
+    expected_periods = {
+        "tree_cover_mean": [(year, year) for year in range(2018, 2025)],
+        "forest_area_ha": [(2018, 2018), (2021, 2021), (2024, 2024)],
+        "tree_cover_gain_ha": [(2018, 2021)],
+    }
+    assets = {"tree_cover_mean": "hrl_tree_cover_density_100m", "forest_area_ha": "hrl_forest_type", "tree_cover_gain_ha": "hrl_tree_cover_presence_change"}
+    for metric, periods in expected_periods.items():
+        for start, end in periods:
+            rows.append({"metric_id": metric, "territory_id": "it:region:01", "territory_version_id": f"it:region:01@{territory_reference_date(end)}", "territory_level": "region", "period_start": f"{start}-01-01", "period_end": f"{end}-12-31", "value_decimal": 20.0, "unit_ucum": "%" if metric == "tree_cover_mean" else "ha", "official_status": "derived_by_stato_italia", "methodology_version": assets[metric]})
+            coverage_entries.append({"assetId": assets[metric], "period": f"{start}-{end}", "territoryLevel": "region", "territoryReferenceYear": end, "territoryGeometryReference": f"istat-region-{end}.pmtiles", "expectedTerritoryIds": ["it:region:01"], "numericTerritoryIds": ["it:region:01"], "validNoDataTerritoryIds": []})
     zonal = canonical / "forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
     zonal.parent.mkdir(parents=True)
     pd.DataFrame(rows).to_parquet(zonal)
@@ -540,16 +548,25 @@ def test_derived_delivery_maps_each_snapshot_to_its_historical_geometry(tmp_path
     generate_forests_delivery(zonal, infc, canonical, tmp_path / "delivery", "release-test", geometry, force=True)
 
     index = json.loads((tmp_path / "delivery" / "foreste" / "index.json").read_text())
-    assert index["mapGeometry"]["delivery/foreste/maps/tree_cover_mean/2018-2018/region.json"].endswith("istat-region-2018.pmtiles")
-    assert index["mapGeometry"]["delivery/foreste/maps/tree_cover_mean/2021-2021/region.json"].endswith("istat-region-2021.pmtiles")
+    expected_maps = {}
+    for metric, periods in expected_periods.items():
+        for start, end in periods:
+            logical = f"delivery/foreste/maps/{metric}/{start}-{end}/region.json"
+            expected_maps[logical] = f"delivery/foreste/geometry/istat-region-{end}.pmtiles"
+    assert index["mapGeometry"] == expected_maps
+    assert set(index["maps"]) == set(expected_maps)
+    # Having adjacent/current geometry must not satisfy missing exact 2019.
+    del geometry["2019"]
+    with pytest.raises(ValueError, match="lacks exact ISTAT geometry"):
+        generate_forests_delivery(zonal, infc, canonical, tmp_path / "missing-geometry", "release-test", geometry, force=True)
 
 
 def test_existing_raster_canonical_without_coverage_is_not_reused(tmp_path: Path) -> None:
     destination = tmp_path / "canonical" / "forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
     destination.parent.mkdir(parents=True)
     pd.DataFrame({"territory_level": ["region"]}).to_parquet(destination)
-    with pytest.raises(ValueError, match="lacks verified coverage"):
-        forests.ingest_forests(tmp_path, tmp_path / "canonical", mode="raster")
+    with pytest.raises(ValueError, match="Active forest canonical/coverage checksum mismatch"):
+        forests.ingest_forests(tmp_path, tmp_path / "canonical", mode="raster", active_canonical=(forests.sha256_file(destination), "0" * 64))
 
 
 def test_process_raster_grid_is_epsg3035_aligned_and_bounded() -> None:
@@ -626,12 +643,12 @@ def test_historical_snapshots_use_matching_geometry_and_are_not_compared_across_
 
 def test_raster_development_slice_has_bounded_process_api_requests() -> None:
     # Four configured regions produce four 2048px tiles per period at 100 m.
-    # 3 TCD + 2 FTY + 1 TCPC periods => 96 Process API requests, versus one
+    # 7 TCD + 3 FTY + 1 TCPC periods => 176 Process API requests, versus one
     # Statistical API request per territory and period.
     requests = 0
     for asset in (item for item in HRL["assets"] if item.get("statistical_api_enabled", True)):
         requests += len(_asset_periods(asset)) * 4 * 4
-    assert requests == 96
+    assert requests == 176
 
 
 def test_local_env_is_optional_and_never_overrides_shell_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -770,3 +787,196 @@ def test_catalog_preflight_is_read_only_and_run_regenerates_canonical_from_v2(
     regenerated = pd.read_parquet(cached)
     assert result["changed"] is True
     assert set(regenerated["source_asset_sha256"]) == {remote["signature"]}
+
+
+def test_h1h_enabled_periods_and_dynamic_territory_years(monkeypatch: pytest.MonkeyPatch) -> None:
+    assets = {asset["id"]: asset for asset in HRL["assets"]}
+    assert assets["hrl_tree_cover_density_100m"]["years"] == list(range(2018, 2025))
+    assert assets["hrl_forest_type"]["years"] == [2018, 2021, 2024]
+    assert assets["hrl_tree_cover_presence_change"]["periods"] == [[2018, 2021]]
+    assert assets["hrl_dominant_leaf_type"]["statistical_api_enabled"] is False
+    assert forests.forest_zonal_territory_years() == frozenset(range(2018, 2025))
+    monkeypatch.setitem(HRL, "assets", [
+        assets["hrl_tree_cover_density_100m"] | {"years": [2019, 2019]},
+        assets["hrl_tree_cover_presence_change"],
+        assets["hrl_dominant_leaf_type"] | {"years": [2099]},
+    ])
+    assert forests.forest_zonal_territory_years() == {2019, 2021}
+
+
+@pytest.fixture
+def forest_incremental_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Synthetic retained requests and old published inventory; no network/raster jobs."""
+    import copy
+    full_assets = copy.deepcopy(HRL["assets"])
+    old_assets = [asset | {"years": [2018, 2021, 2023] if asset["kind"] == "tree_cover_density" else [2018, 2021]}
+                  if asset["kind"] in {"tree_cover_density", "forest_type"} else asset for asset in full_assets]
+    root = tmp_path / "data"
+    canonical = root / "canonical"
+    destination = canonical / "forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
+    coverage = forests.forest_coverage_report_path(destination)
+    calls = []
+    geometry = Polygon([(12, 41), (12.1, 41), (12.1, 41.1), (12, 41.1)]).wkb
+
+    def territories(_root, year):
+        return pd.DataFrame([
+            {"territory_id": f"it:{level}:{code}", "territory_version_id": f"it:{level}:{code}@{territory_reference_date(year)}",
+             "level": level, "istat_code": code, "region_istat_code": "01", "geometry_wkb": geometry}
+            for level, code in (("region", "01"), ("province", "001"), ("municipality", "001001"), ("municipality", "001002"))
+        ])
+
+    monkeypatch.setenv("FORESTS_RAW_RETENTION", "retain")
+    monkeypatch.setenv(HRL["coverage_mode_environment"], "national")
+    monkeypatch.setattr(forests, "_slice_territories_with_region_code", territories)
+    monkeypatch.setattr(forests, "_expected_region_codes", lambda *_: {"01"})
+    monkeypatch.setattr(forests, "_process_tile_grid", lambda *_: [((0, 0, 100, 100), 1, 1, 0, 0)])
+    monkeypatch.setattr(forests.requests, "get", lambda *_a, **_k: pytest.fail("Live HTTP forbidden"))
+    monkeypatch.setattr(forests.requests, "post", lambda *_a, **_k: pytest.fail("Live HTTP forbidden"))
+
+    def process(asset, group, population):
+        calls.append(f"{asset['id']}:{group['start_year']}-{group['end_year']}")
+        records = []
+        for territory in population.to_dict("records"):
+            if territory["istat_code"] == "001002":
+                continue
+            for index, metric in enumerate(sorted(forests._FOREST_METRICS[asset["kind"]])):
+                row = forests._record(asset | {"source_id": HRL["source_id"]}, "retained", group["source_hash"], territory,
+                                      metric, float(group["end_year"] - 2000 + index), group["start_year"], group["end_year"])
+                records.append(row | {"source_snapshot_signature": group["snapshot_signature"]})
+        return records, ["it:municipality:001002"]
+    monkeypatch.setattr(forests, "_process_raster_records", process)
+
+    def retained(assets, changed=None):
+        products = []
+        for asset in assets:
+            if not asset.get("statistical_api_enabled", True):
+                continue
+            for start, end in _asset_periods(asset):
+                key = f"{asset['id']}:{start}-{end}"
+                products.append({"asset_id": asset["id"], "period": [start, end], "items": [{
+                    "Id": key + ("-updated" if key == changed else ""), "Name": key,
+                    "ContentDate": {"Start": f"{start}-01-01T00:00:00Z", "End": f"{end}-12-31T23:59:59Z"},
+                }]})
+        catalog = {"products": products}
+        path = root / "raw" / HRL["source_id"] / "catalog.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(catalog))
+        for asset in assets:
+            if not asset.get("statistical_api_enabled", True):
+                continue
+            for start, end in _asset_periods(asset):
+                snapshot = _catalog_snapshot(catalog, asset, start, end)
+                year = territory_reference_year_for_period(asset, start, end)
+                path = forests._process_slice_path(root, asset, start, end, "01", 0, 0)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"synthetic-{asset['id']}-{start}-{end}".encode())
+                _, request_hash, request = _process_request_contract(asset, (0, 0, 100, 100), 1, 1, snapshot, year, "01", start, end)
+                digest = forests.sha256_file(path)
+                path.with_suffix(path.suffix + ".metadata.json").write_text(json.dumps({"sha256": digest, "request": request, "processRequestSha256": request_hash}))
+                entries = [{"path": path.name, "sha256": digest, "bytes": path.stat().st_size, "request": request}]
+                payload = {"asset_id": asset["id"], "period": [start, end], "territory_reference_year": year,
+                           "territory_geometry_reference": f"istat-region-{year}.pmtiles", "region_istat_code": "01",
+                           "snapshot_signature": snapshot["signature"], "entries": entries}
+                signature = forests.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                manifest = {"schemaVersion": 2, "source_id": HRL["source_id"], "asset_id": asset["id"], "period": [start, end],
+                            "territoryReferenceYear": year, "territoryGeometryReference": f"istat-region-{year}.pmtiles",
+                            "region_istat_code": "01", "source_signature": signature, "snapshot_signature": snapshot["signature"], "entries": entries}
+                (path.parent / "slice-manifest.json").write_text(json.dumps(manifest))
+
+    monkeypatch.setitem(HRL, "assets", old_assets)
+    retained(old_assets)
+    forests.ingest_forests(root, canonical, mode="raster")
+    # Match the existing v3 production sidecar, without H1H's additive evidence.
+    report = json.loads(coverage.read_text())
+    report.pop("assetPeriodEvidence")
+    coverage.write_text(json.dumps(report))
+    monkeypatch.setitem(HRL, "assets", full_assets)
+    retained(full_assets)
+    calls.clear()
+    return root, canonical, destination, coverage, calls, lambda changed=None: retained(full_assets, changed)
+
+
+def test_forest_expansion_reuses_six_periods_processes_five_then_is_deterministic(forest_incremental_state) -> None:
+    root, canonical, destination, coverage, calls, _ = forest_incremental_state
+    active = (forests.sha256_file(destination), forests.sha256_file(coverage))
+    report = forests.ingest_forests(root, canonical, mode="raster", active_canonical=active)
+    expected_new = {f"hrl_tree_cover_density_100m:{year}-{year}" for year in (2019, 2020, 2022, 2024)} | {"hrl_forest_type:2024-2024"}
+    expected_old = {f"hrl_tree_cover_density_100m:{year}-{year}" for year in (2018, 2021, 2023)} | {
+        "hrl_forest_type:2018-2018", "hrl_forest_type:2021-2021", "hrl_tree_cover_presence_change:2018-2021",
+    }
+    assert set(calls) == set(report["asset_periods_processed"]) == expected_new
+    assert set(report["asset_periods_reused"]) == expected_old
+    assert report["changed"] is True
+    final = pd.read_parquet(destination)
+    assert not final.duplicated(["methodology_version", "period_start", "period_end", "territory_id", "metric_id"]).any()
+    assert set(final.methodology_version) == {"hrl_tree_cover_density_100m", "hrl_forest_type", "hrl_tree_cover_presence_change"}
+    sidecar = json.loads(coverage.read_text())
+    assert len(sidecar["assetPeriodEvidence"]) == 11
+    assert sum(entry["validNoDataCount"] for entry in sidecar["entries"]) == 11
+    active = (forests.sha256_file(destination), forests.sha256_file(coverage))
+    calls.clear()
+    repeated = forests.ingest_forests(root, canonical, mode="raster", active_canonical=active)
+    assert calls == repeated["asset_periods_processed"] == []
+    assert len(repeated["asset_periods_reused"]) == 11
+    assert repeated["changed"] is False
+    assert (forests.sha256_file(destination), forests.sha256_file(coverage)) == active
+
+
+@pytest.mark.parametrize("stale", ["snapshot", "metric", "duplicate", "version", "nodata", "source", "boundary"])
+def test_forest_rebuilds_only_incompatible_existing_period(forest_incremental_state, stale) -> None:
+    root, canonical, destination, coverage, calls, retained = forest_incremental_state
+    forests.ingest_forests(root, canonical, mode="raster", active_canonical=(forests.sha256_file(destination), forests.sha256_file(coverage)))
+    target = "hrl_tree_cover_density_100m:2021-2021"
+    table = pd.read_parquet(destination)
+    match = (table.methodology_version == "hrl_tree_cover_density_100m") & (table.period_start == "2021-01-01")
+    if stale == "snapshot":
+        retained(target)
+    elif stale == "metric":
+        table = table.drop(table[match].index[0])
+    elif stale == "duplicate":
+        table = pd.concat([table, table[match].iloc[:1]], ignore_index=True)
+    elif stale == "version":
+        table.loc[match, "territory_version_id"] = "it:region:01@2021-01-01"
+    elif stale == "source":
+        table.loc[match, "source_asset_sha256"] = "0" * 64
+    elif stale == "nodata":
+        report = json.loads(coverage.read_text())
+        next(entry for entry in report["entries"] if entry["assetId"] == "hrl_tree_cover_density_100m" and entry["period"] == "2021-2021" and entry["territoryLevel"] == "municipality")["validNoDataTerritoryIds"] = []
+        coverage.write_text(json.dumps(report))
+    table.to_parquet(destination, index=False, compression="zstd")
+    calls.clear()
+    report = forests.ingest_forests(root, canonical, mode="raster", active_canonical=(forests.sha256_file(destination), forests.sha256_file(coverage)), changed_boundary_years={2019} if stale == "boundary" else None)
+    assert calls == report["asset_periods_processed"] == (["hrl_tree_cover_density_100m:2019-2019"] if stale == "boundary" else [target])
+    assert len(report["asset_periods_reused"]) == 10
+
+
+def test_forest_does_not_reuse_unpublished_local_canonical(forest_incremental_state) -> None:
+    root, canonical, _, _, calls, _ = forest_incremental_state
+    report = forests.ingest_forests(root, canonical, mode="raster")
+    assert len(calls) == len(report["asset_periods_processed"]) == 11
+    assert report["asset_periods_reused"] == []
+
+
+@pytest.mark.parametrize("invalid", ["request", "snapshot", "checksum", "missing_period"])
+def test_forest_rejects_unverified_retained_inputs_before_replacing_canonical(forest_incremental_state, invalid) -> None:
+    root, canonical, destination, coverage, _, _ = forest_incremental_state
+    active = (forests.sha256_file(destination), forests.sha256_file(coverage))
+    asset = next(asset for asset in HRL["assets"] if asset["kind"] == "tree_cover_density")
+    path = forests._process_slice_path(root, asset, 2021, 2021, "01", 0, 0)
+    if invalid == "request":
+        sidecar = path.with_suffix(path.suffix + ".metadata.json")
+        metadata = json.loads(sidecar.read_text())
+        metadata["request"]["territory_reference_year"] = 2025
+        sidecar.write_text(json.dumps(metadata))
+    elif invalid == "snapshot":
+        manifest_path = path.parent / "slice-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["snapshot_signature"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest))
+    elif invalid == "checksum":
+        path.write_bytes(b"corrupt raster")
+    else:
+        (path.parent / "slice-manifest.json").unlink()
+    with pytest.raises(ValueError, match="CDSE Process API"):
+        forests.ingest_forests(root, canonical, mode="raster", active_canonical=active)
+    assert (forests.sha256_file(destination), forests.sha256_file(coverage)) == active

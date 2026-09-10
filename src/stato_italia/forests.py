@@ -33,7 +33,6 @@ HRL = load_source("copernicus-forests")
 CORINE = load_source("copernicus-corine-forests")
 INFC = load_source("infc-2015-forests")
 ZONAL_ALGORITHM_VERSION = "forests-zonal-statistics-v3"
-FOREST_ZONAL_TERRITORY_YEARS = frozenset({2018, 2021, 2023})
 MAPPABLE_LEVELS = ("municipality", "province", "region")
 CATALOG_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 CATALOG_MAX_ATTEMPTS = 5
@@ -271,6 +270,15 @@ def _persist_catalog(root: Path, catalog: dict) -> dict:
 
 def _asset_periods(asset: dict) -> list[tuple[int, int]]:
     return [(int(year), int(year)) for year in asset.get("years", [])] + [tuple(map(int, period)) for period in asset.get("periods", [])]
+
+
+def forest_zonal_territory_years() -> frozenset[int]:
+    """Resolve unique exact boundary years from enabled HRL logical periods."""
+    return frozenset(
+        territory_reference_year_for_period(asset, start, end)
+        for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)
+        for start, end in _asset_periods(asset)
+    )
 
 
 def _process_evalscript(asset: dict) -> str:
@@ -1366,31 +1374,113 @@ def _require_numeric_tree_cover_change_coverage(entries: list[dict]) -> None:
                 raise ValueError(f"CDSE Tree Cover Presence Change has no numeric regional coverage: {period}")
 
 
-def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: str | None = None) -> dict:
+_FOREST_METRICS = {
+    "tree_cover_density": {"tree_cover_mean", "tree_cover_p25", "tree_cover_p50", "tree_cover_p75"},
+    "forest_type": {"forest_cover_hrl", "forest_area_ha", "forest_share_pct", "broadleaved_area_hrl_ha", "coniferous_area_hrl_ha", "mixed_forest_area_hrl_ha"},
+    "tree_cover_change": {"tree_cover_gain_ha", "tree_cover_loss_ha"},
+}
+
+
+def _forest_period_evidence(root: Path, asset: dict, start: int, end: int, groups: list[dict], territories: pd.DataFrame, catalog: dict) -> str:
+    """Validate retained requests against today's source contract before any reuse."""
+    year = territory_reference_year_for_period(asset, start, end)
+    snapshot = _catalog_snapshot(catalog, asset, start, end)
+    regions = territories[territories["level"] == "region"].set_index("istat_code")
+    if len(groups) != len(regions) or {group["region_istat_code"] for group in groups} != set(regions.index):
+        raise ValueError(f"Incomplete CDSE Process API slice manifests for {asset['id']}/{start}-{end}")
+    for group in groups:
+        if group["territory_reference_year"] != year or group["snapshot_signature"] != snapshot["signature"]:
+            raise ValueError(f"Stale CDSE Process API source or geometry: {asset['id']}/{start}-{end}")
+        manifest = json.loads(group["manifest_path"].read_text())
+        region = regions.loc[group["region_istat_code"]]
+        expected_entries = []
+        grid = _process_tile_grid(region["geometry_wkb"], int(asset["process_resolution_m"]), int(asset["process_max_pixels"]))
+        for bbox, width, height, row, column in grid:
+            path = _process_slice_path(root, asset, start, end, group["region_istat_code"], row, column)
+            _, request_hash, request = _process_request_contract(asset, bbox, width, height, snapshot, year, group["region_istat_code"], start, end)
+            metadata = json.loads(path.with_suffix(path.suffix + ".metadata.json").read_text())
+            digest = sha256_file(path)
+            if metadata.get("request") != request or metadata.get("processRequestSha256") != request_hash or metadata.get("sha256") != digest:
+                raise ValueError(f"Stale CDSE Process API request provenance: {path}")
+            expected_entries.append({"path": path.name, "sha256": digest, "bytes": path.stat().st_size, "request": request})
+        payload = {"asset_id": asset["id"], "period": [start, end], "territory_reference_year": year,
+                   "territory_geometry_reference": f"istat-region-{year}.pmtiles", "region_istat_code": group["region_istat_code"],
+                   "snapshot_signature": snapshot["signature"], "entries": expected_entries}
+        signature = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if manifest["entries"] != expected_entries or group["source_hash"] != signature:
+            raise ValueError(f"Stale CDSE Process API manifest provenance: {group['manifest_path']}")
+    # Period inventory is excluded: adding a year must not invalidate other years.
+    contract = {key: value for key, value in asset.items() if key not in {"years", "periods"}}
+    population = sorted((row.territory_id, row.territory_version_id, row.level, row.region_istat_code,
+                         sha256(bytes(row.geometry_wkb)).hexdigest()) for row in territories.itertuples())
+    return sha256(json.dumps({"asset": contract, "period": [start, end], "algorithm": ZONAL_ALGORITHM_VERSION,
+                              "population": population, "sources": sorted(group["source_hash"] for group in groups)},
+                             sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _forest_period_matches(rows: pd.DataFrame, entries: list[dict], asset: dict, start: int, end: int,
+                           groups: list[dict], territories: pd.DataFrame) -> bool:
+    """Require the full metric/territory population and exact row provenance."""
+    try:
+        if rows.empty or rows.duplicated(["territory_id", "metric_id"]).any():
+            return False
+        metrics = _FOREST_METRICS[asset["kind"]]
+        year = territory_reference_year_for_period(asset, start, end)
+        period = f"{start}-{end}"
+        if set(rows.metric_id) != metrics or set(entry["territoryLevel"] for entry in entries) != set(MAPPABLE_LEVELS):
+            return False
+        for level in MAPPABLE_LEVELS:
+            expected, numeric, _ = _coverage_state(entries, asset["id"], period, level)
+            if _coverage_reference_year(entries, asset["id"], period, level) != year:
+                return False
+            if expected != set(territories.loc[territories.level == level, "territory_id"]):
+                return False
+            level_rows = rows[rows.territory_level == level]
+            if set(zip(level_rows.territory_id, level_rows.metric_id)) != {(tid, metric) for tid in numeric for metric in metrics}:
+                return False
+        population = territories.set_index("territory_id").to_dict("index")
+        by_region = {group["region_istat_code"]: group for group in groups}
+        if set(rows.source_asset_sha256) != {group["source_hash"] for group in groups}:
+            return False
+        for record in rows.to_dict("records"):
+            territory = population[record["territory_id"]] | {"territory_id": record["territory_id"]}
+            group = by_region[territory["region_istat_code"]]
+            expected = _record(asset | {"source_id": HRL["source_id"]}, "", group["source_hash"], territory, record["metric_id"], 0, start, end)
+            for key in ("derived_metric_id", "dataset_id", "source_asset_sha256", "territory_version_id", "territory_level", "period_start", "period_end", "reference_year", "unit_ucum", "value_state", "official_status", "algorithm_version", "methodology_version"):
+                if record[key] != expected[key]:
+                    return False
+            if record["source_snapshot_signature"] != group["snapshot_signature"] or not math.isfinite(float(record["value_decimal"])):
+                return False
+        return True
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: str | None = None, *, active_canonical: tuple[str, str] | None = None, changed_boundary_years: set[int] | None = None) -> dict:
     destination = canonical_root / "forests" / f"algorithm_version={ZONAL_ALGORITHM_VERSION}" / "zonal_statistics.parquet"
     selected_mode = mode or os.getenv(HRL["processing_mode_environment"], "raster")
     if selected_mode not in HRL["processing_modes"]:
         raise ValueError(f"Unsupported {HRL['processing_mode_environment']}: {selected_mode}")
     if selected_mode == "statistical-api":
         return _ingest_statistical_api(root, canonical_root, destination, force)
-    if destination.exists() and not force:
-        table = pd.read_parquet(destination)
-        coverage_path = forest_coverage_report_path(destination)
-        if not coverage_path.exists():
-            raise ValueError("Existing raster forest canonical lacks verified coverage")
-        coverage = json.loads(coverage_path.read_text())
-        entries = coverage.get("entries", [])
-        if coverage.get("coverageMode") != forest_coverage_mode() or not isinstance(entries, list):
-            raise ValueError("Existing raster forest canonical coverage does not match current policy")
-        for asset_id, period in {(entry.get("assetId"), entry.get("period")) for entry in entries if isinstance(entry, dict)}:
-            asset = next((item for item in HRL["assets"] if item["id"] == asset_id), None)
-            if not isinstance(asset_id, str) or not isinstance(period, str) or asset is None:
-                raise ValueError("Existing raster forest canonical coverage does not match current policy")
-            start_year, end_year = map(int, period.split("-"))
-            reference_year = territory_reference_year_for_period(asset, start_year, end_year)
-            if _expected_region_codes_from_coverage(entries, asset_id, period, reference_year) != _expected_region_codes(canonical_root, reference_year):
-                raise ValueError("Existing raster forest canonical coverage does not match current policy")
-        return {"changed": False, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict()}
+    prior = pd.DataFrame()
+    prior_report: dict = {}
+    coverage_path = forest_coverage_report_path(destination)
+    old_hash = sha256_file(destination) if destination.exists() else None
+    old_coverage_hash = sha256_file(coverage_path) if coverage_path.exists() else None
+    if active_canonical is not None and not force:
+        if not destination.exists() or not coverage_path.exists() or (sha256_file(destination), sha256_file(coverage_path)) != active_canonical:
+            raise ValueError("Active forest canonical/coverage checksum mismatch")
+        prior = pd.read_parquet(destination)
+        prior_report = json.loads(coverage_path.read_text())
+        if (prior_report.get("coverageMode") != forest_coverage_mode() or prior_report.get("schemaVersion") != 2
+                or not {"methodology_version", "period_start", "period_end"} <= set(prior.columns)):
+            prior = pd.DataFrame()
+    reused: list[str] = []
+    processed: list[str] = []
+    period_evidence: dict[str, str] = {}
+    catalog_path = root / "raw" / HRL["source_id"] / "catalog.json"
+    catalog = json.loads(catalog_path.read_text()) if catalog_path.exists() else {}
     records: list[dict] = []
     coverage: list[dict] = []
     raster_paths: list[Path] = []
@@ -1410,24 +1500,50 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
         if len(groups) != expected_groups:
             raise ValueError(f"Incomplete CDSE Process API slice manifests for {original['id']}: groups={len(groups)}, expected={expected_groups}")
         process_groups_found = True
-        metrics_per_territory = {"tree_cover_density": 4, "forest_type": 6, "tree_cover_change": 2}[original["kind"]]
-        for group in groups:
-            expected_reference_year = territory_reference_year_for_period(original, group["start_year"], group["end_year"])
-            if group["territory_reference_year"] != expected_reference_year:
-                raise ValueError(f"CDSE Process API slice has an invalid territory reference: {group['manifest_path']}")
-            territories = _slice_territories_with_region_code(canonical_root, expected_reference_year)
-            expected_region_codes_by_year.setdefault(expected_reference_year, _expected_region_codes(canonical_root, expected_reference_year))
-            grouped_territories = territories[territories["region_istat_code"] == group["region_istat_code"]]
-            count = len(grouped_territories)
-            expected_records += count * metrics_per_territory
-            raster_paths.extend(group["paths"])
-            group_records, valid_nodata = _process_raster_records(original, group, territories)
-            records.extend(group_records)
-            for level in MAPPABLE_LEVELS:
-                expected = set(grouped_territories.loc[grouped_territories["level"] == level, "territory_id"].astype(str))
-                numeric = {str(record["territory_id"]) for record in group_records if record["territory_level"] == level}
-                coverage.append({"assetId": original["id"], "period": f"{group['start_year']}-{group['end_year']}", "territoryLevel": level, "territoryReferenceYear": expected_reference_year, "territoryGeometryReference": f"istat-{level}-{expected_reference_year}.pmtiles", "expectedTerritoryIds": sorted(expected), "numericTerritoryIds": sorted(numeric), "validNoDataTerritoryIds": sorted(set(valid_nodata) & expected)})
+        configured_periods = set(_asset_periods(original))
+        if {(group["start_year"], group["end_year"]) for group in groups} != configured_periods:
+            raise ValueError(f"Unexpected CDSE Process API periods for {original['id']}")
+        metrics_per_territory = len(_FOREST_METRICS[original["kind"]])
+        for start, end in sorted(configured_periods):
+            period_groups = [group for group in groups if (group["start_year"], group["end_year"]) == (start, end)]
+            year = territory_reference_year_for_period(original, start, end)
+            territories = _slice_territories_with_region_code(canonical_root, year)
+            expected_region_codes_by_year.setdefault(year, _expected_region_codes(canonical_root, year))
+            key = f"{original['id']}:{start}-{end}"
+            evidence = _forest_period_evidence(root, original, start, end, period_groups, territories, catalog)
+            period_evidence[key] = evidence
+            entries = [entry for entry in prior_report.get("entries", []) if entry.get("assetId") == original["id"] and entry.get("period") == f"{start}-{end}"]
+            rows = prior.loc[(prior.methodology_version == original["id"]) & (prior.period_start == f"{start}-01-01") & (prior.period_end == f"{end}-12-31")] if not prior.empty else prior
+            # Existing v3 rows already bind metric identities to exact source
+            # manifests and territory versions. New sidecars additionally bind
+            # the full asset contract and boundary bytes, excluding year lists.
+            if (year not in (changed_boundary_years or set())
+                    and prior_report.get("assetPeriodEvidence", {}).get(key, evidence) == evidence
+                    and _forest_period_matches(rows, entries, original, start, end, period_groups, territories)):
+                records.extend(rows.to_dict("records"))
+                coverage.extend(entries)
+                expected_records += len(territories) * metrics_per_territory
+                reused.append(key)
+                continue
+            processed.append(key)
+            for group in period_groups:
+                expected_reference_year = territory_reference_year_for_period(original, group["start_year"], group["end_year"])
+                if group["territory_reference_year"] != expected_reference_year:
+                    raise ValueError(f"CDSE Process API slice has an invalid territory reference: {group['manifest_path']}")
+                grouped_territories = territories[territories["region_istat_code"] == group["region_istat_code"]]
+                count = len(grouped_territories)
+                expected_records += count * metrics_per_territory
+                raster_paths.extend(group["paths"])
+                group_records, valid_nodata = _process_raster_records(original, group, territories)
+                records.extend(group_records)
+                for level in MAPPABLE_LEVELS:
+                    expected = set(grouped_territories.loc[grouped_territories["level"] == level, "territory_id"].astype(str))
+                    numeric = {str(record["territory_id"]) for record in group_records if record["territory_level"] == level}
+                    coverage.append({"assetId": original["id"], "period": f"{group['start_year']}-{group['end_year']}", "territoryLevel": level, "territoryReferenceYear": expected_reference_year, "territoryGeometryReference": f"istat-{level}-{expected_reference_year}.pmtiles", "expectedTerritoryIds": sorted(expected), "numericTerritoryIds": sorted(numeric), "validNoDataTerritoryIds": sorted(set(valid_nodata) & expected)})
     if process_groups_found:
+        configured = {f"{asset['id']}:{start}-{end}" for asset in HRL["assets"] if asset.get("statistical_api_enabled", True) for start, end in _asset_periods(asset)}
+        if set(period_evidence) != configured:
+            raise ValueError("Forest canonical lacks configured enabled asset-periods")
         if len(records) > expected_records:
             raise ValueError(f"Duplicate CDSE Process API raster coverage: records={len(records)}, expected<={expected_records}")
     else:
@@ -1436,6 +1552,8 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
         # the manifest-based Process API path above to avoid duplicate borders.
         for source in (HRL, CORINE):
             for original in source["assets"]:
+                if not original.get("statistical_api_enabled", True):
+                    continue
                 asset = original | {"source_id": source["source_id"]}
                 for path in _raster_files(root, source, asset):
                     raster_paths.append(path)
@@ -1447,15 +1565,16 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
                     records.extend(_raster_records(asset, path, meta["sha256"], pd.concat(frames, ignore_index=True)))
     if not records:
         raise FileNotFoundError("No Copernicus/CLC GeoTIFF raw assets. Raster mode requires retained, validated raster assets.")
-    table = pd.DataFrame(records)
+    table = pd.DataFrame(records).sort_values(["methodology_version", "period_start", "period_end", "territory_level", "territory_id", "metric_id"], kind="stable").reset_index(drop=True)
     if table.duplicated(["derived_metric_id"]).any(): raise ValueError("Duplicate forest zonal metrics")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    table.to_parquet(destination, index=False, compression="zstd")
     coverage_path = forest_coverage_report_path(destination)
     if process_groups_found:
         report = _coverage_report(table, coverage, expected_region_codes_by_year)
         _require_numeric_tree_cover_change_coverage(report["entries"])
+        report["assetPeriodEvidence"] = dict(sorted(period_evidence.items()))
         json_dump(coverage_path, report)
+    table.to_parquet(destination, index=False, compression="zstd")
     retention = os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])
     if retention == "metadata_only":
         # Canonical and sidecar checksum/provenance now exist; only exact raster
@@ -1463,4 +1582,4 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
         for path in raster_paths: path.unlink()
     elif retention != "retain":
         raise ValueError("FORESTS_RAW_RETENTION must be retain or metadata_only")
-    return {"changed": True, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "reference_years": sorted(table.reference_year.unique().tolist()), "coverage_path": str(coverage_path) if coverage_path.exists() else None, "raw_retention": retention}
+    return {"changed": old_hash != sha256_file(destination) or old_coverage_hash != (sha256_file(coverage_path) if coverage_path.exists() else None), "asset_periods_reused": reused, "asset_periods_processed": processed, "records": len(table), "canonical_bytes": destination.stat().st_size, "records_by_level": table.groupby("territory_level").size().to_dict(), "reference_years": sorted(table.reference_year.unique().tolist()), "coverage_path": str(coverage_path) if coverage_path.exists() else None, "raw_retention": retention}
