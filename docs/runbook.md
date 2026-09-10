@@ -165,8 +165,9 @@ contano come controllate/acquisite le sorgenti soltanto portate avanti.
 
 Il preflight Copernicus calcola la signature del catalogo remoto senza scrivere
 `data/raw`, canonical o cache. Solo il vero run geospaziale persiste
-`catalog.json`; una signature nuova forza la rigenerazione delle statistiche
-zonali. Il preflight IdroGEO confronta invece una signature deterministica dei
+`catalog.json`; una signature nuova attiva il processing Copernicus; il controllo di riuso
+asset-periodo determina poi quali periodi zonali devono essere effettivamente
+ricalcolati. Il preflight IdroGEO confronta invece una signature deterministica dei
 quattro export reali (`country`, `regions`, `provinces`, `municipalities`), non
 la risposta dell'URL base dell'API.
 
@@ -294,8 +295,8 @@ Le slice raster CDSE sono riusabili soltanto con griglia e contratto di
 richiesta ancora identici.
 
 Nel dominio geospatial, un cambiamento INFC rigenera la geometria regionale 2015;
-Copernicus usa geometrie storiche dipendenti dal periodo: 2018, 2021 e 2023
-secondo il contratto dell'asset. Un aggiornamento di un anno diverso non invalida
+Copernicus usa le geometrie storiche esatte derivate dai periodi HRL abilitati,
+attualmente 2018–2024 secondo il contratto degli asset. Un aggiornamento di un anno diverso non invalida
 la geometria storica 2015. Gli indici delivery referenziano
 soltanto geometrie presenti nella release e le mappe dichiarano il reference year
 compatibile. Le signature delle canonical Foreste e degli input semantici di
