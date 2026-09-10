@@ -13,3 +13,4 @@ __pycache__/
 /apps/web/.playwright-cli/
 output/
 apps/web/output/
+/apps/web/public/vendor/maplibre/
