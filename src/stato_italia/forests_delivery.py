@@ -81,9 +81,10 @@ def generate_forests_delivery(zonal_path: Path | None, infc_path: Path, territor
     required = {"metric_id", "territory_id", "territory_version_id", "territory_level", "period_start", "period_end", "value_decimal", "official_status"}
     if required - set(infc.columns) or (not zonal.empty and required - set(zonal.columns)): raise ValueError("Forest canonical contract missing delivery fields")
     root = destination / "foreste"
+    has_legacy = "source_product_json" in zonal and zonal["source_product_json"].notna().any()
     _write(root / "provenance.json", {
         "schemaVersion": 1, "releaseId": release_id, "theme": "foreste",
-        "datasets": [load_source("copernicus-forests"), load_source("copernicus-corine-forests"), INFC],
+        "datasets": [load_source("copernicus-forests"), load_source("copernicus-corine-forests"), INFC, *([load_source("copernicus-forests-legacy")] if has_legacy else [])],
         "officialVsDerived": {
             "official_observation": "Statistiche INFC2015 ufficiali pubblicate per Italia e Regioni.",
             "derived_metric": "Elaborazioni Stato d’Italia: statistiche zonali su raster Copernicus/CLC e poligoni ISTAT della data di riferimento.",
@@ -106,11 +107,17 @@ def generate_forests_delivery(zonal_path: Path | None, infc_path: Path, territor
             period_key = f"{start[:4]}-{end[:4]}"
             if source_kind == "derived" and "methodology_version" not in rows.columns:
                 raise ValueError("Derived Forest canonical contract lacks methodology_version")
+            source_contract = {}
+            if "source_product_json" in rows and rows["source_product_json"].notna().any():
+                contracts = rows["source_product_json"].dropna().unique()
+                if len(contracts) != 1 or rows["source_product_json"].isna().any():
+                    raise ValueError("Forest delivery has mixed source product contracts")
+                source_contract = {"sourceContract": json.loads(contracts[0])}
             reference_year = int(reference_dates[0][:4])
             coverage = _coverage_for_map(coverage_report, str(rows.iloc[0].methodology_version), period_key, level, reference_year) if source_kind == "derived" and coverage_report else None
             logical = f"delivery/foreste/maps/{metric}/{period_key}/{level}.json"
             _write(destination / logical.removeprefix("delivery/"), {
-                "schemaVersion": 1, "releaseId": release_id, "theme": "foreste", "kind": f"{source_kind}_snapshot_map_values",
+                "schemaVersion": 1, "releaseId": release_id, "theme": "foreste", "kind": f"{source_kind}_snapshot_map_values", **source_contract,
                 "metricId": metric, "unit": rows.iloc[0].unit_ucum, "periodStart": start, "periodEnd": end, "territoryLevel": level, "territoryReferenceDate": reference_dates[0], "territoryReferenceYear": reference_year,
                 "territoryGeometryReference": f"istat-{level}-{reference_dates[0][:4]}.pmtiles", "coverage": coverage,
                 "columns": ["territoryId", "value"], "values": [[row.territory_id, float(row.value_decimal)] for row in rows.itertuples()], "provenanceRef": "delivery/foreste/provenance.json",
@@ -119,7 +126,7 @@ def generate_forests_delivery(zonal_path: Path | None, infc_path: Path, territor
             map_geometry[logical] = f"delivery/foreste/geometry/{expected_geometry}"
             ranking_logical = f"delivery/foreste/rankings/{metric}/{period_key}/{level}.json"
             _write(destination / ranking_logical.removeprefix("delivery/"), {
-                "schemaVersion": 1, "releaseId": release_id, "theme": "foreste", "kind": "derived_slice_comparison",
+                "schemaVersion": 1, "releaseId": release_id, "theme": "foreste", "kind": "derived_slice_comparison", **source_contract,
                 "algorithmVersion": "forests-slice-ranking-v2", "scopeLabel": _ranking_scope(source_kind, level, coverage),
                 "metricId": metric, "periodStart": start, "periodEnd": end, "territoryLevel": level,
                 "rows": _ranking_rows(rows, territory_root, int(reference_dates[0][:4]), level), "provenanceRef": "delivery/foreste/provenance.json",

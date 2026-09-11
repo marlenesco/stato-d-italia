@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import rasterio
 import requests
 from pyproj import Transformer
@@ -27,6 +28,7 @@ from .common import json_dump, now_iso, sha256_file, stable_id
 from .download import download
 from .ingestion_plan import planned_catalog_check
 from .registry import load_source
+from .forests_legacy import LEGACY, legacy_enabled, fetch_legacy_forests, legacy_zonal_records, raw_path
 from .territories import validate_territory_hierarchy
 
 HRL = load_source("copernicus-forests")
@@ -276,7 +278,7 @@ def forest_zonal_territory_years() -> frozenset[int]:
     """Resolve unique exact boundary years from enabled HRL logical periods."""
     return frozenset(
         territory_reference_year_for_period(asset, start, end)
-        for asset in HRL["assets"] if asset.get("statistical_api_enabled", True)
+        for asset in [*HRL["assets"], *(LEGACY["assets"] if legacy_enabled() else [])] if asset.get("statistical_api_enabled", True)
         for start, end in _asset_periods(asset)
     )
 
@@ -510,22 +512,23 @@ def fetch_forests(root: Path, offline: bool = False, *, check_geospatial: bool =
         for asset in INFC["assets"]:
             target = root / "raw" / INFC["source_id"] / f"{asset['id']}.zip"
             infc.append(download(asset["url"], target, INFC["source_id"], offline=offline, user_agent=INFC["download_user_agent"], source_context={"asset_id": asset["id"], "metric_id": asset["metric_id"]}))
+    legacy = fetch_legacy_forests(root, offline=offline) if check_geospatial and legacy_enabled() else []
     if offline:
-        return {"infc": infc, "catalog": {"status": "offline"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
+        return {"legacy": legacy, "infc": infc, "catalog": {"status": "offline"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     if not check_geospatial:
-        return {"infc": infc, "catalog": {"status": "deferred"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
+        return {"legacy": legacy, "infc": infc, "catalog": {"status": "deferred"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
     planned_catalog = planned_catalog_check()
     catalog_check = planned_catalog or _check_catalog(HRL)
     catalog = _persist_catalog(root, catalog_check)
     raster = None
     if os.getenv(HRL["processing_mode_environment"], "raster") == "raster":
         if not os.getenv(HRL["client_id_environment"]) or not os.getenv(HRL["client_secret_environment"]):
-            return {"infc": infc, "catalog": catalog | {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
+            return {"legacy": legacy, "infc": infc, "catalog": catalog | {"status": "blocked", "reason": "CDSE OAuth credentials unavailable"}, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
         token = _cdse_token(HRL)
         raster = _fetch_process_raster_slices(
             root, root / "canonical", token, catalog_check, force=planned_catalog is not None,
         )
-    return {"infc": infc, "catalog": catalog, "raster": raster, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
+    return {"legacy": legacy, "infc": infc, "catalog": catalog, "raster": raster, "raw_retention": os.getenv("FORESTS_RAW_RETENTION", HRL["raw_retention_default"])}
 
 
 def declared_forest_raw_paths(root: Path) -> list[Path]:
@@ -534,6 +537,11 @@ def declared_forest_raw_paths(root: Path) -> list[Path]:
     for asset in INFC["assets"]:
         raw = root / "raw" / INFC["source_id"] / f"{asset['id']}.zip"
         paths.extend((raw, raw.with_suffix(raw.suffix + ".metadata.json")))
+    if legacy_enabled():
+        for asset in LEGACY["assets"]:
+            for year in asset["years"]:
+                raw = raw_path(root, asset, year)
+                paths.extend((raw, raw.with_suffix(".zip.metadata.json")))
     paths.append(_catalog_state(root))
     if os.getenv(HRL["processing_mode_environment"], "raster") != "raster":
         return paths
@@ -779,7 +787,7 @@ def _process_raster_records(asset: dict, group: dict, territories: pd.DataFrame)
             values = np.concatenate(values_by_chunk)
 
             def add(metric: str, value: float) -> None:
-                record = _record(asset | {"source_id": HRL["source_id"]}, group["manifest_path"].relative_to(group["manifest_path"].parents[4]), group["source_hash"], territory, metric, float(value), group["start_year"], group["end_year"])
+                record = _record(asset | {"source_id": asset.get("source_id", HRL["source_id"])}, group["manifest_path"].relative_to(group["manifest_path"].parents[4]), group["source_hash"], territory, metric, float(value), group["start_year"], group["end_year"])
                 record["source_snapshot_signature"] = group["snapshot_signature"]
                 rows.append(record)
 
@@ -1190,8 +1198,8 @@ def _coverage_state(entries: list[dict], asset_id: str, period: str, level: str)
 def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> tuple[list[dict], list[dict]]:
     """Report metric changes and reject only complete duplicate asset snapshots."""
     diagnostics: list[dict] = []
-    metric_diagnostics: dict[tuple[str, str, str], dict] = {}
-    for (metric, level), series in table.groupby(["metric_id", "territory_level"], sort=True):
+    metric_diagnostics: dict[tuple[str, str, str, str], dict] = {}
+    for (_asset, metric, level), series in table.groupby(["methodology_version", "metric_id", "territory_level"], sort=True):
         snapshots: list[tuple[str, pd.DataFrame, dict]] = []
         asset_ids = set(series["methodology_version"].dropna().astype(str)) if "methodology_version" in series else set()
         if len(asset_ids) != 1:
@@ -1217,7 +1225,7 @@ def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> 
                 "territoryReferenceYear": reference_year, "territoryGeometryReference": geometry_reference,
             }
             diagnostics.append(diagnostic)
-            metric_diagnostics[(metric, level, period)] = diagnostic
+            metric_diagnostics[(asset_id, metric, level, period)] = diagnostic
             snapshots.append((period, rows, diagnostic))
         for (previous_period, previous, previous_diagnostic), (current_period, current, current_diagnostic) in zip(snapshots, snapshots[1:], strict=False):
             _, previous_numeric, previous_nodata = _coverage_state(coverage_entries, asset_id, previous_period, level)
@@ -1295,7 +1303,7 @@ def _temporal_diagnostics(table: pd.DataFrame, coverage_entries: list[dict]) -> 
                 raise ValueError(f"Forest source snapshot signature reused across periods: {identity[0]}/{identity[1]}/{previous['period']}/{current['period']}")
             identical_metrics = [
                 metric for metric in current["metricSet"]
-                if metric_diagnostics.get((metric, identity[1], current["period"]), {}).get("identicalToPrevious")
+                if metric_diagnostics.get((identity[0], metric, identity[1], current["period"]), {}).get("identicalToPrevious")
             ]
             current["comparisonWithPrevious"] = {
                 "period": previous["period"], "identical": identical,
@@ -1461,6 +1469,12 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
     selected_mode = mode or os.getenv(HRL["processing_mode_environment"], "raster")
     if selected_mode not in HRL["processing_modes"]:
         raise ValueError(f"Unsupported {HRL['processing_mode_environment']}: {selected_mode}")
+    if destination.exists() and not legacy_enabled() and "methodology_version" in pq.read_schema(destination).names:
+        existing = pd.read_parquet(destination, columns=["methodology_version"])
+        if existing["methodology_version"].isin([asset["id"] for asset in LEGACY["assets"]]).any():
+            raise ValueError("Existing legacy Forest output requires FOREST_LEGACY_ENABLED=1")
+    if legacy_enabled() and selected_mode != "raster":
+        raise ValueError("Legacy Forest requires raster processing mode")
     if selected_mode == "statistical-api":
         return _ingest_statistical_api(root, canonical_root, destination, force)
     prior = pd.DataFrame()
@@ -1563,15 +1577,21 @@ def ingest_forests(root: Path, canonical_root: Path, force: bool = False, mode: 
                         raise ValueError(f"Missing ISTAT territory version for forest raster reference {end}")
                     frames = [pd.read_parquet(canonical_root / "territories" / f"reference_year={end}" / f"{level}.parquet") for level in (*MAPPABLE_LEVELS,)]
                     records.extend(_raster_records(asset, path, meta["sha256"], pd.concat(frames, ignore_index=True)))
+    if legacy_enabled():
+        legacy_records, legacy_coverage, legacy_regions = legacy_zonal_records(root, canonical_root)
+        records.extend(legacy_records)
+        coverage.extend(legacy_coverage)
+        expected_region_codes_by_year.update(legacy_regions)
     if not records:
         raise FileNotFoundError("No Copernicus/CLC GeoTIFF raw assets. Raster mode requires retained, validated raster assets.")
     table = pd.DataFrame(records).sort_values(["methodology_version", "period_start", "period_end", "territory_level", "territory_id", "metric_id"], kind="stable").reset_index(drop=True)
     if table.duplicated(["derived_metric_id"]).any(): raise ValueError("Duplicate forest zonal metrics")
     destination.parent.mkdir(parents=True, exist_ok=True)
     coverage_path = forest_coverage_report_path(destination)
-    if process_groups_found:
+    if process_groups_found or legacy_enabled():
         report = _coverage_report(table, coverage, expected_region_codes_by_year)
-        _require_numeric_tree_cover_change_coverage(report["entries"])
+        if process_groups_found:
+            _require_numeric_tree_cover_change_coverage(report["entries"])
         report["assetPeriodEvidence"] = dict(sorted(period_evidence.items()))
         json_dump(coverage_path, report)
     table.to_parquet(destination, index=False, compression="zstd")
