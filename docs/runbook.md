@@ -195,6 +195,25 @@ Non impostare `HTTP_PROXY` o `HTTPS_PROXY` globali: instraderebbero anche R2,
 CDSE e le altre fonti. Il proxy resta trasporto non autorevole; TLS, SHA-256,
 contratti raw e provenance restano invariati.
 
+`InfcTransportError` significa che la connessione diretta e tutti i proxy INFC
+configurati hanno fallito. `transport_diagnostics` riporta tentativi diretti,
+numero di candidati e risultati per `proxy_1`, `proxy_2`, ecc., senza identità
+dei proxy: HTTP 403 suggerisce blocco remoto, 429 rate limiting, 407 problemi
+di autenticazione/configurazione proxy; timeout e connection error indicano
+indisponibilità del trasporto. Sono registrate solo classi di errore, mai messaggi
+grezzi, endpoint o credenziali.
+
+Prima di sostituire i proxy, avviare il controllo leggero `check-infc.yml`:
+legge lo stato sorgenti R2 ed esegue `check-sources --domain forests`, senza
+ingestion o pubblicazione. Log e artifact contengono solo il riepilogo INFC
+filtrato; il report completo non viene stampato né caricato.
+
+```bash
+gh workflow run check-infc.yml \
+  --repo marlenesco/stato-d-italia \
+  --ref main
+```
+
 L'hydration confronta sempre lo SHA-256 locale con quello referenziato dalla
 release attiva. Un file di cache con SHA diverso viene riscaricato e verificato
 prima della sostituzione atomica: la cache non è mai fonte di verità. Nei run
