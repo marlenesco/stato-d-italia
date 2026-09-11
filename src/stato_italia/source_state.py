@@ -10,7 +10,7 @@ import requests
 
 from .common import now_iso
 from .download import resolve_download_url
-from .infc_transport import get_with_infc_fallback
+from .infc_transport import InfcTransportError, get_with_infc_fallback
 
 SOURCE_STATE_LOGICAL_PATH = "metadata/source-state.json"
 SOURCE_STATE_SCHEMA_VERSION = 1
@@ -404,7 +404,8 @@ def check_persisted_sources(
                     ))
         except requests.RequestException as exc:
             unverifiable += 1
-            details.append(_plan_detail(entry, "unverifiable", reason=type(exc).__name__))
+            diagnostics = {"transport_diagnostics": exc.diagnostics} if isinstance(exc, InfcTransportError) else {}
+            details.append(_plan_detail(entry, "unverifiable", reason=type(exc).__name__, **diagnostics))
     return {
         "scope": scope, "sourceChecks": checked, "sourcesChanged": changed,
         "sourcesUnchanged": unchanged, "sourcesUnverifiable": unverifiable,
