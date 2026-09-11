@@ -1,0 +1,101 @@
+name: Check INFC transport
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-infc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uv sync --all-groups --frozen
+      - name: Read active Forest source state and check transport
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          INFC_HTTPS_PROXIES: ${{ secrets.INFC_HTTPS_PROXIES }}
+        run: |
+          # Never print raw CLI output or exception chains. The next step emits
+          # only allowlisted INFC fields, also when preflight exits unsuccessfully.
+          if ! uv run stato-data check-sources \
+            --domain forests \
+            --publish r2 \
+            --report reports/forests-source-check.json > /dev/null 2>&1; then
+            echo '::error::Forest preflight failed; inspect the sanitized INFC diagnostic if available.'
+            exit 1
+          fi
+      - name: Emit sanitized INFC report
+        id: sanitize
+        if: always()
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          raw = Path("reports/forests-source-check.json")
+          target = Path("reports/infc-transport-diagnostics.json")
+          target.unlink(missing_ok=True)
+          errors = {"ConnectTimeout", "ReadTimeout", "ChunkedEncodingError", "ProxyError", "SSLError", "Timeout", "ConnectionError", "RequestException"}
+
+          def require(condition):
+              if not condition:
+                  raise SystemExit("INFC report missing or invalid; no artifact emitted.")
+
+          def outcomes(items, direct):
+              require(isinstance(items, list))
+              result = []
+              for index, item in enumerate(items, 1):
+                  route = "direct" if direct else f"proxy_{index}"
+                  require(isinstance(item, dict) and item.get("route") == route)
+                  if set(item) == {"route", "http_status"}:
+                      value = item["http_status"]
+                      require(type(value) is int and 100 <= value <= 599)
+                      result.append({"route": route, "http_status": value})
+                  else:
+                      require(set(item) == {"route", "error"} and item.get("error") in errors)
+                      result.append({"route": route, "error": item["error"]})
+              return result
+
+          try:
+              report = json.loads(raw.read_text())
+          except (OSError, ValueError):
+              raise SystemExit("Forest source report unavailable; no artifact emitted.") from None
+          require(isinstance(report, dict) and isinstance(report.get("sources"), list))
+          entries = []
+          for source in report["sources"]:
+              require(isinstance(source, dict))
+              if source.get("source_id") != "infc-2015-forests":
+                  continue
+              status = source.get("status")
+              require(status in {"changed", "unchanged", "unverifiable"})
+              entry = {"entry": len(entries) + 1, "source_id": "infc-2015-forests", "status": status}
+              if "reason" in source:
+                  reason = source["reason"]
+                  entry["reason"] = reason if reason in errors | {"InfcTransportError"} else "other"
+              if "transport_diagnostics" in source:
+                  value = source["transport_diagnostics"]
+                  require(isinstance(value, dict))
+                  direct, proxies = outcomes(value.get("direct"), True), outcomes(value.get("proxies"), False)
+                  require(type(value.get("direct_attempts")) is int and value["direct_attempts"] == len(direct))
+                  require(type(value.get("proxy_candidates")) is int and value["proxy_candidates"] == len(proxies))
+                  entry["transport_diagnostics"] = {"direct_attempts": len(direct), "direct": direct, "proxy_candidates": len(proxies), "proxies": proxies}
+              entries.append(entry)
+          require(bool(entries))
+          sanitized = json.dumps({"sources": entries}, separators=(",", ":"))
+          target.write_text(sanitized + "\n")
+          print(sanitized)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.sanitize.outcome == 'success'
+        with:
+          name: infc-transport-diagnostics
+          path: reports/infc-transport-diagnostics.json
+          if-no-files-found: error
+          retention-days: 7

@@ -98,3 +98,52 @@ def test_success_keeps_response_and_transport(monkeypatch, proxy_success):
     assert actual is response
     assert route == ("proxy" if proxy_success else "direct")
     assert len(calls) == (2 if proxy_success else 1)
+
+
+def test_diagnostic_workflow_is_read_only_and_uploads_only_sanitized_infc(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+
+    workflow = yaml.load((Path(__file__).parents[1] / ".github/workflows/check-infc.yml").read_text(), Loader=yaml.BaseLoader)
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read"}
+    steps = workflow["jobs"]["check-infc"]["steps"]
+    command = next(step for step in steps if "check-sources" in step.get("run", ""))
+    assert "uv run stato-data check-sources" in command["run"]
+    assert "--domain forests" in command["run"]
+    assert "--publish r2" in command["run"]
+    assert "--report reports/forests-source-check.json" in command["run"]
+    assert "> /dev/null 2>&1" in command["run"]
+    assert set(command["env"]) == {"R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT", "R2_BUCKET", "INFC_HTTPS_PROXIES"}
+    runs = "\n".join(step.get("run", "") for step in steps)
+    assert "stato-data run" not in runs and "pytest" not in runs
+    assert "uv sync --all-groups --frozen" in runs
+    assert not any("cache" in step.get("uses", "") for step in steps)
+    upload = next(step for step in steps if "upload-artifact" in step.get("uses", ""))
+    assert upload["if"] == "always() && steps.sanitize.outcome == 'success'"
+    assert upload["with"]["path"] == "reports/infc-transport-diagnostics.json"
+    script = next(step["run"] for step in steps if step.get("id") == "sanitize").split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    raw = tmp_path / "reports/forests-source-check.json"
+    raw.parent.mkdir()
+    secret = "http://secret-user:secret-password@private-proxy.example:3128"
+    report = {"sources": [
+        {"source_id": "copernicus-hrl-forests", "status": "changed", "secret": secret},
+        {"source_id": "infc-2015-forests", "status": "unverifiable", "reason": "InfcTransportError", "resolved_url": secret,
+         "transport_diagnostics": {"direct_attempts": 1, "direct": [{"route": "direct", "http_status": 403}], "proxy_candidates": 1, "proxies": [{"route": "proxy_1", "error": "ConnectTimeout"}]}}
+    ]}
+    raw.write_text(json.dumps(report))
+    result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0
+    artifact = tmp_path / upload["with"]["path"]
+    assert len(json.loads(artifact.read_text())["sources"]) == 1
+    for forbidden in (secret, "private-proxy.example", "secret-user", "secret-password", "copernicus"):
+        assert forbidden not in result.stdout + result.stderr + artifact.read_text()
+    report["sources"][1]["transport_diagnostics"]["proxies"][0]["error"] = secret
+    raw.write_text(json.dumps(report))
+    result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert not artifact.exists()
+    assert secret not in result.stdout + result.stderr
