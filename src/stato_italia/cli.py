@@ -24,7 +24,7 @@ from .emissions_delivery import generate_emissions_delivery
 from .emissions_national import fetch_national_emissions, ingest_national_emissions
 from .forests import forest_zonal_territory_years, ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
 from .forests_delivery import generate_forests_delivery
-from .forests_legacy import legacy_enabled
+from .forests_legacy import LEGACY, legacy_enabled, legacy_state_complete
 from .ingestion_plan import (
     PLAN_SCHEMA_VERSION,
     active_ingestion_plan,
@@ -215,10 +215,13 @@ def _changed_source_families() -> set[str]:
 
 def _hydrate_planned_raw_dependencies(
     store: LocalObjectStore | R2ObjectStore, root: Path, families: set[str],
+    *, source_ids: set[str] | None = None,
 ) -> None:
     """Hydrate only unchanged raw assets consumed by changed-family adapters."""
     logical_paths: list[str] = []
     for entry in planned_entries():
+        if source_ids is not None and entry["source_id"] not in source_ids:
+            continue
         if source_family(str(entry["source_id"])) not in families or entry.get("status") == "changed":
             continue
         raw = f"raw/{entry['asset_path']}"
@@ -664,13 +667,17 @@ def _validate_release_coherence(
                     expected = {
                         str(_artifact_json(item, store).get("source_signature")) for item in manifests
                     }
+                    expected.update(
+                        str(entry.get("sha256")) for entry in source_state["sources"]
+                        if entry.get("source_id") == LEGACY["source_id"] and entry.get("kind") != "catalog"
+                    )
                 else:
                     expected = {
                         str(entry["sha256"]) for entry in source_state["sources"]
                         if str(entry.get("source_id", "")).startswith("copernicus-")
                         and entry.get("kind") != "catalog"
                     }
-                if not expected or "None" in expected or hashes != expected:
+                if not expected or any(re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in expected) or hashes != expected:
                     raise ValueError("Copernicus raster provenance and forest canonical signatures differ")
             coverage_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json"
             if coverage_logical not in logical_paths:
@@ -829,6 +836,8 @@ def _run_geospatial(
     )
     if "infc" in families:
         _hydrate_planned_raw_dependencies(input_store, root, {"infc"})
+    if "copernicus" in families and legacy_enabled():
+        _hydrate_planned_raw_dependencies(input_store, root, {"copernicus"}, source_ids={LEGACY["source_id"]})
     infc_logical = "canonical/forests/dataset_version=infc2015-published-tables/observations.parquet"
     zonal_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
     zonal_coverage_logical = f"canonical/forests/algorithm_version={ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json"
@@ -1459,8 +1468,6 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("Validation-only runs require local candidate output")
     domain = _domain_processing(args)
     args.scope = _execution_scope(args, domain)
-    if args.scope in {"all", "geospatial"} and legacy_enabled() and getattr(args, "plan", None):
-        raise ValueError("Legacy Forest bootstrap requires a run without --plan; legacy incremental planning is not enabled")
     if getattr(args, "rebuild_historical_bigbang", False) and (
         args.scope != "data" or domain is not None or not getattr(args, "plan", None)
     ):
@@ -1477,6 +1484,8 @@ def run(args: argparse.Namespace) -> int:
     hydrate_store = R2ObjectStore() if hydrate_from == "r2" else store
     previous_source_state = _active_source_state_with_legacy_bootstrap(hydrate_store)
     plan_path = getattr(args, "plan", None)
+    if args.scope in {"all", "geospatial"} and legacy_enabled() and plan_path and not legacy_state_complete(previous_source_state):
+        raise ValueError("Legacy Forest bootstrap requires a run without --plan until all configured legacy assets are published")
     if plan_path:
         if args.scope == "all":
             raise ValueError("Incremental ingestion plans are supported only for scoped runs")

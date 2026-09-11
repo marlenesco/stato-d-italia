@@ -837,6 +837,55 @@ def test_forest_downstream_dependencies_distinguish_infc_and_copernicus() -> Non
     }
 
 
+@pytest.mark.parametrize("legacy_hash,canonical_hashes,valid", [
+    (None, ["2" * 64], True),
+    ("4" * 64, ["2" * 64, "4" * 64], True),
+    (None, ["2" * 64, "4" * 64], False),
+    ("4" * 64, ["2" * 64], False),
+    ("4" * 64, ["2" * 64, "4" * 64, "5" * 64], False),
+    (None, ["2" * 64, "3" * 64], False),
+    ("invalid", ["2" * 64, "invalid"], False),
+])
+def test_raster_release_coherence_modern_and_legacy_union(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_hash, canonical_hashes, valid,
+) -> None:
+    root = tmp_path / "data"
+    artifacts = []
+
+    def artifact(logical, payload):
+        path = root / logical
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload))
+        artifacts.append(ReleaseArtifact(path, logical))
+        return path
+
+    artifact("raw/copernicus-hrl-forests/catalog.json", {})
+    artifact("raw/copernicus-hrl-forests/tree-cover/2023/01/slice-manifest.json", {"source_signature": "2" * 64})
+    zonal = artifact(f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet", {})
+    pd.DataFrame({"source_asset_sha256": canonical_hashes}).to_parquet(zonal)
+    artifact(f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.coverage.json", {"coverageMode": "national", "entries": []})
+    state = {"schemaVersion": 1, "sources": [
+        _entry("copernicus-hrl-forests", "copernicus-hrl-forests/catalog.json", "3" * 64, kind="catalog"),
+        _entry("copernicus-corine-forests", "copernicus-corine-forests/other.zip", "6" * 64),
+    ]}
+    artifact("raw/copernicus-corine-forests/other.zip", {})
+    artifact("raw/copernicus-corine-forests/other.zip.metadata.json", {})
+    if legacy_hash is not None:
+        raw = "copernicus-hrl-forests-legacy/hrl_legacy_tree_cover_density_20m/2012/product.zip"
+        state["sources"].append(_entry("copernicus-hrl-forests-legacy", raw, legacy_hash))
+        artifact(f"raw/{raw}", {})
+        artifact(f"raw/{raw}.metadata.json", {})
+    monkeypatch.setattr(cli, "_territory_paths", lambda _: [])
+    monkeypatch.setattr(cli, "_validate_data_canonical_provenance", lambda *_: None)
+    monkeypatch.setattr(cli, "_validate_delivery_dependencies", lambda *_a, **_k: None)
+    monkeypatch.setenv("FOREST_PROCESSING_MODE", "raster")
+    if valid:
+        _validate_release_coherence(root, state, artifacts, scope="geospatial", affected_families={"copernicus"})
+    else:
+        with pytest.raises(ValueError, match="raster provenance"):
+            _validate_release_coherence(root, state, artifacts, scope="geospatial", affected_families={"copernicus"})
+
+
 def test_raster_release_coherence_rejects_manifest_signature_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1236,9 +1285,12 @@ def test_infc_only_run_hydrates_only_infc_raw_and_copernicus_zonal_dependency(
     assert not any(path.startswith("canonical/soil/") for path in hydrated)
 
 
+@pytest.mark.parametrize("legacy_present", [False, True])
 def test_copernicus_only_run_does_not_hydrate_process_slices_and_reuses_infc_canonical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_present: bool,
 ) -> None:
+    from stato_italia.forests_legacy import expected_legacy_assets
+    monkeypatch.setenv("FOREST_LEGACY_ENABLED", "1" if legacy_present else "0")
     monkeypatch.setattr(cli, "_hydrate_forest_zonal_for_reuse", lambda *_: ("a" * 64, "b" * 64))
     current = "raw/copernicus-hrl-forests/tree-cover-density/2021-2021/01/tile-r0-c0.tif"
     obsolete = "raw/copernicus-hrl-forests/tree-cover-density/2018-2018/01/obsolete.tif"
@@ -1247,6 +1299,8 @@ def test_copernicus_only_run_does_not_hydrate_process_slices_and_reuses_infc_can
         _planned_entry("copernicus-hrl-forests", current.removeprefix("raw/"), "unchanged"),
         _planned_entry("copernicus-hrl-forests", obsolete.removeprefix("raw/"), "unchanged"),
     ]
+    if legacy_present:
+        sources.extend(_planned_entry("copernicus-hrl-forests-legacy", path, "unchanged") for path in expected_legacy_assets())
     _scoped_plan(tmp_path, scope="geospatial", sources=sources, catalog={"status": "changed"})
     hydrated: list[str] = []
     monkeypatch.setattr(cli, "_hydrate", lambda _store, _root, paths: hydrated.extend(paths))
@@ -1271,6 +1325,10 @@ def test_copernicus_only_run_does_not_hydrate_process_slices_and_reuses_infc_can
     assert obsolete not in hydrated
     assert f"{obsolete}.metadata.json" not in hydrated
     assert not any(path.startswith("raw/infc-") for path in hydrated)
+    assert {path for path in hydrated if path.startswith("raw/copernicus-hrl-forests-legacy/")} == (
+        {f"raw/{path}{suffix}" for path in expected_legacy_assets() for suffix in ("", ".metadata.json")}
+        if legacy_present else set()
+    )
 
 
 def test_planned_noop_does_not_hydrate_or_advance_manifest(

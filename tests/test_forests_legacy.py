@@ -30,8 +30,9 @@ def isolated(monkeypatch):
 class Response:
     status_code = 200
 
-    def __init__(self, payload=None, data=b""):
+    def __init__(self, payload=None, data=b"", status=200):
         self.payload, self.data, self.closed = payload, data, False
+        self.status_code = status
 
     def json(self):
         return self.payload
@@ -50,6 +51,14 @@ class Client:
     def request(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.responses.pop(0)
+
+
+def submitted():
+    return Response({"ErrorTaskIds": [], "TaskIds": [{"TaskID": "65267487597"}]}, status=201)
+
+
+def completed(url="https://example.org/data?secret=123"):
+    return Response({"65267487597": {"Status": "Finished_ok", "DownloadURL": url}})
 
 
 def zip_bytes(asset, values=None, *, crs="EPSG:3035", resolution=None, count=1, nodata=255, extra=False):
@@ -94,33 +103,43 @@ def test_four_exact_product_mappings_and_distinct_assets():
 
 
 def test_poll_matches_completed_task_and_closes_responses():
-    responses = [Response({"TaskID": "wanted"}), Response({"items": [{"TaskID": "other", "DownloadURL": "https://example.org/wrong"}]}),
-                 Response({"items": [{"TaskID": "wanted", "DownloadURL": "https://example.org/right?secret=opaque"}]})]
+    responses = [submitted(), Response({"other-task": {"Status": "Finished_ok", "DownloadURL": "https://example.org/wrong"}}),
+                 completed("https://example.org/right?secret=opaque")]
     client = Client(*responses)
     task, url = legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client,
                                             token_provider=lambda: "fake-bearer", sleep=lambda _: None)
-    assert task == "wanted" and url.endswith("right?secret=opaque")
+    assert task == "65267487597" and url.endswith("right?secret=opaque")
     assert client.calls[0][1]["json"] == {"Datasets": [{"DatasetID": "b903be8a861d48d9af41266ce63cc287", "FileID": "266be23f-29a1-41f8-899d-a57c35d572fc"}]}
     assert all(call[1]["params"] == {"status": "Finished_ok"} for call in client.calls[1:])
     assert all(response.closed for response in responses)
 
 
-@pytest.mark.parametrize("payload", [None, {}, {"items": [{}]}, {"items": [{"TaskID": "wanted"}]},
-    {"items": [{"TaskID": "wanted", "DownloadURL": "http://bad"}]},
-    {"items": [{"TaskID": "wanted"}, {"TaskID": "wanted"}]}])
+@pytest.mark.parametrize("payload", [None, [], {"65267487597": None}, {"65267487597": []},
+    {"65267487597": {}},
+    {"65267487597": {"Status": "In_progress", "DownloadURL": "https://example.org/?secret=x"}},
+    {"65267487597": {"Status": "Finished_err", "DownloadURL": "https://example.org/?secret=x"}},
+    *[{"65267487597": {"Status": "Finished_ok", "DownloadURL": url}} for url in
+      (None, [], "", "http://bad", "https://user:password@example.org/", "https://example.org/\nsecret")],
+    {"65267487597": {"Status": "Finished_ok"}}])
 def test_malformed_or_ambiguous_poll_fails(payload):
     with pytest.raises(ValueError):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=Client(Response({"TaskID": "wanted"}), Response(payload)), token_provider=lambda: "fake")
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=Client(submitted(), Response(payload)), token_provider=lambda: "fake")
 
 
-@pytest.mark.parametrize("payload", [None, {}, [], [{"TaskID": "a"}, {"TaskID": "b"}], {"TaskID": 1}])
+@pytest.mark.parametrize("payload", [None, {}, [],
+    {"ErrorTaskIds": ["error"], "TaskIds": [{"TaskID": "65267487597"}]},
+    {"ErrorTaskIds": None, "TaskIds": [{"TaskID": "65267487597"}]},
+    {"TaskIds": [{"TaskID": "65267487597"}]},
+    *[{"ErrorTaskIds": [], "TaskIds": tasks} for tasks in
+      (None, {}, [], [{"TaskID": "a"}, {"TaskID": "b"}], [None], [{}],
+       [{"TaskID": 1}], [{"TaskID": ""}], [{"TaskID": "with space"}])]])
 def test_malformed_submission_fails(payload):
     with pytest.raises(ValueError, match="TaskID"):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=Client(Response(payload)), token_provider=lambda: "fake")
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=Client(Response(payload, status=201)), token_provider=lambda: "fake")
 
 
 def test_poll_bound_and_redaction(caplog):
-    client = Client(Response({"TaskID": "wanted"}), Response([]), Response([]))
+    client = Client(submitted(), Response({}), Response({}))
     with pytest.raises(TimeoutError):
         legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client,
                                     token_provider=lambda: "fake", max_polls=2, sleep=lambda _: None)
@@ -131,6 +150,19 @@ def test_poll_bound_and_redaction(caplog):
     assert "secret-token" not in str(error.value) + caplog.text
     assert "private-key" not in str(error.value) + caplog.text
     assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("method,status", [("POST", 200), ("POST", 400), ("GET", 201), ("GET", 403), ("GET", 500)])
+def test_clms_expected_http_status_and_redaction(method, status, caplog):
+    response = submitted() if method == "POST" else completed()
+    response.status_code = status
+    response.payload = {"server_error": "secret-token https://example.org/?secret=123"}
+    client = Client(response) if method == "POST" else Client(submitted(), response)
+    with pytest.raises(ValueError) as error:
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=lambda: "secret-token")
+    assert "secret-token" not in str(error.value) + caplog.text
+    assert "secret=123" not in str(error.value) + caplog.text
+    assert response.closed
 
 
 @pytest.mark.parametrize("asset", legacy.LEGACY["assets"])
@@ -160,6 +192,7 @@ def retain(root, asset, year, values=None):
     raster.unlink()
     archive.with_suffix(".zip.metadata.json").write_text(json.dumps({
         "contract": legacy.product_contract(asset, year), "sha256": legacy.sha256_file(archive),
+        "source_id": legacy.LEGACY["source_id"], "source_signature": legacy.contract_signature(asset, year),
         "bytes": archive.stat().st_size, "raster_sha256": raster_hash,
     }))
     return archive
@@ -211,7 +244,7 @@ def test_all_nodata_has_coverage_without_numeric_zero(tmp_path, monkeypatch):
 
 def test_acquisition_mocked_and_secret_free_provenance(tmp_path):
     asset = legacy.LEGACY["assets"][0]
-    responses = [Response({"TaskID": "wanted"}), Response([{"TaskID": "wanted", "DownloadURL": "https://example.org/download?secret=123"}]), Response(data=zip_bytes(asset))]
+    responses = [submitted(), completed(), Response(data=zip_bytes(asset))]
     client = Client(*responses)
     result = legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake-bearer")
     assert result["changed"]
@@ -254,13 +287,14 @@ def test_legacy_raw_paths_feed_existing_source_state(tmp_path):
     from stato_italia.cli import _declared_raw_paths, build_source_state_from_metadata_paths
     asset = legacy.LEGACY["assets"][0]
     result = legacy.acquire_product(tmp_path, asset, 2012, client=Client(
-        Response({"TaskID": "wanted"}), Response([{"TaskID": "wanted", "DownloadURL": "https://example.org/data?secret=x"}]),
+        submitted(), completed("https://example.org/data?secret=x"),
         Response(data=zip_bytes(asset))), token_provider=lambda: "fake")
     paths = _declared_raw_paths({"legacy": [result]})
     assert set(paths) == {Path(result["local_path"]), Path(result["metadata_path"])}
     state = build_source_state_from_metadata_paths(tmp_path / "raw", [Path(result["metadata_path"])])
     assert len(state["sources"]) == 1
     assert state["sources"][0]["source_id"] == legacy.LEGACY["source_id"]
+    assert state["sources"][0]["source_signature"] == legacy.contract_signature(asset, 2012)
     assert "secret=x" not in json.dumps(state)
 
 
@@ -316,7 +350,7 @@ def test_poll_deadline_and_download_error_redaction(tmp_path, caplog):
     moments = iter([0, 0, 0, 2])
     with pytest.raises(TimeoutError):
         legacy.request_download_url(legacy.LEGACY["assets"][0], 2012,
-            client=Client(Response({"TaskID": "wanted"}), Response([])),
+            client=Client(submitted(), Response({})),
             token_provider=lambda: "fake", clock=lambda: next(moments), timeout=1)
     class FailingDownload(Client):
         def request(self, *args, **kwargs):
@@ -325,7 +359,7 @@ def test_poll_deadline_and_download_error_redaction(tmp_path, caplog):
             return super().request(*args, **kwargs)
     with pytest.raises(ValueError) as error:
         legacy.acquire_product(tmp_path, legacy.LEGACY["assets"][0], 2012,
-            client=FailingDownload(Response({"TaskID": "wanted"}), Response([{"TaskID": "wanted", "DownloadURL": "https://example.org/?secret=123"}])),
+            client=FailingDownload(submitted(), completed()),
             token_provider=lambda: "fake-bearer")
     assert "secret=123" not in str(error.value) + caplog.text
     assert "fake-bearer" not in str(error.value) + caplog.text
@@ -344,9 +378,131 @@ def test_pipeline_refuses_incremental_legacy_bootstrap_before_io(tmp_path, monke
     from argparse import Namespace
     from stato_italia import cli
     monkeypatch.setenv("FOREST_LEGACY_ENABLED", "1")
-    args = Namespace(publish="local", domain="forests", scope=None, plan="modern-plan.json")
+    args = Namespace(publish="local", domain="forests", scope=None, plan="modern-plan.json",
+                     workdir=str(tmp_path / "data"), output=str(tmp_path / "artifacts"), release_id="test")
+    monkeypatch.setattr(cli, "LocalObjectStore", lambda *_: object())
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda *_: None)
+    monkeypatch.setattr(cli, "load_ingestion_plan", lambda *_a, **_k: pytest.fail("Plan I/O before bootstrap"))
     with pytest.raises(ValueError, match="without --plan"):
         cli.run(args)
+
+
+def legacy_state():
+    return {"schemaVersion": 1, "sources": [
+        {"source_id": legacy.LEGACY["source_id"], "asset_path": path, "sha256": "a" * 64,
+         "bytes": 123, "source_signature": legacy.contract_signature(asset, year),
+         "resolved_url": "https://example.org/must-not-be-requested?secret=x"}
+        for path, (asset, year) in legacy.expected_legacy_assets().items()
+    ]}
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_planned_run_requires_complete_active_legacy_state(tmp_path, monkeypatch, complete):
+    from argparse import Namespace
+    from stato_italia import cli
+    monkeypatch.setenv("FOREST_LEGACY_ENABLED", "1")
+    state = legacy_state()
+    if not complete:
+        state["sources"].pop()
+    monkeypatch.setattr(cli, "LocalObjectStore", lambda *_: object())
+    monkeypatch.setattr(cli, "_active_source_state_with_legacy_bootstrap", lambda *_: state)
+    monkeypatch.setattr(cli, "active_release", lambda *_: {"releaseId": "active"})
+    monkeypatch.setattr(cli, "load_ingestion_plan", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli, "_validate_domain_plan", lambda *_: None)
+    monkeypatch.setattr(cli, "active_ingestion_plan", lambda: {"changed": False})
+    monkeypatch.setattr(cli, "_planned_noop_report", lambda *_a, **_k: 0)
+    monkeypatch.setattr(cli, "_run_geospatial", lambda *_a, **_k: pytest.fail("No-op must not ingest"))
+    args = Namespace(publish="local", domain="forests", scope=None, plan="plan.json", force=False,
+                     workdir=str(tmp_path / "data"), output=str(tmp_path / "artifacts"), release_id="test")
+    if complete:
+        assert cli.run(args) == 0
+    else:
+        with pytest.raises(ValueError, match="without --plan"):
+            cli.run(args)
+
+
+@pytest.mark.parametrize("invalid", ["wrong_source", "duplicate", "unknown_path"])
+def test_active_legacy_completeness_rejects_invalid_entries(invalid):
+    state = legacy_state()
+    if invalid == "wrong_source":
+        state["sources"][0]["source_id"] = "copernicus-hrl-forests"
+    elif invalid == "duplicate":
+        state["sources"].append(state["sources"][0])
+    else:
+        state["sources"][0]["asset_path"] = "unknown/product.zip"
+    assert not legacy.legacy_state_complete(state)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_legacy_preflight_pins_contract_without_http(monkeypatch, changed):
+    from stato_italia import source_state
+    state = legacy_state()
+    if changed:
+        asset = legacy.LEGACY["assets"][0]
+        monkeypatch.setitem(asset, "native_resolution_m", 99)
+    monkeypatch.setattr(source_state.requests, "get", lambda *_a, **_k: pytest.fail("Pinned contract attempted GET"))
+    result = source_state.check_persisted_sources(state, scope="geospatial")
+    assert result["sourceChecks"] == 0
+    assert result["sourcesChanged"] == (2 if changed else 0)
+    assert result["sourcesUnchanged"] == (2 if changed else 4)
+    assert result["changed"] == changed
+    assert all(item["checked"] is False and item["method"] == "legacy_pinned_contract" for item in result["sources"])
+    assert "secret=x" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("invalid", ["missing_signature", "invalid_signature", "unknown_path", "missing_path", "non_string_path"])
+def test_legacy_preflight_fails_closed_for_invalid_contract(monkeypatch, invalid):
+    from stato_italia import source_state
+    state = legacy_state()
+    entry = state["sources"][0]
+    if invalid == "missing_signature":
+        entry.pop("source_signature")
+    elif invalid == "invalid_signature":
+        entry["source_signature"] = "z" * 64
+    elif invalid == "unknown_path":
+        entry["asset_path"] = "copernicus-hrl-forests-legacy/unconfigured/2012/product.zip"
+    elif invalid == "missing_path":
+        entry.pop("asset_path")
+    else:
+        entry["asset_path"] = []
+    monkeypatch.setattr(source_state.requests, "get", lambda *_a, **_k: pytest.fail("Invalid legacy entry attempted GET"))
+    result = source_state.check_persisted_sources(state, scope="geospatial")
+    assert result["sourcesUnverifiable"] == 1
+    assert result["sources"][0]["status"] == "unverifiable"
+    assert result["sources"][0]["checked"] is False
+    assert result["sourceChecks"] == 0
+
+
+def test_contract_signature_is_stable_under_mapping_order():
+    asset = legacy.LEGACY["assets"][0]
+    reordered = dict(reversed(list(asset.items())))
+    assert legacy.contract_signature(asset, 2012) == legacy.contract_signature(reordered, 2012)
+    assert legacy.contract_signature(asset, 2012) != legacy.contract_signature(asset, 2015)
+
+
+def test_unchanged_legacy_raw_hydration_reuses_zip_without_clms(tmp_path, monkeypatch):
+    import shutil
+    from stato_italia import cli
+    published = tmp_path / "published"
+    clean = tmp_path / "clean"
+    for asset in legacy.LEGACY["assets"]:
+        for year in asset["years"]:
+            retain(published, asset, year)
+    entries = [entry | {"status": "unchanged"} for entry in legacy_state()["sources"]]
+    entries.append({"source_id": "copernicus-hrl-forests", "asset_path": "modern/tile.tif", "status": "changed"})
+    monkeypatch.setattr(cli, "planned_entries", lambda: entries)
+    def hydrate(_store, root, paths):
+        for path in paths:
+            destination = root / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(published / path, destination)
+    monkeypatch.setattr(cli, "_hydrate", hydrate)
+    cli._hydrate_planned_raw_dependencies(object(), clean, {"copernicus"}, source_ids={legacy.LEGACY["source_id"]})
+    monkeypatch.setattr(legacy, "environment_token", lambda: pytest.fail("Retained ZIP requires no token"))
+    results = legacy.fetch_legacy_forests(clean)
+    assert len(results) == 4 and all(result["changed"] is False for result in results)
+    assert all(result["source_signature"] == legacy.contract_signature(asset, year)
+               for result, (asset, year) in zip(results, legacy.expected_legacy_assets().values(), strict=True))
 
 
 def test_disabling_legacy_cannot_drop_existing_rows(tmp_path):

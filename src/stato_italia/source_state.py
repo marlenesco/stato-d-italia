@@ -273,6 +273,28 @@ def check_persisted_sources(
     for entry in entries:
         if entry.get("kind") == "catalog":
             continue
+        if entry.get("source_id") == "copernicus-hrl-forests-legacy":
+            from .forests_legacy import contract_signature, expected_legacy_assets
+
+            asset_path = entry.get("asset_path")
+            configured = expected_legacy_assets().get(asset_path) if isinstance(asset_path, str) else None
+            signature = entry.get("source_signature")
+            if (configured is None or not isinstance(signature, str) or len(signature) != 64
+                    or any(c not in "0123456789abcdef" for c in signature)):
+                unverifiable += 1
+                details.append(_plan_detail(
+                    entry | {"asset_path": asset_path}, "unverifiable", method="legacy_pinned_contract", checked=False,
+                    reason="invalid_legacy_path_or_signature",
+                ))
+            else:
+                is_changed = signature != contract_signature(*configured)
+                changed += int(is_changed)
+                unchanged += int(not is_changed)
+                details.append(_plan_detail(
+                    entry, "changed" if is_changed else "unchanged",
+                    method="legacy_pinned_contract", checked=False,
+                ))
+            continue
         if entry.get("source_id") == "copernicus-hrl-forests":
             details.append(_plan_detail(
                 entry, "unchanged", method="active_release_catalog_managed", checked=False,
