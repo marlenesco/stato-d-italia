@@ -37,8 +37,11 @@ Il nome riportato non certifica il nome del TIFF interno allo ZIP. Non costruire
 L'[API download ufficiale CLMS](https://eea.github.io/clms-api-docs/download.html) documenta:
 
 1. POST `https://land.copernicus.eu/api/@datarequest_post` con `{"Datasets":[{"DatasetID":"<UID>","FileID":"<FileID>"}]}`.
-2. Poll autenticato GET `/api/@datarequest_status_get?TaskID=<id>`; usare `DownloadURL` restituito a completamento.
-3. Conservare identificatori, versione, metadati e checksum dei byte acquisiti; un cambio di versione richiede rivalidazione. L'URL temporaneo non è l'identità del prodotto.
+2. Conservare il `TaskID` restituito.
+3. Poll autenticato GET `/api/@datarequest_search?status=Finished_ok` (e, se utile operativamente, `status=In_progress`).
+4. Associare l'elemento restituito al `TaskID`.
+5. Usare il relativo `DownloadURL` solo dopo il completamento con successo.
+6. Conservare identificatori, versione, metadati e checksum dei byte acquisiti; un cambio di versione richiede rivalidazione. L'URL temporaneo non è l'identità del prodotto.
 
 L'[autenticazione CLMS](https://eea.github.io/clms-api-docs/authentication.html) richiede provisioning iniziale di una service key tramite account EU Login. In seguito firma JWT, scambio al `token_uri` e rinnovo del bearer sono automatizzabili senza sessione browser. Questa ricerca ha verificato GET pubblici e documentazione; non ha creato chiavi, inviato richieste di download o scaricato raster.
 
