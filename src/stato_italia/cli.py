@@ -24,7 +24,7 @@ from .emissions_delivery import generate_emissions_delivery
 from .emissions_national import fetch_national_emissions, ingest_national_emissions
 from .forests import forest_zonal_territory_years, ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
 from .forests_delivery import generate_forests_delivery
-from .forests_legacy import LEGACY, legacy_enabled, legacy_state_complete
+from .forests_legacy import LEGACY, legacy_enabled, legacy_state_complete, validate_bootstrap_candidate
 from .ingestion_plan import (
     PLAN_SCHEMA_VERSION,
     active_ingestion_plan,
@@ -815,6 +815,7 @@ def _run_geospatial(
     input_store = hydrate_store or store
     validation_only = bool(getattr(args, "validation_only", False))
     plan = active_ingestion_plan()
+    legacy_bootstrap = legacy_enabled() and plan is None and not legacy_state_complete(previous_state)
     allowed_families = set(domain.source_families) if domain else {"infc", "copernicus"}
     families = _changed_source_families()
     unexpected_families = families - allowed_families
@@ -832,7 +833,7 @@ def _run_geospatial(
     # the shared territory artifact from reaching a production manifest here.
     territory_refresh = (
         ingest_boundaries(root, canonical, years=(2021,), offline=args.offline)
-        if validation_only else {"changed": False, "years": [], "carried": True}
+        if validation_only and not legacy_bootstrap else {"changed": False, "years": [], "carried": True}
     )
     if "infc" in families:
         _hydrate_planned_raw_dependencies(input_store, root, {"infc"})
@@ -846,6 +847,16 @@ def _run_geospatial(
     if "copernicus" not in families:
         _hydrate(input_store, root, [zonal_logical, zonal_coverage_logical])
     active_forest = _hydrate_forest_zonal_for_reuse(input_store, root) if "copernicus" in families else None
+    modern_baseline = None
+    if legacy_bootstrap:
+        if active_forest is None:
+            raise ValueError("Legacy bootstrap requires a verified active modern Forest baseline")
+        modern_baseline = pd.read_parquet(root / zonal_logical)
+        modern_raw = [item["logicalPath"] for item in active_release(input_store)["objects"]
+                      if item["logicalPath"].startswith("raw/copernicus-hrl-forests/")]
+        if not any(path.endswith("/slice-manifest.json") for path in modern_raw):
+            raise ValueError("Legacy bootstrap requires retained active modern Forest raster manifests")
+        _hydrate(input_store, root, modern_raw)
     forest_fetch, infc, zonal = _process_geospatial_forest_sources(
         args, root=root, canonical=canonical, previous_state=previous_state, active_canonical=active_forest,
     )
@@ -904,6 +915,7 @@ def _run_geospatial(
     current_state = build_source_state_from_metadata_paths(
         root / "raw", metadata_paths, include_catalog=catalog_path,
     )
+    bootstrap_evidence = validate_bootstrap_candidate(root, current_state, modern_baseline) if legacy_bootstrap else None
     refreshed_territory_paths = (
         [canonical / "territories" / "reference_year=2021" / f"{level}.parquet" for level in ("municipality", "province", "region")]
         if territory_refresh["changed"] else []
@@ -925,6 +937,10 @@ def _run_geospatial(
         "pipelineDurationSeconds": round(time.monotonic() - started, 3),
     }
     if validation_only:
+        if bootstrap_evidence is not None:
+            state_path = root / SOURCE_STATE_LOGICAL_PATH
+            json_dump(state_path, current_state)
+            declared.append(state_path)
         input_release = active_release(input_store)
         report = {
             "run_id": release_id, "status": "validated", "changed": changed,
@@ -933,6 +949,7 @@ def _run_geospatial(
             "inputReleaseId": input_release.get("releaseId") if input_release else None,
             "territories": territory_refresh,
             "forests": {"fetch": forest_fetch, "infc": infc, "zonal": zonal},
+            **({"legacyBootstrap": bootstrap_evidence} if bootstrap_evidence is not None else {}),
             "operationalMetrics": generated_metrics,
             "candidateArtifacts": [str(path.relative_to(root)) for path in declared if path.is_file()],
             "startedAt": started_at, "completedAt": now_iso(),

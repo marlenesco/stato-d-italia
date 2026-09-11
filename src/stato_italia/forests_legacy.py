@@ -13,6 +13,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import numpy as np
+import jwt
+import pandas as pd
 import rasterio
 import requests
 
@@ -35,6 +37,61 @@ def environment_token() -> str:
     if not token or any(c.isspace() for c in token):
         raise ValueError("CLMS bearer unavailable; configure a token provider")
     return token
+
+
+class ClmsTokenProvider:
+    """CLMS service-key JWT exchange; credentials and bearer stay in memory."""
+
+    def __init__(self, client, *, clock=time.time, monotonic=time.monotonic):
+        self.client = client
+        self.clock = clock
+        self.monotonic = monotonic
+        self._token = None
+        self._expires = 0.0
+
+    def invalidate(self) -> bool:
+        self._token = None
+        return not bool(os.getenv(LEGACY["token_environment"]))
+
+    def __call__(self) -> str:
+        if os.getenv(LEGACY["token_environment"]):
+            return environment_token()
+        if self._token is not None and self.monotonic() < self._expires:
+            return self._token
+        response = None
+        try:
+            key = json.loads(os.environ["CLMS_SERVICE_KEY"])
+            if (not isinstance(key, dict)
+                    or any(not isinstance(key.get(field), str) or not key[field] for field in
+                           ("client_id", "user_id", "private_key", "token_uri"))
+                    or key["token_uri"] != "https://land.copernicus.eu/@@oauth2-token"):
+                raise ValueError()
+            issued = int(self.clock())
+            grant = jwt.encode({"iss": key["client_id"], "sub": key["user_id"], "aud": key["token_uri"],
+                                "iat": issued, "exp": issued + 3600}, key["private_key"], algorithm="RS256")
+            started = self.monotonic()
+            response = self.client.request(
+                "POST", key["token_uri"], headers={"Accept": "application/json"},
+                data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": grant},
+                timeout=30, allow_redirects=False, verify=True,
+            )
+            if response.status_code != 200:
+                raise ValueError()
+            payload = response.json()
+            token, lifetime = payload["access_token"], payload["expires_in"]
+            if (payload.get("token_type") != "Bearer" or not isinstance(token, str) or not token
+                    or any(c.isspace() for c in token) or type(lifetime) is not int or lifetime <= 0):
+                raise ValueError()
+            expires = started + lifetime - min(30, lifetime / 10)
+            if self.monotonic() >= expires:
+                raise ValueError()
+            self._token, self._expires = token, expires
+            return token
+        except Exception:
+            raise ValueError("CLMS service-key authentication unavailable or rejected") from None
+        finally:
+            if response is not None:
+                response.close()
 
 
 def product_contract(asset: dict, year: int) -> dict:
@@ -81,14 +138,19 @@ def _identifier(value: object) -> bool:
 def _json_request(client, method: str, url: str, token_provider, *, expected_status: int, request_timeout=30, **kwargs):
     response = None
     try:
-        token = token_provider()
-        if not isinstance(token, str) or not token or any(c.isspace() for c in token):
+        for attempt in range(2):
+            token = token_provider()
+            if not isinstance(token, str) or not token or any(c.isspace() for c in token):
+                raise ValueError()
+            response = client.request(method, url, headers={"Authorization": f"Bearer {token}"},
+                                      timeout=request_timeout, allow_redirects=False, verify=True, **kwargs)
+            if response.status_code == expected_status:
+                return response.json()
+            if response.status_code == 401 and attempt == 0 and isinstance(token_provider, ClmsTokenProvider) and token_provider.invalidate():
+                response.close()
+                response = None
+                continue
             raise ValueError()
-        response = client.request(method, url, headers={"Authorization": f"Bearer {token}"},
-                                  timeout=request_timeout, allow_redirects=False, **kwargs)
-        if response.status_code != expected_status:
-            raise ValueError()
-        return response.json()
     except Exception:
         raise ValueError("CLMS authenticated request failed or returned invalid JSON") from None
     finally:
@@ -195,7 +257,7 @@ def retained_product(root: Path, asset: dict, year: int) -> dict:
 
 
 def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False,
-                    token_provider=environment_token, client=None) -> dict:
+                    token_provider=None, client=None) -> dict:
     path = raw_path(root, asset, year)
     if path.exists():
         return retained_product(root, asset, year)
@@ -208,7 +270,7 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
     response = None
     temporary = None
     try:
-        task_id, url = request_download_url(asset, year, client=client, token_provider=token_provider)
+        task_id, url = request_download_url(asset, year, client=client, token_provider=token_provider or ClmsTokenProvider(client))
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".partial", delete=False) as output:
             temporary = Path(output.name)
@@ -245,6 +307,91 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
 def fetch_legacy_forests(root: Path, *, offline: bool = False) -> list[dict]:
     return [acquire_product(root, asset, year, offline=offline)
             for asset in LEGACY["assets"] for year in asset["years"]]
+
+
+def validate_bootstrap_candidate(root: Path, source_state: dict, modern_baseline: pd.DataFrame) -> dict:
+    """Read-only evidence gate before a candidate can be declared validated."""
+    from . import forests
+    from .territories import territory_reference_date
+
+    if not legacy_state_complete(source_state):
+        raise ValueError("Legacy bootstrap requires exactly four persisted raw entries")
+    zonal = root / "canonical/forests" / f"algorithm_version={forests.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
+    table = pd.read_parquet(zonal)
+    modern = table[table.dataset_id == forests.HRL["source_id"]]
+    baseline = modern_baseline[modern_baseline.dataset_id == forests.HRL["source_id"]]
+    expected_modern = {(asset["id"], start, end) for asset in forests.HRL["assets"]
+                       if asset.get("statistical_api_enabled", True) for start, end in forests._asset_periods(asset)}
+    actual_modern = set(zip(modern.methodology_version, modern.period_start.str[:4].astype(int), modern.period_end.str[:4].astype(int)))
+    if actual_modern != expected_modern or baseline.empty:
+        raise ValueError("Legacy bootstrap lacks the complete active modern Forest baseline")
+    try:
+        pd.testing.assert_frame_equal(
+            baseline.sort_values("derived_metric_id").reset_index(drop=True),
+            modern[baseline.columns].sort_values("derived_metric_id").reset_index(drop=True), check_dtype=False,
+        )
+    except AssertionError:
+        raise ValueError("Legacy bootstrap changed active modern Forest rows") from None
+    coverage = json.loads(forests.forest_coverage_report_path(zonal).read_text())
+    if coverage.get("coverageMode") != "national":
+        raise ValueError("Legacy bootstrap requires national coverage")
+    index = json.loads((root / "delivery/foreste/index.json").read_text())
+    states = {entry["asset_path"]: entry for entry in source_state["sources"] if entry["source_id"] == LEGACY["source_id"]}
+    legacy_rows = table[table.dataset_id == LEGACY["source_id"]]
+    expected_periods = {(asset["id"], year) for asset, year in expected_legacy_assets().values()}
+    if set(zip(legacy_rows.methodology_version, legacy_rows.reference_year)) != expected_periods:
+        raise ValueError("Legacy bootstrap canonical lacks the four configured asset-periods")
+    products, counts, map_count = [], [], 0
+    populations = {year: forests._slice_territories(root / "canonical", year)
+                   for year in {year for _, year in expected_legacy_assets().values()}}
+    for path, (asset, year) in expected_legacy_assets().items():
+        metadata = retained_product(root, asset, year)
+        if any(states[path].get(key) != metadata[key] for key in ("sha256", "bytes", "source_signature")):
+            raise ValueError("Legacy bootstrap source-state differs from retained ZIP provenance")
+        rows = legacy_rows[(legacy_rows.methodology_version == asset["id"]) & (legacy_rows.reference_year == year)]
+        contract = product_contract(asset, year)
+        if (set(rows.source_asset_sha256) != {metadata["sha256"]}
+                or set(rows.methodology_family) != {LEGACY["methodology_family"]}
+                or set(rows.native_resolution_m) != {asset["native_resolution_m"]}
+                or set(rows.input_resolution_m) != {asset["resolution_m"]}
+                or not rows.territory_version_id.str.endswith("@" + territory_reference_date(year)).all()
+                or set(rows.period_start) != {f"{year}-01-01"} or set(rows.period_end) != {f"{year}-12-31"}
+                or any(json.loads(value) != contract for value in rows.source_product_json)):
+            raise ValueError("Legacy bootstrap canonical source or exact territory contract differs")
+        period = f"{year}-{year}"
+        for level in forests.MAPPABLE_LEVELS:
+            expected, numeric, nodata = forests._coverage_state(coverage["entries"], asset["id"], period, level)
+            if (forests._coverage_reference_year(coverage["entries"], asset["id"], period, level) != year
+                    or forests._coverage_geometry_reference(coverage["entries"], asset["id"], period, level) != f"istat-{level}-{year}.pmtiles"):
+                raise ValueError("Legacy bootstrap coverage has the wrong geometry reference")
+            population = populations[year]
+            if expected != set(population.loc[population.level == level, "territory_id"]):
+                raise ValueError("Legacy bootstrap coverage differs from the exact ISTAT population")
+            level_rows = rows[rows.territory_level == level]
+            for metric in forests._FOREST_METRICS[asset["kind"]]:
+                metric_rows = level_rows[level_rows.metric_id == metric]
+                if set(metric_rows.territory_id) != numeric or metric_rows.territory_id.duplicated().any():
+                    raise ValueError("Legacy bootstrap numeric coverage differs from canonical rows")
+                if numeric:
+                    logical = f"delivery/foreste/maps/{metric}/{period}/{level}.json"
+                    if logical not in index["maps"]:
+                        raise ValueError("Legacy bootstrap delivery map missing")
+                    payload = json.loads((root / logical).read_text())
+                    if payload.get("sourceContract") != contract or payload.get("territoryReferenceYear") != year:
+                        raise ValueError("Legacy bootstrap delivery lost its source contract")
+                    map_count += 1
+                counts.append({"asset": asset["id"], "year": year, "level": level, "metric": metric, "rows": len(metric_rows)})
+        products.append({"asset": asset["id"], "year": year, "zipBytes": metadata["bytes"],
+                         "sha256": metadata["sha256"], "sourceSignature": metadata["source_signature"], "rows": len(rows)})
+    for snapshot in coverage.get("snapshotDiagnostics", []):
+        previous = snapshot.get("comparisonWithPrevious", {}).get("period")
+        if previous and int(previous[:4]) <= 2015 < int(snapshot["period"][:4]):
+            raise ValueError("Legacy bootstrap must not compare across the 2015 to 2018 break")
+    return {"assets": products, "legacyRows": len(legacy_rows), "rowsByAssetYearLevelMetric": counts,
+            "coverage": [{key: entry[key] for key in ("assetId", "period", "territoryLevel", "expectedCount", "numericCount", "validNoDataCount")}
+                         for entry in coverage["entries"] if entry["assetId"] in {a["id"] for a in LEGACY["assets"]}],
+            "legacyDeliveryMaps": map_count, "modernRowsUnchanged": len(modern),
+            "seriesBreakToModern": LEGACY["series_break_to_modern"]}
 
 
 def legacy_zonal_records(root: Path, canonical_root: Path) -> tuple[list[dict], list[dict], dict[int, set[str]]]:

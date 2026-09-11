@@ -204,8 +204,9 @@ def test_run_validation_plan_uses_hydration_release_for_build_and_noop(
     capsys.readouterr()
 
 
+@pytest.mark.parametrize("legacy_bootstrap", [False, True])
 def test_validation_only_forest_run_reads_input_store_and_never_publishes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_bootstrap: bool,
 ) -> None:
     """A national candidate may hydrate remote inputs, but can only write local files."""
     class RemoteInput:
@@ -221,6 +222,8 @@ def test_validation_only_forest_run_reads_input_store_and_never_publishes(
             return True
 
     remote = RemoteInput()
+    monkeypatch.setenv("FOREST_LEGACY_ENABLED", "1" if legacy_bootstrap else "0")
+    monkeypatch.setattr(cli, "active_ingestion_plan", lambda: None)
     output = LocalObjectStore(tmp_path / "artifacts" / "object-store")
     hydrated: list[str] = []
 
@@ -251,6 +254,19 @@ def test_validation_only_forest_run_reads_input_store_and_never_publishes(
     monkeypatch.setattr(cli, "build_pmtiles", lambda _source, destination: {"path": str(destination), "bytes": 0})
     monkeypatch.setattr(cli, "build_source_state_from_metadata_paths", lambda *_args, **_kwargs: {"schemaVersion": 1, "sources": []})
     monkeypatch.setattr(cli, "_publish_scoped", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("validation must not publish")))
+    if legacy_bootstrap:
+        baseline_path = root / f"canonical/forests/algorithm_version={cli.ZONAL_ALGORITHM_VERSION}/zonal_statistics.parquet"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"dataset_id": "copernicus-hrl-forests", "value_decimal": 20.0}]).to_parquet(baseline_path)
+        monkeypatch.setattr(cli, "_hydrate_forest_zonal_for_reuse", lambda *_: ("a" * 64, "b" * 64))
+        monkeypatch.setattr(cli, "active_release", lambda *_: {"releaseId": "active-r2", "objects": [
+            {"logicalPath": "raw/copernicus-hrl-forests/tcd/2018/slice-manifest.json"},
+            {"logicalPath": "raw/copernicus-hrl-forests/tcd/2018/tile.tif"},
+        ]})
+        def validate(_root, _state, baseline):
+            assert baseline.iloc[0].value_decimal == 20.0
+            return {"assets": ["synthetic-four-assets"]}
+        monkeypatch.setattr(cli, "validate_bootstrap_candidate", validate)
 
     assert _run_geospatial(
         Namespace(offline=False, force=False, report=str(tmp_path / "reports/validation.json"), validation_only=True, hydrate_from="r2"),
@@ -263,7 +279,13 @@ def test_validation_only_forest_run_reads_input_store_and_never_publishes(
     assert remote.writes == 0
     assert (tmp_path / "reports/validation.json").is_file()
     assert hydrated
-    assert territory_calls == [{"years": (2021,), "offline": False}]
+    assert territory_calls == ([] if legacy_bootstrap else [{"years": (2021,), "offline": False}])
+    if legacy_bootstrap:
+        report = json.loads((tmp_path / "reports/validation.json").read_text())
+        assert report["legacyBootstrap"]["assets"] == ["synthetic-four-assets"]
+        assert (root / "metadata/source-state.json").is_file()
+        assert "raw/copernicus-hrl-forests/tcd/2018/slice-manifest.json" in hydrated
+        assert "raw/copernicus-hrl-forests/tcd/2018/tile.tif" in hydrated
 
 
 def test_production_activation_is_refused_outside_main(monkeypatch: pytest.MonkeyPatch) -> None:

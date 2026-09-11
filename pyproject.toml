@@ -17,6 +17,7 @@ dependencies = [
   "requests>=2.32",
   "shapely>=2.0",
   "rasterio>=1.5.1",
+  "pyjwt[crypto]>=2.10,<3",
 ]
 
 [dependency-groups]

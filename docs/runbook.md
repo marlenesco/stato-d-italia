@@ -255,6 +255,89 @@ download
 
 `manifest.json` non deve essere aggiornato in caso di errore precedente.
 
+## H1I legacy Forest bootstrap
+
+Autenticazione verificata nella [documentazione ufficiale CLMS](https://eea.github.io/clms-api-docs/authentication.html):
+accedere con EU Login, aprire il profilo → API Tokens → Create new Token e
+conservare il JSON della service key, mostrato una sola volta, nel secret manager.
+Fornire il JSON completo nella variabile segreta `CLMS_SERVICE_KEY`, senza
+stamparlo o inserirlo nei comandi salvati. Il provider firma un JWT RS256 con
+`iss=client_id`, `sub=user_id`, `aud=token_uri`, `iat` e `exp` a un'ora;
+scambia il JWT via form POST al `token_uri` ufficiale
+`https://land.copernicus.eu/@@oauth2-token`. Conserva il bearer solo in memoria,
+rispetta `expires_in` e rinnova con un nuovo JWT; un 401 permette un solo rinnovo
+e ritentativo. `CLMS_ACCESS_TOKEN` rimane un override manuale: ha la scadenza
+assegnata all'emissione e va sostituito dall'operatore; non viene rinnovato.
+Timeout limitati, TLS verificato e nessun Authorization sullo scambio token.
+
+Prerequisiti: release attiva con H1H completo, canonical/coverage e raw raster
+moderni con manifest conservati; geometrie ISTAT esatte 2012/2015 e degli anni
+H1H già disponibili nella release di input. Il bootstrap idrata questi input
+verificati, acquisisce solo i quattro ZIP legacy configurati (TCD 2012/2015 a
+20 m, FTY 2012/2015 aggregato ufficiale a 100 m) e conserva ZIP e sidecar.
+Servono inoltre le consuete credenziali CDSE per il controllo del catalogo
+moderno e, con input R2, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`,
+`R2_BUCKET`. Nessun secret viene aggiunto al workflow schedulato.
+
+Primo candidato controllato, senza `--plan` e senza `--force`:
+
+```sh
+export FOREST_LEGACY_ENABLED=1
+export FOREST_PROCESSING_MODE=raster
+export FOREST_COVERAGE_MODE=national
+export FORESTS_RAW_RETENTION=retain
+# CLMS_SERVICE_KEY e le altre credenziali sono già fornite dal secret manager.
+uv run stato-data run --domain forests --publish local \
+  --hydrate-from r2 --validation-only \
+  --workdir data/h1i-c --output artifacts/h1i-c \
+  --report reports/h1i-c-candidate.json
+```
+
+Per una release di input già nella object store locale usare `--hydrate-from
+local` e il relativo `--output`. `--validation-only` non crea release e non
+aggiorna alcun manifest, nemmeno locale. Nel bootstrap legacy non viene
+ricostruito il 2021: il confronto conserva la baseline H1H verificata.
+Input mancanti o righe moderne cambiate bloccano il candidato, senza fallback.
+
+Il report `legacyBootstrap` contiene byte/SHA/firma per ciascun ZIP, numero
+righe per asset/anno/livello/metrica, conteggi coverage e numero mappe legacy.
+Il controllo richiede quattro source-state entry, provenance ZIP corrispondente,
+geometrie esatte, copertura nazionale completa, `source_product_json` nel delivery
+e righe moderne invariate. I confronti 2015→2018 sono vietati; restano distinti
+famiglia legacy e break `methodology`/`spatial_resolution`. DLT resta disabilitato.
+Lo stato candidato è salvato in `data/h1i-c/metadata/source-state.json`.
+Senza credenziali il risultato operativo è `LIVE_BOOTSTRAP_NOT_EXECUTED`;
+solo un candidato reale riuscito autorizza `LOCAL_BOOTSTRAP_VALIDATED`.
+
+Se un asset o la validazione fallisce, nessuna release viene attivata. I ZIP già
+completi e verificati restano riusabili al prossimo tentativo; i download parziali
+sono rimossi. Non serve rollback R2: la release attiva resta quella precedente.
+Non considerare validati i file locali di un tentativo fallito.
+
+Solo dopo review, merge su `main` e approvazione separata dell'attivazione,
+eseguire il primo publish, sempre senza piano:
+
+```sh
+uv run stato-data run --domain forests --publish r2 \
+  --workdir data/h1i-c --output artifacts/h1i-c \
+  --report reports/h1i-c-production.json
+```
+
+Dopo il bootstrap pubblicato mantenere `FOREST_LEGACY_ENABLED=1`. Il preflight
+confronta le firme dei contratti legacy senza GET CLMS; i run pianificati
+idratano e riusano ZIP invariati. La prova locale usa gli stessi controlli con
+rete mockata, senza un secondo run production. Comandi operativi successivi:
+
+```sh
+uv run stato-data check-sources --domain forests --publish r2 \
+  --report reports/forests-source-check.json
+uv run stato-data run --domain forests --publish r2 \
+  --plan reports/forests-source-check.json
+```
+
+Per il rollback di una futura attivazione usare la procedura di rollback della
+release globale; non sostituire manualmente raw, canonical o manifest.
+
 ## No-op
 
 Se il contenuto della fonte è invariato:

@@ -21,6 +21,8 @@ from stato_italia.territories import territory_reference_date
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
+    monkeypatch.delenv("CLMS_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLMS_SERVICE_KEY", raising=False)
     monkeypatch.setenv("FOREST_LEGACY_ENABLED", "0")
     monkeypatch.setenv("FORESTS_RAW_RETENTION", "retain")
     monkeypatch.setenv("FOREST_COVERAGE_MODE", "national")
@@ -59,6 +61,133 @@ def submitted():
 
 def completed(url="https://example.org/data?secret=123"):
     return Response({"65267487597": {"Status": "Finished_ok", "DownloadURL": url}})
+
+
+@pytest.fixture(scope="module")
+def service_key():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return {"client_id": "fake-client", "user_id": "fake-user",
+            "token_uri": "https://land.copernicus.eu/@@oauth2-token",
+            "private_key": key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                             serialization.NoEncryption()).decode()}, key.public_key()
+
+
+def token_response(token="fake-bearer", lifetime=3600):
+    return Response({"access_token": token, "expires_in": lifetime, "token_type": "Bearer"})
+
+
+def test_service_key_rs256_exchange_cache_and_expiry(monkeypatch, service_key):
+    key, public_key = service_key
+    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(key))
+    now = [1000]
+    responses = [token_response(), token_response("renewed-bearer")]
+    client = Client(*responses)
+    provider = legacy.ClmsTokenProvider(client, clock=lambda: now[0], monotonic=lambda: now[0])
+    assert provider() == provider() == "fake-bearer"
+    assert len(client.calls) == 1
+    args, request = client.calls[0]
+    assert args == ("POST", key["token_uri"])
+    assert "Authorization" not in request["headers"]
+    assert request["verify"] is True and request["allow_redirects"] is False and request["timeout"] == 30
+    assert request["data"]["grant_type"] == "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    claims = legacy.jwt.decode(request["data"]["assertion"], public_key, algorithms=["RS256"],
+                               audience=key["token_uri"], options={"verify_exp": False})
+    assert claims == {"iss": "fake-client", "sub": "fake-user", "aud": key["token_uri"], "iat": 1000, "exp": 4600}
+    now[0] = 4600
+    assert provider() == "renewed-bearer"
+    assert all(response.closed for response in responses)
+
+
+def test_expired_bearer_retries_original_request_once(monkeypatch, service_key):
+    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(service_key[0]))
+    responses = [token_response(), Response(status=401), token_response("new-bearer"), submitted(), completed()]
+    client = Client(*responses)
+    provider = legacy.ClmsTokenProvider(client)
+    assert legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=provider)[0] == "65267487597"
+    assert client.calls[1][0] == client.calls[3][0]
+    assert client.calls[1][1]["json"] == client.calls[3][1]["json"]
+    assert client.calls[3][1]["headers"]["Authorization"] == "Bearer new-bearer"
+    assert "Authorization" not in client.calls[2][1]["headers"]
+    assert all(response.closed for response in responses)
+
+
+def test_repeated_unauthorized_is_bounded(monkeypatch, service_key):
+    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(service_key[0]))
+    responses = [token_response(), Response(status=401), token_response(), Response(status=401)]
+    client = Client(*responses)
+    with pytest.raises(ValueError):
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=legacy.ClmsTokenProvider(client))
+    assert len(client.calls) == 4 and all(response.closed for response in responses)
+
+
+def test_manual_bearer_override_never_uses_service_key_exchange(monkeypatch):
+    monkeypatch.setenv("CLMS_ACCESS_TOKEN", "manual-bearer")
+    monkeypatch.setenv("CLMS_SERVICE_KEY", "invalid")
+    client = Client(Response(status=401))
+    provider = legacy.ClmsTokenProvider(client)
+    assert provider() == "manual-bearer"
+    with pytest.raises(ValueError):
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=provider)
+    assert len(client.calls) == 1
+
+
+def test_acquisition_uses_service_key_without_persisting_auth(tmp_path, monkeypatch, service_key):
+    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(service_key[0]))
+    asset = legacy.LEGACY["assets"][0]
+    client = Client(token_response(), submitted(), completed(), Response(data=zip_bytes(asset)))
+    result = legacy.acquire_product(tmp_path, asset, 2012, client=client)
+    assert result["changed"] is True
+    assert len(client.calls) == 4
+    assert "Authorization" not in client.calls[0][1]["headers"]
+    assert "headers" not in client.calls[3][1]
+    metadata = Path(result["metadata_path"]).read_text()
+    assert all(secret not in metadata for secret in ("fake-bearer", "PRIVATE KEY", "secret=123", "assertion"))
+
+
+def test_bootstrap_asset_failure_stops_remaining_acquisition(tmp_path, monkeypatch):
+    calls = []
+    def acquire(_root, asset, year, **_kwargs):
+        calls.append((asset["id"], year))
+        if len(calls) == 3:
+            raise ValueError("Invalid third legacy asset")
+        return {"changed": True}
+    monkeypatch.setattr(legacy, "acquire_product", acquire)
+    with pytest.raises(ValueError, match="third legacy asset"):
+        legacy.fetch_legacy_forests(tmp_path)
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("invalid", ["missing", "json", "private_key", "token_uri", "response", "http", "expiry", "type"])
+def test_service_key_failures_are_secret_free(monkeypatch, service_key, invalid, caplog):
+    key = dict(service_key[0])
+    response = token_response()
+    if invalid in {"private_key", "token_uri"}:
+        key[invalid] = "secret-private-value"
+    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(key))
+    if invalid == "missing":
+        monkeypatch.delenv("CLMS_SERVICE_KEY")
+    if invalid == "json":
+        monkeypatch.setenv("CLMS_SERVICE_KEY", "secret-private-value")
+    if invalid == "response":
+        response.payload = {"error": "secret-private-value"}
+    if invalid == "http":
+        response.status_code = 403
+    if invalid == "expiry":
+        response.payload["expires_in"] = -1
+    if invalid == "type":
+        response.payload["token_type"] = "not-bearer"
+    client = Client(response)
+    with pytest.raises(ValueError) as error:
+        legacy.ClmsTokenProvider(client)()
+    assert "secret-private-value" not in str(error.value) + caplog.text
+    assert "PRIVATE KEY" not in str(error.value) + caplog.text
+    assert error.value.__suppress_context__
+    if invalid in {"token_uri", "private_key", "json", "missing"}:
+        assert not client.calls
+    else:
+        assert response.closed
 
 
 def zip_bytes(asset, values=None, *, crs="EPSG:3035", resolution=None, count=1, nodata=255, extra=False):
@@ -298,14 +427,15 @@ def test_legacy_raw_paths_feed_existing_source_state(tmp_path):
     assert "secret=x" not in json.dumps(state)
 
 
-def test_legacy_delivery_preserves_methodology(tmp_path, monkeypatch):
+@pytest.mark.parametrize("invalid", [None, "state", "modern", "coverage", "contract", "geometry", "break"])
+def test_legacy_delivery_preserves_methodology(tmp_path, monkeypatch, invalid):
     from stato_italia.forests_delivery import generate_forests_delivery
     monkeypatch.setenv("FOREST_LEGACY_ENABLED", "1")
     canonical = tmp_path / "canonical"
     for asset in legacy.LEGACY["assets"]:
         for year in asset["years"]:
             retain(tmp_path, asset, year)
-    monkeypatch.setattr(forests, "_slice_territories_with_region_code", lambda _, year: population(year, 20))
+    monkeypatch.setattr(forests, "_slice_territories_with_region_code", lambda _, year: population(year, 100))
     monkeypatch.setattr(forests, "_expected_region_codes", lambda *_: {"01"})
     forests.ingest_forests(tmp_path, canonical, mode="raster")
     geometries = {}
@@ -326,6 +456,75 @@ def test_legacy_delivery_preserves_methodology(tmp_path, monkeypatch):
     payload = json.loads((tmp_path / "delivery/foreste/maps/tree_cover_mean/2012-2012/region.json").read_text())
     assert payload["territoryReferenceYear"] == 2012
     assert legacy.LEGACY["methodology_family"] in json.dumps(payload)
+
+    # Add an unchanged synthetic H1H baseline to the actual legacy canonical and delivery.
+    monkeypatch.setattr(forests, "_slice_territories", lambda _, year: population(year, 100))
+    legacy_table = pd.read_parquet(zonal)
+    report_path = forests.forest_coverage_report_path(zonal)
+    report = json.loads(report_path.read_text())
+    modern_rows = []
+    for asset in forests.HRL["assets"]:
+        if not asset.get("statistical_api_enabled", True):
+            continue
+        for start, end in forests._asset_periods(asset):
+            for territory in population(end).to_dict("records"):
+                for metric in forests._FOREST_METRICS[asset["kind"]]:
+                    modern_rows.append(forests._record(asset | {"source_id": forests.HRL["source_id"]}, "active-manifest", "a" * 64,
+                        territory, metric, float(end), start, end))
+            for level in forests.MAPPABLE_LEVELS:
+                expected = list(population(end).query("level == @level").territory_id)
+                report["entries"].append({"assetId": asset["id"], "period": f"{start}-{end}", "territoryLevel": level,
+                    "territoryReferenceYear": end, "territoryGeometryReference": f"istat-{level}-{end}.pmtiles",
+                    "expectedTerritoryIds": expected, "numericTerritoryIds": expected, "validNoDataTerritoryIds": []})
+                territory_path = canonical / "territories" / f"reference_year={end}" / f"{level}.parquet"
+                territory_path.parent.mkdir(parents=True, exist_ok=True)
+                population(end).query("level == @level").assign(name="Synthetic").to_parquet(territory_path)
+                geometry = tmp_path / f"istat-{level}-{end}.pmtiles"
+                geometry.touch()
+                geometries[f"{level}_{end}"] = geometry
+    baseline = pd.DataFrame(modern_rows)
+    combined = pd.concat([legacy_table, baseline], ignore_index=True)
+    combined.to_parquet(zonal)
+    report = forests._coverage_report(combined, report["entries"], {year: {"01"} for year in (2012, 2015, *range(2018, 2025))})
+    report_path.write_text(json.dumps(report))
+    generate_forests_delivery(zonal, infc, canonical, tmp_path / "delivery", "test", geometries, force=True)
+    from stato_italia.cli import build_source_state_from_metadata_paths
+    sidecars = [legacy.raw_path(tmp_path, asset, year).with_suffix(".zip.metadata.json")
+                for asset in legacy.LEGACY["assets"] for year in asset["years"]]
+    state = build_source_state_from_metadata_paths(tmp_path / "raw", sidecars)
+    if invalid == "state":
+        state["sources"][0]["sha256"] = "b" * 64
+    elif invalid == "modern":
+        combined.loc[combined.dataset_id == forests.HRL["source_id"], "value_decimal"] = -1
+    elif invalid == "contract":
+        combined.loc[combined.dataset_id == legacy.LEGACY["source_id"], "source_product_json"] = "{}"
+    elif invalid == "geometry":
+        combined.loc[combined.dataset_id == legacy.LEGACY["source_id"], "territory_version_id"] = "wrong@2025-01-01"
+    elif invalid == "coverage":
+        report["coverageMode"] = "development_slice"
+    elif invalid == "break":
+        report["snapshotDiagnostics"].append({"period": "2018-2018", "comparisonWithPrevious": {"period": "2015-2015"}})
+    combined.to_parquet(zonal)
+    report_path.write_text(json.dumps(report))
+    if invalid:
+        with pytest.raises(ValueError, match="Legacy bootstrap"):
+            legacy.validate_bootstrap_candidate(tmp_path, state, baseline)
+    else:
+        assert set(zip(legacy_table.methodology_version, legacy_table.reference_year)) == {
+            (asset["id"], year) for asset, year in legacy.expected_legacy_assets().values()
+        }
+        evidence = legacy.validate_bootstrap_candidate(tmp_path, state, baseline)
+        assert len(evidence["assets"]) == 4
+        assert evidence["legacyRows"] == 60
+        assert evidence["legacyDeliveryMaps"] == 60
+        assert evidence["modernRowsUnchanged"] == len(baseline)
+        assert all(item["zipBytes"] > 0 for item in evidence["assets"])
+        assert all(item["numericCount"] + item["validNoDataCount"] == item["expectedCount"] for item in evidence["coverage"])
+        from stato_italia.source_state import check_persisted_sources
+        preflight = check_persisted_sources(state, scope="geospatial", families={"copernicus"})
+        assert preflight["sourcesUnchanged"] == 4 and preflight["sourceChecks"] == 0
+        assert preflight["changed"] is False
+        assert all(result["changed"] is False for result in legacy.fetch_legacy_forests(tmp_path))
 
 
 def test_exact_geometry_rejects_missing_and_wrong_year(tmp_path, monkeypatch):
