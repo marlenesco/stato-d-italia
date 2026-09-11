@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Callable
@@ -16,7 +17,21 @@ _TRANSPORT_ERRORS = (requests.ConnectionError, requests.Timeout, requests.except
 
 
 class InfcTransportError(requests.ConnectionError):
-    """All TLS-verified routes to the official INFC host failed."""
+    """All TLS-verified routes failed; diagnostics contain no endpoint identities."""
+
+    def __init__(self, diagnostics: dict[str, Any]) -> None:
+        self.diagnostics = diagnostics
+        super().__init__("INFC routes exhausted: " + json.dumps(diagnostics, sort_keys=True))
+
+
+def _transport_error_class(error: requests.RequestException) -> str:
+    # Never use exception text or an arbitrary subclass name supplied by a caller.
+    for cls in (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout,
+                requests.exceptions.ChunkedEncodingError, requests.exceptions.ProxyError,
+                requests.exceptions.SSLError, requests.Timeout, requests.ConnectionError):
+        if isinstance(error, cls):
+            return cls.__name__
+    return "RequestException"
 
 
 def is_infc_url(url: str) -> bool:
@@ -76,35 +91,39 @@ def get_with_infc_fallback(
     if direct_attempts < 1:
         raise ValueError("direct_attempts must be positive")
     request_kwargs = {**kwargs, "verify": True}
+    direct_outcomes: list[dict[str, Any]] = []
+    proxy_outcomes: list[dict[str, Any]] = []
     direct_error: requests.RequestException | None = None
     for attempt in range(direct_attempts):
         try:
             response = request_get(url, **request_kwargs)
             if not is_retryable_infc_status(url, response.status_code):
                 return response, "direct"
+            direct_outcomes.append({"route": "direct", "http_status": int(response.status_code)})
             response.close()
             direct_error = requests.HTTPError(f"INFC direct route returned HTTP {response.status_code}")
         except _TRANSPORT_ERRORS as exc:
             direct_error = exc
+            direct_outcomes.append({"route": "direct", "error": _transport_error_class(exc)})
         if attempt + 1 < direct_attempts:
             retry_sleep(2 ** attempt)
     if not is_infc_url(url):
         assert direct_error is not None
         raise direct_error
     proxies = infc_proxy_candidates(url)
-    for proxy in proxies:
+    for index, proxy in enumerate(proxies, start=1):
         try:
             response = request_get(url, **request_kwargs, proxies={"https": proxy})
             if is_retryable_infc_status(url, response.status_code):
+                proxy_outcomes.append({"route": f"proxy_{index}", "http_status": int(response.status_code)})
                 response.close()
                 continue
             return response, "proxy"
-        except _TRANSPORT_ERRORS:
+        except _TRANSPORT_ERRORS as exc:
+            proxy_outcomes.append({"route": f"proxy_{index}", "error": _transport_error_class(exc)})
             continue
-    direct_reason = type(direct_error).__name__ if direct_error else "unknown"
-    error = InfcTransportError(
-        f"INFC direct route and {len(proxies)} TLS-verified proxy routes failed; direct={direct_reason}"
-    )
-    if direct_error is not None:
-        raise error from direct_error
-    raise error
+    # Suppress chained requests exceptions: their messages can contain credentials.
+    raise InfcTransportError({
+        "direct_attempts": len(direct_outcomes), "direct": direct_outcomes,
+        "proxy_candidates": len(proxies), "proxies": proxy_outcomes,
+    }) from None

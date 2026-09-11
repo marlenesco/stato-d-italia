@@ -314,3 +314,23 @@ def test_release_membership_excludes_old_raw_even_with_valid_sidecar(tmp_path: P
     logical_paths = {artifact.logical_path for artifact in artifacts}
     assert str(old.relative_to(root)) not in logical_paths
     assert str(old.with_suffix(old.suffix + ".metadata.json").relative_to(root)) not in logical_paths
+
+
+@pytest.mark.parametrize("infc", [True, False])
+def test_source_state_preserves_only_infc_transport_diagnostics(monkeypatch, infc):
+    from stato_italia.infc_transport import InfcTransportError
+    diagnostics = {"direct_attempts": 1, "direct": [{"route": "direct", "http_status": 403}], "proxy_candidates": 0, "proxies": []}
+    error = InfcTransportError(diagnostics) if infc else requests.ReadTimeout("sensitive URL")
+    state = {"schemaVersion": 1, "sources": [{"source_id": "infc-2015-forests", "asset_path": "infc-2015-forests/asset.zip", "resolved_url": "https://www.inventarioforestale.org/asset.zip", "sha256": "a" * 64, "bytes": 1}]}
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr("stato_italia.source_state.get_with_infc_fallback", fail)
+    report = check_persisted_sources(state, scope="geospatial")
+    entry = report["sources"][0]
+    assert entry["status"] == "unverifiable"
+    assert entry["reason"] == type(error).__name__
+    if infc:
+        assert entry["transport_diagnostics"] == diagnostics
+    else:
+        assert "transport_diagnostics" not in entry
+    assert "sensitive URL" not in json.dumps(report)
