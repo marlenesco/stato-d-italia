@@ -14,8 +14,8 @@ Questo documento descrive soltanto ciò che il repository registra, trasforma e 
 | Acqua | BIGBANG ufficiale | 1951–2025 annuale | 1951–2025 annuale | Italia, regioni | osservazioni ufficiali; mappa regionale su geometria 2025 | LOW | nessun gap noto nel contratto registrato |
 | Acqua | BIGBANG provinciale derivato | raster 1951–2025 | 2002–2010, 2012–2020, 2022–2025 (22 anni) | province | geometria ISTAT esatta dell'anno | HIGH | geometrie mancanti per gli altri anni |
 | Foreste | INFC | 2015 | 2015 | Italia, regioni | snapshot esatto 2015; mappa regionale | UNKNOWN | altre edizioni non note al repository |
-| Foreste | Copernicus TCD | 2018–2024 annuale (config H1H) | 2018, 2021, 2023 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | storia ulteriore sconosciuta |
-| Foreste | Copernicus FTY | 2018, 2021, 2024 (config H1H) | 2018, 2021 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | 2024 configurato; materializzazione H1H da eseguire |
+| Foreste | Copernicus TCD | 2018–2024 annuale | 2018–2024 annuale | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | storia ulteriore sconosciuta |
+| Foreste | Copernicus FTY | 2018, 2021, 2024 | 2018, 2021, 2024 | regioni, province, comuni | geometria esatta dello snapshot | MEDIUM | storia ulteriore sconosciuta |
 | Foreste | Copernicus DLT | 2018, 2021, 2023 | nessuna | raster registrato | non ancora applicata | HIGH | processing disabilitato |
 | Foreste | Copernicus TCPC | 2018–2021 | 2018–2021 | regioni, province, comuni | geometria di fine periodo, 2021-12-31 | MEDIUM | altri intervalli non noti |
 | Foreste | CORINE classi forestali | 1990, 2000, 2006, 2012, 2018 | nessuna | raster registrato | non ancora applicata | HIGH | non acquisito/elaborato/pubblicato |
@@ -48,7 +48,7 @@ Gli stati hanno significati distinti: sorgente dichiarata esistente, registrata,
 | Suolo | `ispra-soil-2025` | ISPRA/SNPA; estratto dati consumo di suolo 2025 | `unknown_in_repository` | `consumo_di_suolo_estratto_dati_2025_anni_2006_2024.xlsx` | Italia, regioni, province, comuni; 2006–2024 irregolare | annuale; stato non etichettato nel workbook | stock solo 2024; geografia 2025 |
 | Acqua | `ispra-bigbang-10` | ISPRA; BIGBANG 10.0 | `bigbang-10-1951-2025` | due workbook; cinque archivi `{TP,AE,IF,GR,RF}_ANNUAL_1951-2025.zip`; `GRID_UNITS.txt` | Italia/regioni ufficiali, raster; 1951–2025 annuale | annuale; stima di modello ufficiale | nessun dato provinciale/comunale nelle tabelle; ricalcolo per versione |
 | Foreste | `infc-2015-forests` | CUFAA / CREA; nome dataset non esplicito | `unknown_in_repository` | quattro ZIP per volume, incremento, biomassa e carbonio | Italia, regioni; snapshot 2015 | `unknown_in_repository`; statistiche ufficiali pubblicate | niente province/comuni; Trento e Bolzano non aggregati implicitamente |
-| Foreste | `copernicus-hrl-forests` | UE / CLMS; nome e versione non espliciti | `unknown_in_repository` | API CDSE e contratti prodotto TCD/FTY/DLT/TCPC | raster e aggregati derivati; 2018–2023 secondo prodotto | `unknown_in_repository`; `unknown_in_repository` | TCD non equivale a foresta FAO; DLT disabilitato |
+| Foreste | `copernicus-hrl-forests` | UE / CLMS; nome e versione non espliciti | `unknown_in_repository` | API CDSE e contratti prodotto TCD/FTY/DLT/TCPC | raster e aggregati derivati; 2018–2024 secondo prodotto | `unknown_in_repository`; `unknown_in_repository` | TCD non equivale a foresta FAO; DLT disabilitato |
 | Foreste | `copernicus-corine-forests` | UE / CLMS; nome e versione non espliciti | `unknown_in_repository` | ID download per 1990, 2000, 2006, 2012, 2018 | raster e aggregati potenziali; status a sei anni | `unknown_in_repository`; `unknown_in_repository` | serie distinta da HRL; MMU 25 ha |
 | Dissesto | `ispra-idrogeo-risk-2024` | ISPRA IdroGEO; pericolosità e rischio | `unknown_in_repository` | API `/api/pir/{italia,regioni,province,comuni}/export` | tutti i livelli; indicatori 2020/2024 | irregolare; snapshot ufficiale | non annuale; `-1` è indisponibile; limiti ISTAT 2024 |
 | Emissioni | `ispra-emissions-ghg-2026` | ISPRA; gas serra nazionali | `2026-1990-2024` | `Emissioni-GHG-Sintesi-<anno>.xlsx` | Italia; 1990–2024 annuale | annuale; inventario ufficiale, publication status unknown | categorie ufficiali non sommate implicitamente |
@@ -151,9 +151,9 @@ Snapshot ufficiale 2015: Italia e regioni nel canonical; mappe regionali su geom
 
 ### Copernicus TCD, FTY e TCPC
 
-H1H prepara codice e configurazione per il ciclo moderno HR-VLCC: TCD annuale `2018–2024`, FTY `2018`, `2021`, `2024`, TCPC esclusivamente `2018–2021`. DLT resta non operativo (`statistical_api_enabled: false`). HRL legacy `2012`/`2015` resta rinviato per la discontinuità metodologica e di risoluzione; CORINE e INFC non vengono estesi.
+H1H ha completato con successo la materializzazione in produzione del ciclo moderno HR-VLCC: TCD annuale `2018–2024`, FTY `2018`, `2021`, `2024`, TCPC esclusivamente `2018–2021`. DLT resta non operativo (`statistical_api_enabled: false`). HRL legacy `2012`/`2015` resta rinviato a H1I per la discontinuità metodologica e di risoluzione; CORINE e INFC storico restano rinviati. TCPC `2021–2024` non è verificato né pubblicato nel contratto corrente.
 
-Questa preparazione non costituisce materializzazione o pubblicazione H1H. Le annualità pubblicate riportate sotto restano quelle verificate prima dell'espansione. Il prossimo run potrà riusare soltanto asset-periodi del canonical attivo idratato con metriche, copertura numerica/NoData, versioni territoriali, firme snapshot e richieste raster ancora compatibili. Periodi mancanti o incompatibili vengono ricalcolati singolarmente; il canonical ordinato e il sidecar finale descrivono l'intero inventario abilitato. Il sidecar H1H aggiunge una firma per asset-periodo che include contratto e geometrie, senza includere la lista degli anni.
+Closeout H1H: `releaseId: 2026-09-10T224924Z-local`, `status: success`. Le annualità pubblicate riportate sotto includono l’espansione completata. I run successivi possono riusare soltanto asset-periodi del canonical attivo idratato con metriche, copertura numerica/NoData, versioni territoriali, firme snapshot e richieste raster ancora compatibili. Periodi mancanti o incompatibili vengono ricalcolati singolarmente; il canonical ordinato e il sidecar finale descrivono l'intero inventario abilitato. Il sidecar H1H aggiunge una firma per asset-periodo che include contratto e geometrie, senza includere la lista degli anni.
 
 ```text
 config/sources/copernicus-forests.yaml#<asset>
@@ -167,8 +167,8 @@ config/sources/copernicus-forests.yaml#<asset>
                └─ frontend Foreste e capability/explorer condivisi
 ```
 
-- TCD: snapshot `2018`, `2021`, `2023`; geometrie omologhe (`2021-12-31` per il 2021); regioni, province e comuni. Display, serie e ranking sì; confronto solo con evidenza identica di metodo e geometria. Opportunità `MEDIUM`.
-- FTY: snapshot `2018`, `2021`; stessa politica exact-year. Display, serie e ranking sì; confronto vincolato. Opportunità `MEDIUM`.
+- TCD: snapshot annuali `2018–2024`; geometrie omologhe (`2021-12-31` per il 2021); regioni, province e comuni. Display, serie e ranking sì; confronto solo con evidenza identica di metodo e geometria. Opportunità `MEDIUM`.
+- FTY: snapshot `2018`, `2021`, `2024`; stessa politica exact-year. Display, serie e ranking sì; confronto vincolato. Opportunità `MEDIUM`.
 - TCPC: intervallo `2018-2021`, legato alla geometria di fine periodo `2021-12-31`. È un indicatore di gain/loss di copertura arborea, non una prova automatica di deforestazione. Display e ranking sì; non costituisce da solo una serie di snapshot. Opportunità `MEDIUM`.
 
 ### Copernicus DLT e CORINE
