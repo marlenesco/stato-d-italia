@@ -54,11 +54,31 @@ def raw_path(root: Path, asset: dict, year: int) -> Path:
     return root / "raw" / LEGACY["source_id"] / asset["id"] / str(year) / "product.zip"
 
 
+def contract_signature(asset: dict, year: int) -> str:
+    payload = json.dumps(product_contract(asset, year), sort_keys=True, separators=(",", ":"))
+    return sha256(payload.encode()).hexdigest()
+
+
+def expected_legacy_assets() -> dict[str, tuple[dict, int]]:
+    """Exact asset paths relative to the raw root, as stored in source-state."""
+    return {
+        raw_path(Path(), asset, year).relative_to("raw").as_posix(): (asset, year)
+        for asset in LEGACY["assets"] for year in asset["years"]
+    }
+
+
+def legacy_state_complete(state: dict | None) -> bool:
+    entries = [entry for entry in (state or {}).get("sources", [])
+               if entry.get("source_id") == LEGACY["source_id"] and entry.get("kind") != "catalog"]
+    paths = [entry.get("asset_path") for entry in entries]
+    return all(isinstance(path, str) for path in paths) and len(paths) == len(set(paths)) and set(paths) == set(expected_legacy_assets())
+
+
 def _identifier(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and len(value) <= 256
+    return isinstance(value, str) and bool(value) and len(value) <= 256 and not any(c.isspace() for c in value)
 
 
-def _json_request(client, method: str, url: str, token_provider, *, request_timeout=30, **kwargs):
+def _json_request(client, method: str, url: str, token_provider, *, expected_status: int, request_timeout=30, **kwargs):
     response = None
     try:
         token = token_provider()
@@ -66,7 +86,7 @@ def _json_request(client, method: str, url: str, token_provider, *, request_time
             raise ValueError()
         response = client.request(method, url, headers={"Authorization": f"Bearer {token}"},
                                   timeout=request_timeout, allow_redirects=False, **kwargs)
-        if response.status_code != 200:
+        if response.status_code != expected_status:
             raise ValueError()
         return response.json()
     except Exception:
@@ -83,29 +103,31 @@ def request_download_url(asset: dict, year: int, *, client, token_provider=envir
         raise ValueError("Invalid CLMS polling limits")
     product = product_contract(asset, year)["product"]
     payload = _json_request(client, "POST", LEGACY["request_url"], token_provider,
+                            expected_status=201,
                             json={"Datasets": [{key: product[key] for key in ("DatasetID", "FileID")}]})
     # A single submitted dataset must resolve to exactly one task.
-    if isinstance(payload, list) and len(payload) == 1:
-        payload = payload[0]
-    if not isinstance(payload, dict) or not _identifier(payload.get("TaskID")):
+    if (not isinstance(payload, dict) or payload.get("ErrorTaskIds") != []
+            or not isinstance(payload.get("TaskIds"), list) or len(payload["TaskIds"]) != 1
+            or not isinstance(payload["TaskIds"][0], dict)
+            or not _identifier(payload["TaskIds"][0].get("TaskID"))):
         raise ValueError("CLMS submission lacks one unambiguous TaskID")
-    task_id = payload["TaskID"]
+    task_id = payload["TaskIds"][0]["TaskID"]
     deadline = clock() + timeout
     for attempt in range(max_polls):
         if clock() >= deadline:
             break
         payload = _json_request(client, "GET", LEGACY["search_url"], token_provider,
+                                expected_status=200,
                                 params={"status": "Finished_ok"}, request_timeout=min(30, max(0.001, deadline - clock())))
         if clock() >= deadline:
             break
-        items = payload.get("items") if isinstance(payload, dict) else payload
-        if not isinstance(items, list) or any(not isinstance(item, dict) or not _identifier(item.get("TaskID")) for item in items):
+        if not isinstance(payload, dict):
             raise ValueError("CLMS completed-task response is malformed")
-        matches = [item for item in items if item["TaskID"] == task_id]
-        if len(matches) > 1:
-            raise ValueError("CLMS completed task is ambiguous")
-        if matches:
-            url = matches[0].get("DownloadURL")
+        if task_id in payload:
+            item = payload[task_id]
+            if not isinstance(item, dict) or item.get("Status") != "Finished_ok":
+                raise ValueError("CLMS target task is malformed or not successfully completed")
+            url = item.get("DownloadURL")
             try:
                 parsed = urlsplit(url) if isinstance(url, str) and not any(c.isspace() for c in url) else None
                 valid = parsed and parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password and not parsed.fragment
@@ -163,6 +185,7 @@ def retained_product(root: Path, asset: dict, year: int) -> dict:
     try:
         metadata = json.loads(metadata_path.read_text())
         if (metadata["contract"] != product_contract(asset, year)
+                or metadata.get("source_signature") != contract_signature(asset, year)
                 or metadata["sha256"] != sha256_file(path)
                 or metadata["bytes"] != path.stat().st_size):
             raise ValueError()
@@ -200,6 +223,7 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
         with tempfile.TemporaryDirectory() as directory:
             raster_hash = extract_validated_raster(temporary, Path(directory) / "raster.tif", asset)
         metadata = {"source_id": LEGACY["source_id"], "sha256": digest.hexdigest(),
+                    "source_signature": contract_signature(asset, year),
                     "bytes": temporary.stat().st_size, "contract": product_contract(asset, year),
                     "raster_sha256": raster_hash, "TaskID": task_id,
                     "dataset_version": asset["products"][year]["version"], "period": [year, year],
