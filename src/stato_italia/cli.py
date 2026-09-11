@@ -24,6 +24,7 @@ from .emissions_delivery import generate_emissions_delivery
 from .emissions_national import fetch_national_emissions, ingest_national_emissions
 from .forests import forest_zonal_territory_years, ZONAL_ALGORITHM_VERSION, fetch_forests, ingest_forests, ingest_infc_forests
 from .forests_delivery import generate_forests_delivery
+from .forests_legacy import legacy_enabled
 from .ingestion_plan import (
     PLAN_SCHEMA_VERSION,
     active_ingestion_plan,
@@ -1432,7 +1433,7 @@ def _run_combined_scope_forests(
     force_zonal = args.force or bool(forest_zonal_territory_years() & set(changed_boundary_years or ()))
     if mode == "statistical-api" and forest_fetch.get("catalog", {}).get("status") != "blocked":
         forests["zonal"] = ingest_forests(root, canonical, force=force_zonal or catalog_changed, mode=mode)
-    elif zonal_raw:
+    elif zonal_raw or legacy_enabled():
         forests["zonal"] = ingest_forests(root, canonical, force=args.force, mode="raster", active_canonical=active_canonical, changed_boundary_years=set(changed_boundary_years or ()) & forest_zonal_territory_years())
     return forests
 
@@ -1458,6 +1459,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("Validation-only runs require local candidate output")
     domain = _domain_processing(args)
     args.scope = _execution_scope(args, domain)
+    if args.scope in {"all", "geospatial"} and legacy_enabled() and getattr(args, "plan", None):
+        raise ValueError("Legacy Forest bootstrap requires a run without --plan; legacy incremental planning is not enabled")
     if getattr(args, "rebuild_historical_bigbang", False) and (
         args.scope != "data" or domain is not None or not getattr(args, "plan", None)
     ):
