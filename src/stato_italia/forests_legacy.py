@@ -1,4 +1,4 @@
-"""CLMS legacy ZIP acquisition and validation; no CDSE or implicit auth exchange."""
+"""CLMS legacy ZIP acquisition, service-key authentication and validation."""
 from __future__ import annotations
 
 import json
