@@ -5,7 +5,7 @@ methodology_url: https://eea.github.io/clms-api-docs/download.html
 methodology_family: copernicus_hrl_forest_legacy_2012_2015
 license: Copernicus full, free and open access; attribution and explicit derived-product notice required
 enabled_environment: FOREST_LEGACY_ENABLED
-token_environment: CLMS_ACCESS_TOKEN
+service_key_environment: CLMS_SERVICE_KEY_JSON
 request_url: https://land.copernicus.eu/api/@datarequest_post
 search_url: https://land.copernicus.eu/api/@datarequest_search
 crs: EPSG:3035

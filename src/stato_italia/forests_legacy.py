@@ -31,14 +31,6 @@ def legacy_enabled() -> bool:
     return value == "1"
 
 
-def environment_token() -> str:
-    """Operational bridge: the caller provisions/refreshes the CLMS bearer."""
-    token = os.getenv(LEGACY["token_environment"], "")
-    if not token or any(c.isspace() for c in token):
-        raise ValueError("CLMS bearer unavailable; configure a token provider")
-    return token
-
-
 class ClmsTokenProvider:
     """CLMS service-key JWT exchange; credentials and bearer stay in memory."""
 
@@ -51,20 +43,24 @@ class ClmsTokenProvider:
 
     def invalidate(self) -> bool:
         self._token = None
-        return not bool(os.getenv(LEGACY["token_environment"]))
+        return True
 
     def __call__(self) -> str:
-        if os.getenv(LEGACY["token_environment"]):
-            return environment_token()
         if self._token is not None and self.monotonic() < self._expires:
             return self._token
         response = None
         try:
-            key = json.loads(os.environ["CLMS_SERVICE_KEY"])
+            key = json.loads(os.environ[LEGACY["service_key_environment"]])
             if (not isinstance(key, dict)
                     or any(not isinstance(key.get(field), str) or not key[field] for field in
-                           ("client_id", "user_id", "private_key", "token_uri"))
-                    or key["token_uri"] != "https://land.copernicus.eu/@@oauth2-token"):
+                           ("client_id", "user_id", "private_key", "token_uri"))):
+                raise ValueError()
+            uri = urlsplit(key["token_uri"])
+            if (uri.scheme != "https" or not uri.hostname
+                    or uri.username is not None or uri.password is not None
+                    or "#" in key["token_uri"] or any(c.isspace() for c in key["token_uri"])):
+                raise ValueError()
+            if uri.port is not None and not 0 < uri.port <= 65535:
                 raise ValueError()
             issued = int(self.clock())
             grant = jwt.encode({"iss": key["client_id"], "sub": key["user_id"], "aud": key["token_uri"],
@@ -79,7 +75,9 @@ class ClmsTokenProvider:
                 raise ValueError()
             payload = response.json()
             token, lifetime = payload["access_token"], payload["expires_in"]
-            if (payload.get("token_type") != "Bearer" or not isinstance(token, str) or not token
+            token_type = payload.get("token_type")
+            if (not isinstance(token_type, str) or token_type.lower() != "bearer"
+                    or not isinstance(token, str) or not token
                     or any(c.isspace() for c in token) or type(lifetime) is not int or lifetime <= 0):
                 raise ValueError()
             expires = started + lifetime - min(30, lifetime / 10)
@@ -158,12 +156,14 @@ def _json_request(client, method: str, url: str, token_provider, *, expected_sta
             response.close()
 
 
-def request_download_url(asset: dict, year: int, *, client, token_provider=environment_token,
+def request_download_url(asset: dict, year: int, *, client, token_provider=None,
                          timeout: float = 600, max_polls: int = 60,
                          clock=time.monotonic, sleep=time.sleep) -> tuple[str, str]:
     if not math.isfinite(timeout) or timeout <= 0 or max_polls <= 0:
         raise ValueError("Invalid CLMS polling limits")
     product = product_contract(asset, year)["product"]
+    if token_provider is None:
+        token_provider = ClmsTokenProvider(client)
     payload = _json_request(client, "POST", LEGACY["request_url"], token_provider,
                             expected_status=201,
                             json={"Datasets": [{key: product[key] for key in ("DatasetID", "FileID")}]})

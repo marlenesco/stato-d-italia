@@ -260,14 +260,13 @@ download
 Autenticazione verificata nella [documentazione ufficiale CLMS](https://eea.github.io/clms-api-docs/authentication.html):
 accedere con EU Login, aprire il profilo → API Tokens → Create new Token e
 conservare il JSON della service key, mostrato una sola volta, nel secret manager.
-Fornire il JSON completo nella variabile segreta `CLMS_SERVICE_KEY`, senza
+Fornire il JSON completo nella variabile segreta `CLMS_SERVICE_KEY_JSON`, senza
 stamparlo o inserirlo nei comandi salvati. Il provider firma un JWT RS256 con
 `iss=client_id`, `sub=user_id`, `aud=token_uri`, `iat` e `exp` a un'ora;
-scambia il JWT via form POST al `token_uri` ufficiale
-`https://land.copernicus.eu/@@oauth2-token`. Conserva il bearer solo in memoria,
+scambia il JWT via form POST al `token_uri` della service key, validato come URL
+HTTPS con hostname, senza credenziali incorporate né frammento. Conserva il bearer solo in memoria,
 rispetta `expires_in` e rinnova con un nuovo JWT; un 401 permette un solo rinnovo
-e ritentativo. `CLMS_ACCESS_TOKEN` rimane un override manuale: ha la scadenza
-assegnata all'emissione e va sostituito dall'operatore; non viene rinnovato.
+e ritentativo.
 Timeout limitati, TLS verificato e nessun Authorization sullo scambio token.
 
 Prerequisiti: release attiva con H1H completo, canonical/coverage e raw raster
@@ -286,7 +285,7 @@ export FOREST_LEGACY_ENABLED=1
 export FOREST_PROCESSING_MODE=raster
 export FOREST_COVERAGE_MODE=national
 export FORESTS_RAW_RETENTION=retain
-# CLMS_SERVICE_KEY e le altre credenziali sono già fornite dal secret manager.
+# CLMS_SERVICE_KEY_JSON e le altre credenziali sono già fornite dal secret manager.
 uv run stato-data run --domain forests --publish local \
   --hydrate-from r2 --validation-only \
   --workdir data/h1i-c --output artifacts/h1i-c \

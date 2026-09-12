@@ -21,8 +21,7 @@ from stato_italia.territories import territory_reference_date
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
-    monkeypatch.delenv("CLMS_ACCESS_TOKEN", raising=False)
-    monkeypatch.delenv("CLMS_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("CLMS_SERVICE_KEY_JSON", raising=False)
     monkeypatch.setenv("FOREST_LEGACY_ENABLED", "0")
     monkeypatch.setenv("FORESTS_RAW_RETENTION", "retain")
     monkeypatch.setenv("FOREST_COVERAGE_MODE", "national")
@@ -78,11 +77,17 @@ def token_response(token="fake-bearer", lifetime=3600):
     return Response({"access_token": token, "expires_in": lifetime, "token_type": "Bearer"})
 
 
-def test_service_key_rs256_exchange_cache_and_expiry(monkeypatch, service_key):
-    key, public_key = service_key
-    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(key))
+@pytest.mark.parametrize("token_uri", ["https://land.copernicus.eu/@@oauth2-token", "https://auth.example.org:8443/token?realm=clms"])
+@pytest.mark.parametrize("token_type", ["Bearer", "bearer", "BEARER"])
+def test_service_key_rs256_exchange_cache_and_expiry(monkeypatch, service_key, token_uri, token_type):
+    original_key, public_key = service_key
+    key = original_key | {"token_uri": token_uri, "ignored_extra": {"arbitrary": True}}
+    assert legacy.LEGACY["service_key_environment"] == "CLMS_SERVICE_KEY_JSON"
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(key))
     now = [1000]
     responses = [token_response(), token_response("renewed-bearer")]
+    for response in responses:
+        response.payload["token_type"] = token_type
     client = Client(*responses)
     provider = legacy.ClmsTokenProvider(client, clock=lambda: now[0], monotonic=lambda: now[0])
     assert provider() == provider() == "fake-bearer"
@@ -101,7 +106,7 @@ def test_service_key_rs256_exchange_cache_and_expiry(monkeypatch, service_key):
 
 
 def test_expired_bearer_retries_original_request_once(monkeypatch, service_key):
-    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(service_key[0]))
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(service_key[0]))
     responses = [token_response(), Response(status=401), token_response("new-bearer"), submitted(), completed()]
     client = Client(*responses)
     provider = legacy.ClmsTokenProvider(client)
@@ -114,7 +119,7 @@ def test_expired_bearer_retries_original_request_once(monkeypatch, service_key):
 
 
 def test_repeated_unauthorized_is_bounded(monkeypatch, service_key):
-    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(service_key[0]))
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(service_key[0]))
     responses = [token_response(), Response(status=401), token_response(), Response(status=401)]
     client = Client(*responses)
     with pytest.raises(ValueError):
@@ -122,19 +127,8 @@ def test_repeated_unauthorized_is_bounded(monkeypatch, service_key):
     assert len(client.calls) == 4 and all(response.closed for response in responses)
 
 
-def test_manual_bearer_override_never_uses_service_key_exchange(monkeypatch):
-    monkeypatch.setenv("CLMS_ACCESS_TOKEN", "manual-bearer")
-    monkeypatch.setenv("CLMS_SERVICE_KEY", "invalid")
-    client = Client(Response(status=401))
-    provider = legacy.ClmsTokenProvider(client)
-    assert provider() == "manual-bearer"
-    with pytest.raises(ValueError):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=provider)
-    assert len(client.calls) == 1
-
-
 def test_acquisition_uses_service_key_without_persisting_auth(tmp_path, monkeypatch, service_key):
-    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(service_key[0]))
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(service_key[0]))
     asset = legacy.LEGACY["assets"][0]
     client = Client(token_response(), submitted(), completed(), Response(data=zip_bytes(asset)))
     result = legacy.acquire_product(tmp_path, asset, 2012, client=client)
@@ -165,11 +159,11 @@ def test_service_key_failures_are_secret_free(monkeypatch, service_key, invalid,
     response = token_response()
     if invalid in {"private_key", "token_uri"}:
         key[invalid] = "secret-private-value"
-    monkeypatch.setenv("CLMS_SERVICE_KEY", json.dumps(key))
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(key))
     if invalid == "missing":
-        monkeypatch.delenv("CLMS_SERVICE_KEY")
+        monkeypatch.delenv("CLMS_SERVICE_KEY_JSON")
     if invalid == "json":
-        monkeypatch.setenv("CLMS_SERVICE_KEY", "secret-private-value")
+        monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", "secret-private-value")
     if invalid == "response":
         response.payload = {"error": "secret-private-value"}
     if invalid == "http":
@@ -182,12 +176,57 @@ def test_service_key_failures_are_secret_free(monkeypatch, service_key, invalid,
     with pytest.raises(ValueError) as error:
         legacy.ClmsTokenProvider(client)()
     assert "secret-private-value" not in str(error.value) + caplog.text
-    assert "PRIVATE KEY" not in str(error.value) + caplog.text
+    visible = str(error.value) + caplog.text
+    assert service_key[0]["private_key"] not in visible
+    assert "fake-bearer" not in visible
+    for _, request in client.calls:
+        assert request["data"]["assertion"] not in visible
+    assert "PRIVATE KEY" not in visible
     assert error.value.__suppress_context__
     if invalid in {"token_uri", "private_key", "json", "missing"}:
         assert not client.calls
     else:
         assert response.closed
+
+
+
+@pytest.mark.parametrize("token_uri", [
+    "http://auth.example.org/token", "https:///token",
+    "https://user:password@auth.example.org/token", "https://@auth.example.org/token",
+    "https://auth.example.org/token#fragment", "https://auth.example.org/token#",
+    "https://auth.example.org:invalid/token", "https://auth.example.org:99999/token",
+    "https://auth.example.org/token\n",
+])
+def test_service_key_rejects_invalid_token_uri(monkeypatch, service_key, token_uri):
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(service_key[0] | {"token_uri": token_uri}))
+    client = Client()
+    with pytest.raises(ValueError, match="authentication unavailable or rejected"):
+        legacy.ClmsTokenProvider(client)()
+    assert not client.calls
+
+
+@pytest.mark.parametrize("field", ["client_id", "user_id", "private_key", "token_uri"])
+@pytest.mark.parametrize("value", [None, "", 123])
+def test_service_key_required_fields_fail_closed(monkeypatch, service_key, field, value):
+    key = service_key[0] | {field: value}
+    if value is None:
+        del key[field]
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(key))
+    client = Client()
+    with pytest.raises(ValueError, match="authentication unavailable or rejected"):
+        legacy.ClmsTokenProvider(client)()
+    assert not client.calls
+
+
+@pytest.mark.parametrize("token_type", [None, 123, "Basic", " Bearer"])
+def test_service_key_rejects_wrong_token_type(monkeypatch, service_key, token_type):
+    monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(service_key[0]))
+    response = token_response()
+    response.payload["token_type"] = token_type
+    client = Client(response)
+    with pytest.raises(ValueError, match="authentication unavailable or rejected"):
+        legacy.ClmsTokenProvider(client)()
+    assert len(client.calls) == 1 and response.closed
 
 
 def zip_bytes(asset, values=None, *, crs="EPSG:3035", resolution=None, count=1, nodata=255, extra=False):
@@ -697,7 +736,7 @@ def test_unchanged_legacy_raw_hydration_reuses_zip_without_clms(tmp_path, monkey
             shutil.copyfile(published / path, destination)
     monkeypatch.setattr(cli, "_hydrate", hydrate)
     cli._hydrate_planned_raw_dependencies(object(), clean, {"copernicus"}, source_ids={legacy.LEGACY["source_id"]})
-    monkeypatch.setattr(legacy, "environment_token", lambda: pytest.fail("Retained ZIP requires no token"))
+    monkeypatch.setattr(legacy.ClmsTokenProvider, "__call__", lambda self: pytest.fail("Retained ZIP requires no token"))
     results = legacy.fetch_legacy_forests(clean)
     assert len(results) == 4 and all(result["changed"] is False for result in results)
     assert all(result["source_signature"] == legacy.contract_signature(asset, year)
