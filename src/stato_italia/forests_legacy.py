@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import time
 import zipfile
+from contextlib import ExitStack
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -319,8 +320,20 @@ def validate_raster(path: Path, asset: dict) -> None:
 
 def extract_validated_raster(archive: Path, destination: Path, asset: dict) -> str:
     try:
-        with zipfile.ZipFile(archive) as bundle:
+        with ExitStack() as stack:
+            bundle = stack.enter_context(zipfile.ZipFile(archive))
             rasters = [info for info in bundle.infolist() if not info.is_dir() and Path(info.filename).suffix.lower() in {".tif", ".tiff"}]
+            if not rasters:
+                nested = [info for info in bundle.infolist() if not info.is_dir() and Path(info.filename).suffix.lower() == ".zip"]
+                if len(nested) != 1:
+                    raise ValueError()
+                temporary = stack.enter_context(tempfile.NamedTemporaryFile(suffix=".zip"))
+                with bundle.open(nested[0]) as source:
+                    shutil.copyfileobj(source, temporary, length=1024 * 1024)
+                temporary.flush()
+                temporary.seek(0)
+                bundle = stack.enter_context(zipfile.ZipFile(temporary))
+                rasters = [info for info in bundle.infolist() if not info.is_dir() and Path(info.filename).suffix.lower() in {".tif", ".tiff"}]
             if len(rasters) != 1:
                 raise ValueError()
             # Fixed destination: ZIP paths are never extracted into the filesystem.

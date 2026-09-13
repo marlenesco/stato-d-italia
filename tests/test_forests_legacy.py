@@ -500,6 +500,54 @@ def test_zip_accepts_unknown_internal_name(tmp_path, asset):
     assert len(legacy.extract_validated_raster(archive, tmp_path / "raster.tif", asset)) == 64
 
 
+@pytest.mark.parametrize("case", ["valid", "unsafe_paths", "zero_tiffs", "multiple_tiffs",
+                                 "zero_zips", "multiple_zips", "corrupt_inner", "corrupt_outer",
+                                 "invalid_raster", "multiple_outer_tiffs"])
+def test_nested_zip_validation_and_cleanup(tmp_path, monkeypatch, case):
+    asset = legacy.LEGACY["assets"][0]
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(legacy.tempfile, "tempdir", str(scratch))
+    def forbidden(*args, **kwargs):
+        pytest.fail("Archive paths must never be extracted directly")
+    monkeypatch.setattr(zipfile.ZipFile, "extract", forbidden)
+    monkeypatch.setattr(zipfile.ZipFile, "extractall", forbidden)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes(asset, values=[101] if case == "invalid_raster" else None))) as source:
+        raster_bytes = source.read("unknown/internal-name.tif")
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as bundle:
+        bundle.writestr("TCD_2012_020m_eu_03035_d03_Full/full.tfw", "sidecar")
+        bundle.writestr("metadata.xml", "<metadata/>")
+        if case != "zero_tiffs":
+            name = "../escaped.tif" if case == "unsafe_paths" else "TCD_2012_020m_eu_03035_d03_Full/full.tif"
+            bundle.writestr(name, raster_bytes)
+        if case == "multiple_tiffs":
+            bundle.writestr("second.tiff", raster_bytes)
+    archive = tmp_path / "outer.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("readme.xml", "<metadata/>")
+        if case != "zero_zips":
+            name = "../escaped.zip" if case == "unsafe_paths" else "Results/TCD_2012_020m_eu_03035_d03_Full.zip"
+            bundle.writestr(name, b"not a zip" if case == "corrupt_inner" else inner.getvalue())
+        if case == "multiple_zips":
+            bundle.writestr("second.zip", inner.getvalue())
+        if case == "multiple_outer_tiffs":
+            bundle.writestr("one.tif", raster_bytes)
+            bundle.writestr("two.tif", raster_bytes)
+    if case == "corrupt_outer":
+        archive.write_bytes(b"not a zip")
+    destination = tmp_path / "raster.tif"
+    if case in {"valid", "unsafe_paths"}:
+        assert legacy.extract_validated_raster(archive, destination, asset) == legacy.sha256(raster_bytes).hexdigest()
+        assert destination.read_bytes() == raster_bytes
+    else:
+        with pytest.raises(ValueError, match="invalid or ambiguous"):
+            legacy.extract_validated_raster(archive, destination, asset)
+        assert not destination.exists()
+    assert not list(scratch.iterdir())
+    assert set(tmp_path.iterdir()) == {scratch, archive} | ({destination} if destination.exists() else set())
+
+
 @pytest.mark.parametrize("overrides", [{"crs": "EPSG:4326"}, {"resolution": 10}, {"extra": True}, {"count": 2}, {"nodata": 0}, {"values": [101]}, {"values": [253]}])
 def test_validator_rejects_incompatible_raster(tmp_path, overrides):
     asset = legacy.LEGACY["assets"][0]
