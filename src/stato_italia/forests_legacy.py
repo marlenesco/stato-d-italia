@@ -201,7 +201,10 @@ def _task_status(asset: dict, year: int, task_id: str, *, client, token_provider
                             request_timeout=request_timeout)
     product = product_contract(asset, year)["product"]
     if (not isinstance(payload, dict)
-            or any(payload.get(key) != product[key] for key in ("DatasetID", "FileID"))
+            or not isinstance(payload.get("Datasets"), list)
+            or len(payload["Datasets"]) != 1
+            or not isinstance(payload["Datasets"][0], dict)
+            or any(payload["Datasets"][0].get(key) != product[key] for key in ("DatasetID", "FileID"))
             or ("TaskID" in payload and payload["TaskID"] != task_id)):
         raise ValueError("CLMS task identity missing or mismatched")
     status = payload.get("Status")

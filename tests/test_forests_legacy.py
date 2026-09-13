@@ -64,8 +64,8 @@ def completed(url="https://example.org/data?secret=123"):
 
 def task_response(status, **extra):
     product = legacy.LEGACY["assets"][0]["products"][2012]
-    return Response({"TaskID": "65267487597", "Status": status,
-                     "DatasetID": product["DatasetID"], "FileID": product["FileID"], **extra})
+    return Response({"Status": status,
+                     "Datasets": [{"DatasetID": product["DatasetID"], "FileID": product["FileID"]}], **extra})
 
 
 @pytest.fixture(scope="module")
@@ -340,7 +340,10 @@ def test_invalid_pending_blocks_all_network(tmp_path, invalid):
 ])
 def test_finished_task_identity_and_url_fail_closed(tmp_path, changes):
     response = completed()
-    response.payload.update(changes)
+    if any(key in changes for key in ("DatasetID", "FileID")):
+        response.payload["Datasets"][0].update(changes)
+    else:
+        response.payload.update(changes)
     client = Client(submitted(), response)
     with pytest.raises(ValueError):
         legacy.request_download_url(legacy.LEGACY["assets"][0], 2012,
@@ -362,12 +365,38 @@ def test_adoption_validates_without_submit(tmp_path, status):
                                     {"TaskID": "wrong"}, {"Status": "Failed"}, {"Status": None}])
 def test_adoption_rejects_invalid_remote_task(tmp_path, changes):
     response = task_response("Queued")
-    response.payload.update(changes)
+    if any(key in changes for key in ("DatasetID", "FileID")):
+        response.payload["Datasets"][0].update(changes)
+    else:
+        response.payload.update(changes)
     asset = legacy.LEGACY["assets"][0]
     with pytest.raises(ValueError):
         legacy.adopt_pending_task(tmp_path, asset, 2012, "65267487597",
                                   client=Client(response), token_provider=lambda: "fake")
     assert not legacy.pending_task_path(tmp_path, asset, 2012).exists()
+
+
+@pytest.mark.parametrize("datasets", ["missing", None, {}, [], [None], [[]], [{}], [{}, {}]])
+def test_adoption_rejects_missing_malformed_or_multiple_datasets(tmp_path, datasets):
+    response = task_response("Queued")
+    valid_dataset = response.payload.pop("Datasets")[0]
+    # Valid top-level IDs must not substitute for the real nested contract.
+    response.payload.update(valid_dataset)
+    if datasets != "missing":
+        response.payload["Datasets"] = [valid_dataset, valid_dataset] if datasets == [{}, {}] else datasets
+    asset = legacy.LEGACY["assets"][0]
+    client = Client(response)
+    with pytest.raises(ValueError, match="task identity missing or mismatched"):
+        legacy.adopt_pending_task(tmp_path, asset, 2012, "65267487597",
+                                  client=client, token_provider=lambda: "fake")
+    assert [call[0][0] for call in client.calls] == ["GET"]
+    assert not legacy.pending_task_path(tmp_path, asset, 2012).exists()
+
+
+def test_task_status_accepts_matching_optional_task_id():
+    response = task_response("Queued", TaskID="65267487597")
+    assert legacy._task_status(legacy.LEGACY["assets"][0], 2012, "65267487597",
+                               client=Client(response), token_provider=lambda: "fake") == ("Queued", None)
 
 
 @pytest.mark.parametrize("failure", ["download", "raster/ZIP validation", "final metadata"])
