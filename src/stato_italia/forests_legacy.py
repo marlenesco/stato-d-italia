@@ -196,7 +196,7 @@ def _write_pending(path: Path, asset: dict, year: int, task_id: str) -> None:
 
 
 def _task_status(asset: dict, year: int, task_id: str, *, client, token_provider,
-                 request_timeout=30) -> tuple[str, str | None]:
+                 request_timeout=30) -> tuple[str, str | None, int | None]:
     payload = _json_request(client, "GET", LEGACY["status_url"], token_provider,
                             expected_status=200, params={"TaskID": task_id},
                             request_timeout=request_timeout)
@@ -210,7 +210,7 @@ def _task_status(asset: dict, year: int, task_id: str, *, client, token_provider
         raise ValueError("CLMS task identity missing or mismatched")
     status = payload.get("Status")
     if status in ("Queued", "In_progress"):
-        return status, None
+        return status, None, None
     if not isinstance(status, str) or not status:
         raise ValueError("CLMS task status missing or malformed")
     if status != "Finished_ok":
@@ -226,7 +226,10 @@ def _task_status(asset: dict, year: int, task_id: str, *, client, token_provider
         valid = False
     if not valid:
         raise ValueError("CLMS completed task lacks a valid HTTPS download URL")
-    return status, url
+    size = payload.get("FileSize")
+    if type(size) is not int or size <= 0:
+        raise ValueError("CLMS completed task lacks a valid FileSize")
+    return status, url, size
 
 
 def adopt_pending_task(root: Path, asset: dict, year: int, task_id: str, *,
@@ -257,7 +260,7 @@ def adopt_pending_task(root: Path, asset: dict, year: int, task_id: str, *,
 
 def request_download_url(asset: dict, year: int, *, pending_path: Path, client, token_provider=None,
                          timeout: float | None = None, max_polls: int | None = None,
-                         clock=time.monotonic, sleep=time.sleep) -> tuple[str, str]:
+                         clock=time.monotonic, sleep=time.sleep) -> tuple[str, str, int]:
     timeout = LEGACY["polling_timeout_seconds"] if timeout is None else timeout
     if not math.isfinite(timeout) or timeout <= 0 or (max_polls is not None and max_polls <= 0):
         raise ValueError("Invalid CLMS polling limits")
@@ -284,12 +287,12 @@ def request_download_url(asset: dict, year: int, *, pending_path: Path, client, 
     while max_polls is None or attempt < max_polls:
         if clock() >= deadline:
             break
-        status, url = _task_status(asset, year, task_id, client=client, token_provider=token_provider,
+        status, url, size = _task_status(asset, year, task_id, client=client, token_provider=token_provider,
                                    request_timeout=min(30, max(0.001, deadline - clock())))
         if clock() >= deadline:
             break
         if status == "Finished_ok":
-            return task_id, url
+            return task_id, url, size
         remaining = deadline - clock()
         attempt += 1
         if remaining > 0 and (max_polls is None or attempt < max_polls):
@@ -401,6 +404,7 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
     temporary = None
     transferred = 0
     archive_hash = None
+    failure_reason = None
     stage = "task"
     try:
         if failed_archive.exists():
@@ -409,21 +413,42 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
                 raise ValueError("CLMS retained validation archive requires compatible pending task")
             temporary = failed_archive
         else:
-            task_id, url = request_download_url(asset, year, pending_path=pending_task_path(root, asset, year),
-                                                client=client, token_provider=token_provider, timeout=timeout)
-            stage = "download"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".partial", delete=False) as output:
-                temporary = Path(output.name)
-                # A signed DownloadURL is sufficient; never forward the CLMS bearer.
-                response = client.request("GET", url, timeout=(30, 300), stream=True, allow_redirects=False)
-                if response.status_code != 200:
-                    raise ValueError()
-                digest = sha256()
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    transferred += output.write(chunk)
-                    digest.update(chunk)
-            archive_hash = digest.hexdigest()
+            for attempt in range(1, 4):
+                # Persisted identity makes every refresh resume the same task without a new POST.
+                stage = "task"
+                task_id, url, expected_size = request_download_url(
+                    asset, year, pending_path=pending_task_path(root, asset, year),
+                    client=client, token_provider=token_provider, timeout=timeout)
+                stage = "download"
+                transferred, failure_reason = 0, None
+                path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".partial", delete=False) as output:
+                        temporary = Path(output.name)
+                        # A signed DownloadURL is sufficient; never forward the CLMS bearer.
+                        response = client.request("GET", url, timeout=(30, 300), stream=True, allow_redirects=False)
+                        if response.status_code != 200:
+                            raise ValueError()
+                        digest = sha256()
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            transferred += output.write(chunk)
+                            digest.update(chunk)
+                    if transferred != expected_size:
+                        failure_reason = "size_mismatch"
+                        raise requests.exceptions.ChunkedEncodingError()
+                except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ReadTimeout,
+                        requests.exceptions.ConnectionError):
+                    if response is not None:
+                        response.close()
+                        response = None
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+                        temporary = None
+                    if attempt == 3:
+                        raise
+                    continue
+                archive_hash = digest.hexdigest()
+                break
         stage = "raster/ZIP validation"
         with tempfile.TemporaryDirectory() as directory:
             raster_hash = extract_validated_raster(temporary, Path(directory) / "raster.tif", asset)
@@ -443,7 +468,8 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
         if stage == "task" and isinstance(error, (ValueError, TimeoutError)):
             raise
         if stage == "download":
-            raise ValueError(f"CLMS legacy download failure ({type(error).__name__}, {transferred} bytes transferred); pending TaskID retained") from None
+            reason = failure_reason or type(error).__name__
+            raise ValueError(f"CLMS legacy download failure ({reason}, attempt {attempt}/3, {transferred}/{expected_size} bytes); pending TaskID retained") from None
         if stage == "raster/ZIP validation":
             if temporary != failed_archive:
                 temporary.rename(failed_archive)

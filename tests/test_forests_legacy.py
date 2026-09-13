@@ -58,14 +58,15 @@ def submitted():
     return Response({"ErrorTaskIds": [], "TaskIds": [{"TaskID": "65267487597"}]}, status=201)
 
 
-def completed(url="https://example.org/data?secret=123"):
-    return task_response("Finished_ok", DownloadURL=url)
+def completed(url="https://example.org/data?secret=123", **extra):
+    return task_response("Finished_ok", DownloadURL=url, **extra)
 
 
 def task_response(status, **extra):
     product = legacy.LEGACY["assets"][0]["products"][2012]
     return Response({"Status": status,
-                     "Datasets": [{"DatasetID": product["DatasetID"], "FileID": product["FileID"]}], **extra})
+                     "Datasets": [{"DatasetID": product["DatasetID"], "FileID": product["FileID"]}],
+                     "FileSize": len(zip_bytes(legacy.LEGACY["assets"][0])), **extra})
 
 
 @pytest.fixture(scope="module")
@@ -396,7 +397,7 @@ def test_adoption_rejects_missing_malformed_or_multiple_datasets(tmp_path, datas
 def test_task_status_accepts_matching_optional_task_id():
     response = task_response("Queued", TaskID="65267487597")
     assert legacy._task_status(legacy.LEGACY["assets"][0], 2012, "65267487597",
-                               client=Client(response), token_provider=lambda: "fake") == ("Queued", None)
+                               client=Client(response), token_provider=lambda: "fake") == ("Queued", None, None)
 
 
 @pytest.mark.parametrize("failure", ["download", "raster/ZIP validation", "final metadata"])
@@ -413,7 +414,7 @@ def test_acquisition_failure_keeps_pending_and_sanitizes(tmp_path, monkeypatch, 
         monkeypatch.setattr(legacy, "json_dump", fail)
     with pytest.raises(ValueError) as error:
         legacy.acquire_product(tmp_path, asset, 2012,
-            client=Client(submitted(), completed(), response), token_provider=lambda: "fake")
+            client=Client(submitted(), completed(FileSize=len(response.data)), response), token_provider=lambda: "fake")
     assert failure in str(error.value)
     assert all(secret not in str(error.value) for secret in ("private-key", "bearer", "secret=123"))
     assert legacy.pending_task_path(tmp_path, asset, 2012).exists()
@@ -433,9 +434,10 @@ def test_poll_matches_completed_task_and_closes_responses(tmp_path):
     responses = [submitted(), task_response("Queued"), task_response("In_progress"),
                  completed("https://example.org/right?secret=opaque")]
     client = Client(*responses)
-    task, url = legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client,
+    task, url, size = legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client,
                                             token_provider=lambda: "fake-bearer", sleep=lambda _: None)
     assert task == "65267487597" and url.endswith("right?secret=opaque")
+    assert size == responses[-1].payload["FileSize"]
     assert all(call[1]["headers"] == {"Authorization": "Bearer fake-bearer", "Accept": "application/json"} for call in client.calls)
     assert client.calls[0][1]["json"] == {"Datasets": [{"DatasetID": "b903be8a861d48d9af41266ce63cc287", "FileID": "266be23f-29a1-41f8-899d-a57c35d572fc"}]}
     assert all(call[0] == ("GET", legacy.LEGACY["status_url"]) and call[1]["params"] == {"TaskID": task} for call in client.calls[1:])
@@ -608,7 +610,7 @@ def test_raster_open_exception_text_is_redacted(tmp_path, monkeypatch):
 def test_failed_archive_retained_reused_and_promoted(tmp_path):
     asset = legacy.LEGACY["assets"][0]
     invalid = zip_bytes(asset, resolution=100)
-    client = Client(submitted(), completed("https://example.org/?signed=secret"), Response(data=invalid))
+    client = Client(submitted(), completed("https://example.org/?signed=secret", FileSize=len(invalid)), Response(data=invalid))
     path = legacy.raw_path(tmp_path, asset, 2012)
     failed = path.with_suffix(".zip.validation-failed")
     pending = legacy.pending_task_path(tmp_path, asset, 2012)
@@ -727,12 +729,18 @@ def test_download_interruption_reports_only_class_and_written_bytes(tmp_path, ca
                 raise exception_type(secret)
             return super().request(*args, **kwargs)
     asset = legacy.LEGACY["assets"][0]
-    client = DownloadClient(submitted(), completed(), response)
+    attempts = 3 if exception_type is legacy.requests.exceptions.ReadTimeout else 1
+    replies = [submitted()]
+    for _ in range(attempts):
+        replies.append(completed())
+        if not during_request:
+            replies.append(response)
+    client = DownloadClient(*replies)
     with pytest.raises(ValueError) as error:
         legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake-bearer")
     count = 0 if during_request else 10
     assert str(error.value) == (
-        f"CLMS legacy download failure ({exception_type.__name__}, {count} bytes transferred); pending TaskID retained")
+        f"CLMS legacy download failure ({exception_type.__name__}, attempt {attempts}/3, {count}/{len(zip_bytes(asset))} bytes); pending TaskID retained")
     assert error.value.__suppress_context__
     assert all(value not in str(error.value) + caplog.text for value in
                ("fake failure", "https://", "signature=secret", "fake-bearer"))
@@ -741,6 +749,75 @@ def test_download_interruption_reports_only_class_and_written_bytes(tmp_path, ca
     assert not list(tmp_path.rglob("*.partial"))
     if not during_request:
         assert response.closed
+
+
+@pytest.mark.parametrize("size", ["missing", None, False, True, 0, -1, 1.5, "123", [], {}])
+def test_finished_task_requires_positive_integer_filesize(size):
+    response = completed(FileSize=size)
+    if size == "missing":
+        del response.payload["FileSize"]
+    with pytest.raises(ValueError, match="valid FileSize"):
+        legacy._task_status(legacy.LEGACY["assets"][0], 2012, "65267487597",
+                            client=Client(response), token_provider=lambda: "fake")
+
+
+@pytest.mark.parametrize("failure", ["chunked", "read_timeout", "connection", "size_mismatch", "oversize"])
+@pytest.mark.parametrize("recover", [False, True])
+def test_full_download_retries_same_task_with_fresh_url(tmp_path, failure, recover):
+    asset = legacy.LEGACY["assets"][0]
+    data = zip_bytes(asset)
+    pending = legacy.pending_task_path(tmp_path, asset, 2012)
+    legacy._write_pending(pending, asset, 2012, "65267487597")
+    classes = {"chunked": legacy.requests.exceptions.ChunkedEncodingError,
+               "read_timeout": legacy.requests.exceptions.ReadTimeout,
+               "connection": legacy.requests.exceptions.ConnectionError}
+    class FailedStream(Response):
+        def iter_content(self, **kwargs):
+            yield b"short"
+            raise classes[failure]("fake upstream https://example.org/?signed=secret bearer-token")
+    attempts = 2 if recover else 3
+    responses, streams = [], []
+    for attempt in range(attempts):
+        responses.append(completed(f"https://example.org/file?signature=secret-{attempt}", FileSize=len(data)))
+        if recover and attempt == 1:
+            response = Response(data=data)
+        elif failure in classes:
+            response = FailedStream()
+        else:
+            response = Response(data=b"short" if failure == "size_mismatch" else data + b"x")
+        responses.append(response)
+        streams.append(response)
+    class InspectingClient(Client):
+        def request(self, *args, **kwargs):
+            if kwargs.get("params"):
+                assert not list(tmp_path.rglob("*.partial"))
+                assert all(stream.closed for stream in streams[:len(self.calls) // 2])
+            return super().request(*args, **kwargs)
+    client = InspectingClient(*responses)
+    if recover:
+        result = legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake")
+        assert result["changed"] and result["bytes"] == len(data)
+        assert not pending.exists()
+    else:
+        reason = classes[failure].__name__ if failure in classes else "size_mismatch"
+        count = len(data) + 1 if failure == "oversize" else 5
+        with pytest.raises(ValueError) as error:
+            legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake")
+        assert str(error.value) == (
+            f"CLMS legacy download failure ({reason}, attempt 3/3, {count}/{len(data)} bytes); pending TaskID retained")
+        assert pending.exists()
+        assert not legacy.raw_path(tmp_path, asset, 2012).exists()
+    assert len(client.calls) == attempts * 2
+    assert all(call[0][0] == "GET" for call in client.calls)
+    for index in range(attempts):
+        assert client.calls[2 * index][0][1] == legacy.LEGACY["status_url"]
+        assert client.calls[2 * index][1]["params"] == {"TaskID": "65267487597"}
+        args, kwargs = client.calls[2 * index + 1]
+        assert args[1] == f"https://example.org/file?signature=secret-{index}"
+        assert kwargs == {"timeout": (30, 300), "stream": True, "allow_redirects": False}
+    assert all(response.closed for response in responses)
+    assert not list(tmp_path.rglob("*.partial"))
+    assert not list(tmp_path.rglob("*.validation-failed"))
 
 
 def test_enabled_years_include_exact_legacy_years(monkeypatch):
