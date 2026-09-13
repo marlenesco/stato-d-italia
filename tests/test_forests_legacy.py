@@ -436,6 +436,7 @@ def test_poll_matches_completed_task_and_closes_responses(tmp_path):
     task, url = legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client,
                                             token_provider=lambda: "fake-bearer", sleep=lambda _: None)
     assert task == "65267487597" and url.endswith("right?secret=opaque")
+    assert all(call[1]["headers"] == {"Authorization": "Bearer fake-bearer", "Accept": "application/json"} for call in client.calls)
     assert client.calls[0][1]["json"] == {"Datasets": [{"DatasetID": "b903be8a861d48d9af41266ce63cc287", "FileID": "266be23f-29a1-41f8-899d-a57c35d572fc"}]}
     assert all(call[0] == ("GET", legacy.LEGACY["status_url"]) and call[1]["params"] == {"TaskID": task} for call in client.calls[1:])
     assert all(response.closed for response in responses)

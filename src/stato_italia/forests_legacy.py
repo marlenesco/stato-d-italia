@@ -140,7 +140,7 @@ def _json_request(client, method: str, url: str, token_provider, *, expected_sta
             token = token_provider()
             if not isinstance(token, str) or not token or any(c.isspace() for c in token):
                 raise ValueError()
-            response = client.request(method, url, headers={"Authorization": f"Bearer {token}"},
+            response = client.request(method, url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
                                       timeout=request_timeout, allow_redirects=False, verify=True, **kwargs)
             if response.status_code == expected_status:
                 return response.json()
