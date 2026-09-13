@@ -626,6 +626,7 @@ def test_acquisition_mocked_and_secret_free_provenance(tmp_path):
     assert not legacy.pending_task_path(tmp_path, asset, 2012).exists()
     assert result["changed"]
     assert "headers" not in client.calls[-1][1]
+    assert client.calls[-1][1] == {"timeout": (30, 300), "stream": True, "allow_redirects": False}
     assert "secret=123" not in json.dumps(result)
     assert "fake-bearer" not in json.dumps(result)
     assert all(r.closed for r in responses)
@@ -633,6 +634,38 @@ def test_acquisition_mocked_and_secret_free_provenance(tmp_path):
     Path(result["local_path"]).write_bytes(b"tampered")
     with pytest.raises(ValueError, match="provenance"):
         legacy.acquire_product(tmp_path, asset, 2012, offline=True)
+
+
+@pytest.mark.parametrize("during_request", [False, True])
+@pytest.mark.parametrize("exception_type", [legacy.requests.exceptions.ReadTimeout, ValueError])
+def test_download_interruption_reports_only_class_and_written_bytes(tmp_path, caplog, during_request, exception_type):
+    secret = "fake failure https://example.org/download?signature=secret fake-bearer"
+    class InterruptedResponse(Response):
+        def iter_content(self, **kwargs):
+            yield b"first"
+            yield b"chunk"
+            raise exception_type(secret)
+    response = InterruptedResponse()
+    class DownloadClient(Client):
+        def request(self, *args, **kwargs):
+            if during_request and kwargs.get("stream"):
+                raise exception_type(secret)
+            return super().request(*args, **kwargs)
+    asset = legacy.LEGACY["assets"][0]
+    client = DownloadClient(submitted(), completed(), response)
+    with pytest.raises(ValueError) as error:
+        legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake-bearer")
+    count = 0 if during_request else 10
+    assert str(error.value) == (
+        f"CLMS legacy download failure ({exception_type.__name__}, {count} bytes transferred); pending TaskID retained")
+    assert error.value.__suppress_context__
+    assert all(value not in str(error.value) + caplog.text for value in
+               ("fake failure", "https://", "signature=secret", "fake-bearer"))
+    assert legacy.pending_task_path(tmp_path, asset, 2012).exists()
+    assert not legacy.raw_path(tmp_path, asset, 2012).exists()
+    assert not list(tmp_path.rglob("*.partial"))
+    if not during_request:
+        assert response.closed
 
 
 def test_enabled_years_include_exact_legacy_years(monkeypatch):

@@ -374,6 +374,7 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
         client.trust_env = False
     response = None
     temporary = None
+    transferred = 0
     stage = "task"
     try:
         task_id, url = request_download_url(asset, year, pending_path=pending_task_path(root, asset, year),
@@ -383,12 +384,12 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
         with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".partial", delete=False) as output:
             temporary = Path(output.name)
             # A signed DownloadURL is sufficient; never forward the CLMS bearer.
-            response = client.request("GET", url, timeout=60, stream=True, allow_redirects=False)
+            response = client.request("GET", url, timeout=(30, 300), stream=True, allow_redirects=False)
             if response.status_code != 200:
                 raise ValueError()
             digest = sha256()
             for chunk in response.iter_content(chunk_size=1024 * 1024):
-                output.write(chunk)
+                transferred += output.write(chunk)
                 digest.update(chunk)
         stage = "raster/ZIP validation"
         with tempfile.TemporaryDirectory() as directory:
@@ -405,11 +406,11 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
         result = retained_product(root, asset, year) | {"changed": True}
         pending_task_path(root, asset, year).unlink()
         return result
-    except (ValueError, TimeoutError):
-        if stage == "task":
+    except Exception as error:
+        if stage == "task" and isinstance(error, (ValueError, TimeoutError)):
             raise
-        raise ValueError(f"CLMS legacy {stage} failure; pending TaskID retained") from None
-    except Exception:
+        if stage == "download":
+            raise ValueError(f"CLMS legacy download failure ({type(error).__name__}, {transferred} bytes transferred); pending TaskID retained") from None
         raise ValueError(f"CLMS legacy {stage} failure; pending TaskID retained") from None
     finally:
         if temporary is not None:
