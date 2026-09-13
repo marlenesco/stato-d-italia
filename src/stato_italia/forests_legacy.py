@@ -304,6 +304,36 @@ class RasterValidationError(ValueError):
     """Fixed local reason codes only; never upstream exception text."""
 
 
+_LEGACY_CLMS_WKT = """
+PROJCS["ETRS89-extended / LAEA Europe",
+  GEOGCS["ETRS89",
+    DATUM["IRENET95",SPHEROID["GRS 1980",6378137,298.257222101]],
+    PRIMEM["Greenwich",0],
+    UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],
+  PROJECTION["Lambert_Azimuthal_Equal_Area"],
+  PARAMETER["latitude_of_center",52],
+  PARAMETER["longitude_of_center",10],
+  PARAMETER["false_easting",4321000],
+  PARAMETER["false_northing",3210000],
+  UNIT["metre",1],AXIS["Easting",EAST],AXIS["Northing",NORTH]]
+"""
+
+
+def _legacy_crs_is_epsg3035_equivalent(crs) -> bool:
+    if crs is None:
+        return False
+    try:
+        if crs == rasterio.crs.CRS.from_epsg(3035):
+            return True
+        # Rasterio normalizes WKT syntax and numeric formatting. Compare every
+        # component, including names, units, axes and prime meridian; PROJJSON
+        # can discard the latter for this legacy datum. No fuzzy identification.
+        expected = rasterio.crs.CRS.from_wkt(_LEGACY_CLMS_WKT)
+        return crs.to_wkt() == expected.to_wkt()
+    except Exception:
+        return False
+
+
 def validate_raster(path: Path, asset: dict) -> None:
     """Validate every source cell, including cells masked by source metadata."""
     reason = "raster_open"
@@ -311,7 +341,7 @@ def validate_raster(path: Path, asset: dict) -> None:
         with rasterio.open(path) as dataset:
             resolution = asset["resolution_m"]
             checks = (
-                ("crs", dataset.crs == rasterio.crs.CRS.from_epsg(3035)),
+                ("crs", _legacy_crs_is_epsg3035_equivalent(dataset.crs)),
                 ("band_count", dataset.count == 1),
                 ("rotation", dataset.transform.b == 0 and dataset.transform.d == 0),
                 ("resolution_x", math.isclose(dataset.transform.a, resolution, abs_tol=1e-8, rel_tol=0)),

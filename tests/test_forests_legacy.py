@@ -599,6 +599,60 @@ def test_raster_diagnostic_rules(tmp_path, reason):
     assert "secret" not in str(error.value)
 
 
+LEGACY_OBSERVED_WKT = """PROJCS["ETRS89-extended / LAEA Europe",
+GEOGCS["ETRS89",DATUM["IRENET95",SPHEROID["GRS 1980",6378137,298.257222101]],
+PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],
+PROJECTION["Lambert_Azimuthal_Equal_Area"],
+PARAMETER["latitude_of_center",52],PARAMETER["longitude_of_center",10],
+PARAMETER["false_easting",4321000],PARAMETER["false_northing",3210000],
+UNIT["metre",1],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"""
+
+
+@pytest.mark.parametrize("wkt", [None, LEGACY_OBSERVED_WKT])
+def test_legacy_crs_equivalence_accepts_known_definitions(tmp_path, wkt):
+    crs = rasterio.crs.CRS.from_epsg(3035) if wkt is None else rasterio.crs.CRS.from_wkt(wkt)
+    if wkt is not None:
+        assert crs.to_epsg() is None
+    assert legacy._legacy_crs_is_epsg3035_equivalent(crs)
+    if wkt is not None:
+        # GeoTIFF encoding can rewrite datum names; test the observed CRS in memory.
+        return
+    asset = legacy.LEGACY["assets"][0]
+    archive = tmp_path / "synthetic.zip"
+    archive.write_bytes(zip_bytes(asset, crs=crs))
+    assert len(legacy.extract_validated_raster(archive, tmp_path / "raster.tif", asset)) == 64
+
+
+@pytest.mark.parametrize("old,new", [
+    ("ETRS89-extended / LAEA Europe", "Unrelated projected CRS"),
+    ('GEOGCS["ETRS89"', 'GEOGCS["Unrelated geographic CRS"'),
+    ("IRENET95", "Unrelated datum"), ("GRS 1980", "Unrelated ellipsoid"),
+    ("6378137", "6378138"), ("298.257222101", "298.257223563"),
+    ("Lambert_Azimuthal_Equal_Area", "Azimuthal_Equidistant"),
+    ('"latitude_of_center",52', '"latitude_of_center",51'),
+    ('"longitude_of_center",10', '"longitude_of_center",11'),
+    ('"false_easting",4321000', '"false_easting",4321001'),
+    ('"false_northing",3210000', '"false_northing",3210001'),
+    ('UNIT["metre",1]', 'UNIT["foot",0.3048]'),
+    ('PRIMEM["Greenwich",0]', 'PRIMEM["Greenwich",1]'),
+])
+def test_legacy_crs_equivalence_rejects_material_deviations(old, new):
+    crs = rasterio.crs.CRS.from_wkt(LEGACY_OBSERVED_WKT.replace(old, new))
+    assert not legacy._legacy_crs_is_epsg3035_equivalent(crs)
+
+
+def test_legacy_crs_equivalence_rejects_unidentified_crs(tmp_path):
+    crs = rasterio.crs.CRS.from_string("+proj=aeqd +lat_0=13 +lon_0=27 +datum=WGS84 +units=m")
+    assert crs.to_epsg() is None
+    assert not legacy._legacy_crs_is_epsg3035_equivalent(crs)
+    assert not legacy._legacy_crs_is_epsg3035_equivalent(None)
+    asset = legacy.LEGACY["assets"][0]
+    archive = tmp_path / "synthetic.zip"
+    archive.write_bytes(zip_bytes(asset, crs=crs))
+    with pytest.raises(legacy.RasterValidationError, match="^crs$"):
+        legacy.extract_validated_raster(archive, tmp_path / "raster.tif", asset)
+
+
 def test_raster_open_exception_text_is_redacted(tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("https://example.org/?signed=secret bearer private-key")
