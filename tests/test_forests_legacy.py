@@ -59,7 +59,13 @@ def submitted():
 
 
 def completed(url="https://example.org/data?secret=123"):
-    return Response({"65267487597": {"Status": "Finished_ok", "DownloadURL": url}})
+    return task_response("Finished_ok", DownloadURL=url)
+
+
+def task_response(status, **extra):
+    product = legacy.LEGACY["assets"][0]["products"][2012]
+    return Response({"TaskID": "65267487597", "Status": status,
+                     "DatasetID": product["DatasetID"], "FileID": product["FileID"], **extra})
 
 
 @pytest.fixture(scope="module")
@@ -105,12 +111,12 @@ def test_service_key_rs256_exchange_cache_and_expiry(monkeypatch, service_key, t
     assert all(response.closed for response in responses)
 
 
-def test_expired_bearer_retries_original_request_once(monkeypatch, service_key):
+def test_expired_bearer_retries_original_request_once(monkeypatch, service_key, tmp_path):
     monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(service_key[0]))
     responses = [token_response(), Response(status=401), token_response("new-bearer"), submitted(), completed()]
     client = Client(*responses)
     provider = legacy.ClmsTokenProvider(client)
-    assert legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=provider)[0] == "65267487597"
+    assert legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client, token_provider=provider)[0] == "65267487597"
     assert client.calls[1][0] == client.calls[3][0]
     assert client.calls[1][1]["json"] == client.calls[3][1]["json"]
     assert client.calls[3][1]["headers"]["Authorization"] == "Bearer new-bearer"
@@ -118,12 +124,12 @@ def test_expired_bearer_retries_original_request_once(monkeypatch, service_key):
     assert all(response.closed for response in responses)
 
 
-def test_repeated_unauthorized_is_bounded(monkeypatch, service_key):
+def test_repeated_unauthorized_is_bounded(monkeypatch, service_key, tmp_path):
     monkeypatch.setenv("CLMS_SERVICE_KEY_JSON", json.dumps(service_key[0]))
     responses = [token_response(), Response(status=401), token_response(), Response(status=401)]
     client = Client(*responses)
     with pytest.raises(ValueError):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=legacy.ClmsTokenProvider(client))
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client, token_provider=legacy.ClmsTokenProvider(client))
     assert len(client.calls) == 4 and all(response.closed for response in responses)
 
 
@@ -270,15 +276,139 @@ def test_four_exact_product_mappings_and_distinct_assets():
     assert legacy.LEGACY["methodology_family"] == "copernicus_hrl_forest_legacy_2012_2015"
 
 
-def test_poll_matches_completed_task_and_closes_responses():
-    responses = [submitted(), Response({"other-task": {"Status": "Finished_ok", "DownloadURL": "https://example.org/wrong"}}),
+def test_pending_persisted_before_poll_and_resume_without_post(tmp_path):
+    asset = legacy.LEGACY["assets"][0]
+    path = legacy.pending_task_path(tmp_path, asset, 2012)
+    class InspectingClient(Client):
+        def request(self, method, url, **kwargs):
+            if method == "GET":
+                state = json.loads(path.read_text())
+                assert state == legacy._pending_identity(asset, 2012, "65267487597")
+                assert not list(tmp_path.rglob("*.metadata.json"))
+            return super().request(method, url, **kwargs)
+    first = InspectingClient(submitted(), task_response("Queued"))
+    with pytest.raises(TimeoutError, match="pending timeout"):
+        legacy.request_download_url(asset, 2012, pending_path=path, client=first,
+                                    token_provider=lambda: "fake", max_polls=1)
+    assert path.exists()
+    second = InspectingClient(task_response("In_progress"), completed())
+    assert legacy.request_download_url(asset, 2012, pending_path=path, client=second,
+                                       token_provider=lambda: "fake", sleep=lambda _: None)[0] == "65267487597"
+    assert all(call[0][0] == "GET" for call in second.calls)
+    assert path.exists()  # Resolution alone is not a validated acquisition.
+    assert all(secret not in path.read_text() for secret in
+               ("DownloadURL", "secret=", "fake", "Authorization", "assertion", "private_key", "bearer"))
+
+
+@pytest.mark.parametrize("status", ["Finished_err", "Cancelled", "unknown secret=123", "", None])
+def test_terminal_status_preserves_task_and_blocks_resubmit(tmp_path, status):
+    asset = legacy.LEGACY["assets"][0]
+    path = legacy.pending_task_path(tmp_path, asset, 2012)
+    for responses in ([submitted(), task_response(status)], [task_response(status)]):
+        client = Client(*responses)
+        with pytest.raises(ValueError) as error:
+            legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake")
+        assert "secret=123" not in str(error.value)
+        assert path.exists()
+        assert sum(call[0][0] == "POST" for call in client.calls) == len(responses) - 1
+
+
+@pytest.mark.parametrize("invalid", ["json", "schemaVersion", "TaskID", "asset_id", "year",
+                                    "DatasetID", "FileID", "contract_signature", "extra"])
+def test_invalid_pending_blocks_all_network(tmp_path, invalid):
+    asset = legacy.LEGACY["assets"][0]
+    path = legacy.pending_task_path(tmp_path, asset, 2012)
+    path.parent.mkdir(parents=True)
+    state = legacy._pending_identity(asset, 2012, "65267487597")
+    state[invalid] = "secret-invalid"
+    if invalid == "TaskID":
+        state[invalid] = "invalid task id"
+    path.write_text("invalid json" if invalid == "json" else json.dumps(state))
+    client = Client()
+    with pytest.raises(ValueError, match="pending-task state"):
+        legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake")
+    assert not client.calls
+    assert path.exists()
+
+
+@pytest.mark.parametrize("changes", [
+    {"DatasetID": "wrong"}, {"FileID": "wrong"}, {"TaskID": "wrong"},
+    {"DatasetID": None}, {"FileID": None},
+    *[{"DownloadURL": url} for url in (None, "", "http://example.org/file",
+       "https://user:pass@example.org/file", "https://example.org/file#secret",
+       "https://example.org:bad/file")],
+])
+def test_finished_task_identity_and_url_fail_closed(tmp_path, changes):
+    response = completed()
+    response.payload.update(changes)
+    client = Client(submitted(), response)
+    with pytest.raises(ValueError):
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012,
+            pending_path=tmp_path / "task.pending-task.json", client=client, token_provider=lambda: "fake")
+
+
+@pytest.mark.parametrize("status", ["Queued", "In_progress", "Finished_ok"])
+def test_adoption_validates_without_submit(tmp_path, status):
+    asset = legacy.LEGACY["assets"][0]
+    client = Client(task_response(status, DownloadURL="https://example.org/?secret=123"))
+    legacy.adopt_pending_task(tmp_path, asset, 2012, "65267487597", client=client, token_provider=lambda: "fake")
+    assert [call[0][0] for call in client.calls] == ["GET"]
+    path = legacy.pending_task_path(tmp_path, asset, 2012)
+    assert json.loads(path.read_text()) == legacy._pending_identity(asset, 2012, "65267487597")
+    assert "secret=123" not in path.read_text()
+
+
+@pytest.mark.parametrize("changes", [{"DatasetID": "wrong"}, {"FileID": "wrong"},
+                                    {"TaskID": "wrong"}, {"Status": "Failed"}, {"Status": None}])
+def test_adoption_rejects_invalid_remote_task(tmp_path, changes):
+    response = task_response("Queued")
+    response.payload.update(changes)
+    asset = legacy.LEGACY["assets"][0]
+    with pytest.raises(ValueError):
+        legacy.adopt_pending_task(tmp_path, asset, 2012, "65267487597",
+                                  client=Client(response), token_provider=lambda: "fake")
+    assert not legacy.pending_task_path(tmp_path, asset, 2012).exists()
+
+
+@pytest.mark.parametrize("failure", ["download", "raster/ZIP validation", "final metadata"])
+def test_acquisition_failure_keeps_pending_and_sanitizes(tmp_path, monkeypatch, failure):
+    asset = legacy.LEGACY["assets"][0]
+    response = Response(data=zip_bytes(asset))
+    if failure == "download":
+        response.status_code = 500
+    if failure == "raster/ZIP validation":
+        response.data = b"invalid ZIP secret=123"
+    if failure == "final metadata":
+        def fail(*args):
+            raise RuntimeError("private-key bearer secret=123")
+        monkeypatch.setattr(legacy, "json_dump", fail)
+    with pytest.raises(ValueError) as error:
+        legacy.acquire_product(tmp_path, asset, 2012,
+            client=Client(submitted(), completed(), response), token_provider=lambda: "fake")
+    assert failure in str(error.value)
+    assert all(secret not in str(error.value) for secret in ("private-key", "bearer", "secret=123"))
+    assert legacy.pending_task_path(tmp_path, asset, 2012).exists()
+    assert not legacy.raw_path(tmp_path, asset, 2012).exists()
+    assert not list(tmp_path.rglob("*.partial"))
+
+
+def test_acquire_timeout_remains_distinguishable(tmp_path, monkeypatch):
+    monkeypatch.setitem(legacy.LEGACY, "polling_timeout_seconds", 0.001)
+    with pytest.raises(TimeoutError, match="pending timeout"):
+        legacy.acquire_product(tmp_path, legacy.LEGACY["assets"][0], 2012,
+            client=Client(submitted(), task_response("Queued")), token_provider=lambda: "fake")
+    assert legacy.pending_task_path(tmp_path, legacy.LEGACY["assets"][0], 2012).exists()
+
+
+def test_poll_matches_completed_task_and_closes_responses(tmp_path):
+    responses = [submitted(), task_response("Queued"), task_response("In_progress"),
                  completed("https://example.org/right?secret=opaque")]
     client = Client(*responses)
-    task, url = legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client,
+    task, url = legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client,
                                             token_provider=lambda: "fake-bearer", sleep=lambda _: None)
     assert task == "65267487597" and url.endswith("right?secret=opaque")
     assert client.calls[0][1]["json"] == {"Datasets": [{"DatasetID": "b903be8a861d48d9af41266ce63cc287", "FileID": "266be23f-29a1-41f8-899d-a57c35d572fc"}]}
-    assert all(call[1]["params"] == {"status": "Finished_ok"} for call in client.calls[1:])
+    assert all(call[0] == ("GET", legacy.LEGACY["status_url"]) and call[1]["params"] == {"TaskID": task} for call in client.calls[1:])
     assert all(response.closed for response in responses)
 
 
@@ -289,9 +419,9 @@ def test_poll_matches_completed_task_and_closes_responses():
     *[{"65267487597": {"Status": "Finished_ok", "DownloadURL": url}} for url in
       (None, [], "", "http://bad", "https://user:password@example.org/", "https://example.org/\nsecret")],
     {"65267487597": {"Status": "Finished_ok"}}])
-def test_malformed_or_ambiguous_poll_fails(payload):
+def test_malformed_or_ambiguous_poll_fails(payload, tmp_path):
     with pytest.raises(ValueError):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=Client(submitted(), Response(payload)), token_provider=lambda: "fake")
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=Client(submitted(), Response(payload)), token_provider=lambda: "fake")
 
 
 @pytest.mark.parametrize("payload", [None, {}, [],
@@ -301,33 +431,33 @@ def test_malformed_or_ambiguous_poll_fails(payload):
     *[{"ErrorTaskIds": [], "TaskIds": tasks} for tasks in
       (None, {}, [], [{"TaskID": "a"}, {"TaskID": "b"}], [None], [{}],
        [{"TaskID": 1}], [{"TaskID": ""}], [{"TaskID": "with space"}])]])
-def test_malformed_submission_fails(payload):
+def test_malformed_submission_fails(payload, tmp_path):
     with pytest.raises(ValueError, match="TaskID"):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=Client(Response(payload, status=201)), token_provider=lambda: "fake")
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=Client(Response(payload, status=201)), token_provider=lambda: "fake")
 
 
-def test_poll_bound_and_redaction(caplog):
-    client = Client(submitted(), Response({}), Response({}))
+def test_poll_bound_and_redaction(caplog, tmp_path):
+    client = Client(submitted(), task_response("Queued"), task_response("In_progress"))
     with pytest.raises(TimeoutError):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client,
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client,
                                     token_provider=lambda: "fake", max_polls=2, sleep=lambda _: None)
     def failing_token():
         raise RuntimeError("secret-token private-key https://example.org/?secret=1")
     with pytest.raises(ValueError) as error:
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=Client(), token_provider=failing_token)
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=Client(), token_provider=failing_token)
     assert "secret-token" not in str(error.value) + caplog.text
     assert "private-key" not in str(error.value) + caplog.text
     assert error.value.__suppress_context__
 
 
 @pytest.mark.parametrize("method,status", [("POST", 200), ("POST", 400), ("GET", 201), ("GET", 403), ("GET", 500)])
-def test_clms_expected_http_status_and_redaction(method, status, caplog):
+def test_clms_expected_http_status_and_redaction(method, status, caplog, tmp_path):
     response = submitted() if method == "POST" else completed()
     response.status_code = status
     response.payload = {"server_error": "secret-token https://example.org/?secret=123"}
     client = Client(response) if method == "POST" else Client(submitted(), response)
     with pytest.raises(ValueError) as error:
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, client=client, token_provider=lambda: "secret-token")
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json", client=client, token_provider=lambda: "secret-token")
     assert "secret-token" not in str(error.value) + caplog.text
     assert "secret=123" not in str(error.value) + caplog.text
     assert response.closed
@@ -415,6 +545,7 @@ def test_acquisition_mocked_and_secret_free_provenance(tmp_path):
     responses = [submitted(), completed(), Response(data=zip_bytes(asset))]
     client = Client(*responses)
     result = legacy.acquire_product(tmp_path, asset, 2012, client=client, token_provider=lambda: "fake-bearer")
+    assert not legacy.pending_task_path(tmp_path, asset, 2012).exists()
     assert result["changed"]
     assert "headers" not in client.calls[-1][1]
     assert "secret=123" not in json.dumps(result)
@@ -457,8 +588,13 @@ def test_legacy_raw_paths_feed_existing_source_state(tmp_path):
     result = legacy.acquire_product(tmp_path, asset, 2012, client=Client(
         submitted(), completed("https://example.org/data?secret=x"),
         Response(data=zip_bytes(asset))), token_provider=lambda: "fake")
+    # Even a remaining local pending file cannot become declared raw/source metadata.
+    pending = legacy.pending_task_path(tmp_path, asset, 2012)
+    legacy._write_pending(pending, asset, 2012, "65267487597")
     paths = _declared_raw_paths({"legacy": [result]})
     assert set(paths) == {Path(result["local_path"]), Path(result["metadata_path"])}
+    assert pending not in paths
+    assert list(tmp_path.rglob("*.metadata.json")) == [Path(result["metadata_path"])]
     state = build_source_state_from_metadata_paths(tmp_path / "raw", [Path(result["metadata_path"])])
     assert len(state["sources"]) == 1
     assert state["sources"][0]["source_id"] == legacy.LEGACY["source_id"]
@@ -587,8 +723,8 @@ def test_fty_rejects_unknown_classes(tmp_path):
 def test_poll_deadline_and_download_error_redaction(tmp_path, caplog):
     moments = iter([0, 0, 0, 2])
     with pytest.raises(TimeoutError):
-        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012,
-            client=Client(submitted(), Response({})),
+        legacy.request_download_url(legacy.LEGACY["assets"][0], 2012, pending_path=tmp_path / "task.pending-task.json",
+            client=Client(submitted(), task_response("Queued")),
             token_provider=lambda: "fake", clock=lambda: next(moments), timeout=1)
     class FailingDownload(Client):
         def request(self, *args, **kwargs):

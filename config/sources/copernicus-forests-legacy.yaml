@@ -8,6 +8,8 @@ enabled_environment: FOREST_LEGACY_ENABLED
 service_key_environment: CLMS_SERVICE_KEY_JSON
 request_url: https://land.copernicus.eu/api/@datarequest_post
 search_url: https://land.copernicus.eu/api/@datarequest_search
+status_url: https://land.copernicus.eu/api/@datarequest_status_get
+polling_timeout_seconds: 3600
 crs: EPSG:3035
 series_break_to_modern: [methodology, spatial_resolution]
 assets:

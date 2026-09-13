@@ -156,52 +156,141 @@ def _json_request(client, method: str, url: str, token_provider, *, expected_sta
             response.close()
 
 
-def request_download_url(asset: dict, year: int, *, client, token_provider=None,
-                         timeout: float = 600, max_polls: int = 60,
+def pending_task_path(root: Path, asset: dict, year: int) -> Path:
+    return raw_path(root, asset, year).with_suffix(".zip.pending-task.json")
+
+
+def _pending_identity(asset: dict, year: int, task_id: str) -> dict:
+    product = product_contract(asset, year)["product"]
+    return {"schemaVersion": 1, "TaskID": task_id, "asset_id": asset["id"], "year": year,
+            "DatasetID": product["DatasetID"], "FileID": product["FileID"],
+            "contract_signature": contract_signature(asset, year)}
+
+
+def _read_pending(path: Path, asset: dict, year: int) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        state = json.loads(path.read_text())
+        task_id = state["TaskID"]
+        if (not _identifier(task_id) or type(state.get("schemaVersion")) is not int
+                or type(state.get("year")) is not int
+                or state != _pending_identity(asset, year, task_id)):
+            raise ValueError()
+        return task_id
+    except Exception:
+        raise ValueError("CLMS pending-task state malformed or incompatible; submission blocked") from None
+
+
+def _write_pending(path: Path, asset: dict, year: int, task_id: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation never overwrites an existing task; incomplete writes fail closed.
+        with path.open("x") as output:
+            json.dump(_pending_identity(asset, year, task_id), output)
+            output.flush()
+            os.fsync(output.fileno())
+    except Exception:
+        raise ValueError("CLMS pending-task persistence failed; inspect local state before retry") from None
+
+
+def _task_status(asset: dict, year: int, task_id: str, *, client, token_provider,
+                 request_timeout=30) -> tuple[str, str | None]:
+    payload = _json_request(client, "GET", LEGACY["status_url"], token_provider,
+                            expected_status=200, params={"TaskID": task_id},
+                            request_timeout=request_timeout)
+    product = product_contract(asset, year)["product"]
+    if (not isinstance(payload, dict)
+            or any(payload.get(key) != product[key] for key in ("DatasetID", "FileID"))
+            or ("TaskID" in payload and payload["TaskID"] != task_id)):
+        raise ValueError("CLMS task identity missing or mismatched")
+    status = payload.get("Status")
+    if status in ("Queued", "In_progress"):
+        return status, None
+    if not isinstance(status, str) or not status:
+        raise ValueError("CLMS task status missing or malformed")
+    if status != "Finished_ok":
+        # Never echo upstream status text: it can contain arbitrary sensitive content.
+        raise ValueError("CLMS terminal or unknown task status; submission blocked")
+    url = payload.get("DownloadURL")
+    try:
+        parsed = urlsplit(url) if isinstance(url, str) and not any(c.isspace() for c in url) else None
+        valid = (parsed and parsed.scheme == "https" and parsed.hostname
+                 and parsed.username is None and parsed.password is None and "#" not in url
+                 and (parsed.port is None or 0 < parsed.port <= 65535))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("CLMS completed task lacks a valid HTTPS download URL")
+    return status, url
+
+
+def adopt_pending_task(root: Path, asset: dict, year: int, task_id: str, *,
+                       client=None, token_provider=None) -> None:
+    """Adopt an existing remote task after identity/status validation; never submit."""
+    if not _identifier(task_id):
+        raise ValueError("CLMS adoption requires a valid TaskID")
+    if raw_path(root, asset, year).exists():
+        retained_product(root, asset, year)
+        return
+    path = pending_task_path(root, asset, year)
+    existing = _read_pending(path, asset, year)
+    if existing is not None and existing != task_id:
+        raise ValueError("CLMS adoption conflicts with existing pending task")
+    owned_client = client is None
+    if owned_client:
+        client = requests.Session()
+        client.trust_env = False
+    try:
+        _task_status(asset, year, task_id, client=client,
+                     token_provider=token_provider or ClmsTokenProvider(client))
+        if existing is None:
+            _write_pending(path, asset, year, task_id)
+    finally:
+        if owned_client:
+            client.close()
+
+
+def request_download_url(asset: dict, year: int, *, pending_path: Path, client, token_provider=None,
+                         timeout: float | None = None, max_polls: int | None = None,
                          clock=time.monotonic, sleep=time.sleep) -> tuple[str, str]:
-    if not math.isfinite(timeout) or timeout <= 0 or max_polls <= 0:
+    timeout = LEGACY["polling_timeout_seconds"] if timeout is None else timeout
+    if not math.isfinite(timeout) or timeout <= 0 or (max_polls is not None and max_polls <= 0):
         raise ValueError("Invalid CLMS polling limits")
     product = product_contract(asset, year)["product"]
+    task_id = _read_pending(pending_path, asset, year)
     if token_provider is None:
         token_provider = ClmsTokenProvider(client)
-    payload = _json_request(client, "POST", LEGACY["request_url"], token_provider,
-                            expected_status=201,
-                            json={"Datasets": [{key: product[key] for key in ("DatasetID", "FileID")}]})
-    # A single submitted dataset must resolve to exactly one task.
-    if (not isinstance(payload, dict) or payload.get("ErrorTaskIds") != []
-            or not isinstance(payload.get("TaskIds"), list) or len(payload["TaskIds"]) != 1
-            or not isinstance(payload["TaskIds"][0], dict)
-            or not _identifier(payload["TaskIds"][0].get("TaskID"))):
-        raise ValueError("CLMS submission lacks one unambiguous TaskID")
-    task_id = payload["TaskIds"][0]["TaskID"]
+    if task_id is None:
+        try:
+            payload = _json_request(client, "POST", LEGACY["request_url"], token_provider,
+                                    expected_status=201,
+                                    json={"Datasets": [{key: product[key] for key in ("DatasetID", "FileID")}]})
+        except Exception:
+            raise ValueError("CLMS submit failure; remote outcome may require manual task adoption") from None
+        if (not isinstance(payload, dict) or payload.get("ErrorTaskIds") != []
+                or not isinstance(payload.get("TaskIds"), list) or len(payload["TaskIds"]) != 1
+                or not isinstance(payload["TaskIds"][0], dict)
+                or not _identifier(payload["TaskIds"][0].get("TaskID"))):
+            raise ValueError("CLMS submit failure: no unambiguous TaskID; inspect remote tasks")
+        task_id = payload["TaskIds"][0]["TaskID"]
+        _write_pending(pending_path, asset, year, task_id)
     deadline = clock() + timeout
-    for attempt in range(max_polls):
+    attempt = 0
+    while max_polls is None or attempt < max_polls:
         if clock() >= deadline:
             break
-        payload = _json_request(client, "GET", LEGACY["search_url"], token_provider,
-                                expected_status=200,
-                                params={"status": "Finished_ok"}, request_timeout=min(30, max(0.001, deadline - clock())))
+        status, url = _task_status(asset, year, task_id, client=client, token_provider=token_provider,
+                                   request_timeout=min(30, max(0.001, deadline - clock())))
         if clock() >= deadline:
             break
-        if not isinstance(payload, dict):
-            raise ValueError("CLMS completed-task response is malformed")
-        if task_id in payload:
-            item = payload[task_id]
-            if not isinstance(item, dict) or item.get("Status") != "Finished_ok":
-                raise ValueError("CLMS target task is malformed or not successfully completed")
-            url = item.get("DownloadURL")
-            try:
-                parsed = urlsplit(url) if isinstance(url, str) and not any(c.isspace() for c in url) else None
-                valid = parsed and parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password and not parsed.fragment
-            except ValueError:
-                valid = False
-            if not valid:
-                raise ValueError("CLMS completed task lacks a valid HTTPS download URL")
+        if status == "Finished_ok":
             return task_id, url
         remaining = deadline - clock()
-        if remaining > 0 and attempt + 1 < max_polls:
-            sleep(min(2 ** min(attempt, 5), remaining))
-    raise TimeoutError("CLMS completion polling timed out")
+        attempt += 1
+        if remaining > 0 and (max_polls is None or attempt < max_polls):
+            sleep(min(2 ** min(attempt - 1, 5), remaining))
+    raise TimeoutError("CLMS pending timeout; TaskID retained for resume")
 
 
 def validate_raster(path: Path, asset: dict) -> None:
@@ -257,7 +346,7 @@ def retained_product(root: Path, asset: dict, year: int) -> dict:
 
 
 def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False,
-                    token_provider=None, client=None) -> dict:
+                    token_provider=None, client=None, timeout: float | None = None) -> dict:
     path = raw_path(root, asset, year)
     if path.exists():
         return retained_product(root, asset, year)
@@ -269,8 +358,11 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
         client.trust_env = False
     response = None
     temporary = None
+    stage = "task"
     try:
-        task_id, url = request_download_url(asset, year, client=client, token_provider=token_provider or ClmsTokenProvider(client))
+        task_id, url = request_download_url(asset, year, pending_path=pending_task_path(root, asset, year),
+                                            client=client, token_provider=token_provider, timeout=timeout)
+        stage = "download"
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".partial", delete=False) as output:
             temporary = Path(output.name)
@@ -282,6 +374,7 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 output.write(chunk)
                 digest.update(chunk)
+        stage = "raster/ZIP validation"
         with tempfile.TemporaryDirectory() as directory:
             raster_hash = extract_validated_raster(temporary, Path(directory) / "raster.tif", asset)
         metadata = {"source_id": LEGACY["source_id"], "sha256": digest.hexdigest(),
@@ -290,11 +383,18 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
                     "raster_sha256": raster_hash, "TaskID": task_id,
                     "dataset_version": asset["products"][year]["version"], "period": [year, year],
                     "resolved_url": LEGACY["request_url"]}
-        temporary.rename(path)
+        stage = "final metadata"
         json_dump(path.with_suffix(".zip.metadata.json"), metadata)
-        return retained_product(root, asset, year) | {"changed": True}
+        temporary.rename(path)
+        result = retained_product(root, asset, year) | {"changed": True}
+        pending_task_path(root, asset, year).unlink()
+        return result
+    except (ValueError, TimeoutError):
+        if stage == "task":
+            raise
+        raise ValueError(f"CLMS legacy {stage} failure; pending TaskID retained") from None
     except Exception:
-        raise ValueError("CLMS legacy acquisition failed; no credentials or download URL retained") from None
+        raise ValueError(f"CLMS legacy {stage} failure; pending TaskID retained") from None
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

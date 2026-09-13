@@ -313,6 +313,37 @@ completi e verificati restano riusabili al prossimo tentativo; i download parzia
 sono rimossi. Non serve rollback R2: la release attiva resta quella precedente.
 Non considerare validati i file locali di un tentativo fallito.
 
+Ogni submit CLMS salva subito `product.zip.pending-task.json` accanto al ZIP:
+è stato esclusivamente locale, distinto dai sidecar di provenance e non pubblicato.
+Il polling interroga `@datarequest_status_get?TaskID=<id>`; `Queued` e
+`In_progress` attendono fino a `polling_timeout_seconds` (default 3600 secondi,
+configurato in `config/sources/copernicus-forests-legacy.yaml`).
+Un timeout conserva il TaskID: rilanciare con lo stesso workdir riprende il task.
+Stato locale malformato/incompatibile o stato remoto terminale bloccano il run,
+senza nuovo submit. Non cancellare lo stato per aggirare questi controlli.
+La rimozione avviene solo dopo ZIP, validazione raster e metadata completati.
+Un submit fallito con esito remoto incerto richiede di controllare i task CLMS
+prima di ritentare, per evitare duplicati.
+
+Per adottare un TaskID già creato, prima del bootstrap, usare questo helper
+con il medesimo workdir. Esegue solo un GET autenticato, verifica identità e stato
+remoti e salva esclusivamente gli identificatori; non effettua submit o download.
+Inserire il TaskID esistente al prompt (non modificare gli ID prodotto):
+
+```sh
+uv run python - <<'PY'
+from pathlib import Path
+from stato_italia.cli import load_local_env
+from stato_italia.forests_legacy import LEGACY, adopt_pending_task
+load_local_env()
+asset = next(a for a in LEGACY["assets"] if a["id"] == "hrl_legacy_tree_cover_density_20m")
+with open("/dev/tty") as terminal:
+    print("TaskID esistente:", flush=True)
+    task_id = terminal.readline().strip()
+adopt_pending_task(Path("data/h1i-c"), asset, 2012, task_id)
+PY
+```
+
 Solo dopo review, merge su `main` e approvazione separata dell'attivazione,
 eseguire il primo publish, sempre senza piano:
 
