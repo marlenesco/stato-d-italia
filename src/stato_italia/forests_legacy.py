@@ -297,53 +297,77 @@ def request_download_url(asset: dict, year: int, *, pending_path: Path, client, 
     raise TimeoutError("CLMS pending timeout; TaskID retained for resume")
 
 
+class RasterValidationError(ValueError):
+    """Fixed local reason codes only; never upstream exception text."""
+
+
 def validate_raster(path: Path, asset: dict) -> None:
     """Validate every source cell, including cells masked by source metadata."""
+    reason = "raster_open"
     try:
         with rasterio.open(path) as dataset:
             resolution = asset["resolution_m"]
-            if (dataset.crs != rasterio.crs.CRS.from_epsg(3035) or dataset.count != 1
-                    or dataset.transform.b != 0 or dataset.transform.d != 0
-                    or not math.isclose(dataset.transform.a, resolution, abs_tol=1e-8, rel_tol=0)
-                    or not math.isclose(dataset.transform.e, -resolution, abs_tol=1e-8, rel_tol=0)
-                    or dataset.nodata not in (None, 254, 255)
-                    or dataset.scales != (1.0,) or dataset.offsets != (0.0,)
-                    or not np.issubdtype(np.dtype(dataset.dtypes[0]), np.integer)):
-                raise ValueError()
+            checks = (
+                ("crs", dataset.crs == rasterio.crs.CRS.from_epsg(3035)),
+                ("band_count", dataset.count == 1),
+                ("rotation", dataset.transform.b == 0 and dataset.transform.d == 0),
+                ("resolution_x", math.isclose(dataset.transform.a, resolution, abs_tol=1e-8, rel_tol=0)),
+                ("resolution_y", math.isclose(dataset.transform.e, -resolution, abs_tol=1e-8, rel_tol=0)),
+                ("nodata", dataset.nodata in (None, 254, 255)),
+                ("scale", dataset.scales == (1.0,)),
+                ("offset", dataset.offsets == (0.0,)),
+                ("dtype", np.issubdtype(np.dtype(dataset.dtypes[0]), np.integer)),
+            )
+            for code, valid in checks:
+                if not valid:
+                    raise RasterValidationError(code)
             allowed = list(range(101)) + [254, 255] if asset["kind"] == "tree_cover_density" else [0, 1, 2, 3, 254, 255]
+            reason = "raster_read"
             for _, window in dataset.block_windows(1):
                 if not np.isin(dataset.read(1, window=window, masked=False), allowed).all():
-                    raise ValueError()
+                    raise RasterValidationError("unexpected_values")
+    except RasterValidationError:
+        raise
     except Exception:
-        raise ValueError("Legacy Forest raster violates CRS, resolution, band, NoData or value contract") from None
+        raise RasterValidationError(reason) from None
 
 
 def extract_validated_raster(archive: Path, destination: Path, asset: dict) -> str:
+    reason = "outer_zip_invalid"
     try:
         with ExitStack() as stack:
             bundle = stack.enter_context(zipfile.ZipFile(archive))
             rasters = [info for info in bundle.infolist() if not info.is_dir() and Path(info.filename).suffix.lower() in {".tif", ".tiff"}]
             if not rasters:
                 nested = [info for info in bundle.infolist() if not info.is_dir() and Path(info.filename).suffix.lower() == ".zip"]
+                if not nested:
+                    raise RasterValidationError("direct_tiffs_zero_nested_zips_zero")
                 if len(nested) != 1:
-                    raise ValueError()
+                    raise RasterValidationError("nested_zips_multiple")
                 temporary = stack.enter_context(tempfile.NamedTemporaryFile(suffix=".zip"))
                 with bundle.open(nested[0]) as source:
                     shutil.copyfileobj(source, temporary, length=1024 * 1024)
                 temporary.flush()
                 temporary.seek(0)
+                reason = "nested_zip_invalid"
                 bundle = stack.enter_context(zipfile.ZipFile(temporary))
                 rasters = [info for info in bundle.infolist() if not info.is_dir() and Path(info.filename).suffix.lower() in {".tif", ".tiff"}]
+                if not rasters:
+                    raise RasterValidationError("nested_tiffs_zero")
+                if len(rasters) != 1:
+                    raise RasterValidationError("nested_tiffs_multiple")
             if len(rasters) != 1:
-                raise ValueError()
+                raise RasterValidationError("direct_tiffs_multiple")
             # Fixed destination: ZIP paths are never extracted into the filesystem.
             with bundle.open(rasters[0]) as source, destination.open("wb") as target:
                 shutil.copyfileobj(source, target, length=1024 * 1024)
         validate_raster(destination, asset)
         return sha256_file(destination)
-    except Exception:
+    except Exception as error:
         destination.unlink(missing_ok=True)
-        raise ValueError("Legacy Forest ZIP/raster is invalid or ambiguous") from None
+        if isinstance(error, RasterValidationError):
+            raise
+        raise RasterValidationError(reason) from None
 
 
 def retained_product(root: Path, asset: dict, year: int) -> dict:
@@ -366,7 +390,8 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
     path = raw_path(root, asset, year)
     if path.exists():
         return retained_product(root, asset, year)
-    if offline:
+    failed_archive = path.with_suffix(".zip.validation-failed")
+    if offline and not failed_archive.exists():
         raise FileNotFoundError("Legacy Forest ZIP unavailable offline")
     owned_client = client is None
     if owned_client:
@@ -375,26 +400,34 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
     response = None
     temporary = None
     transferred = 0
+    archive_hash = None
     stage = "task"
     try:
-        task_id, url = request_download_url(asset, year, pending_path=pending_task_path(root, asset, year),
-                                            client=client, token_provider=token_provider, timeout=timeout)
-        stage = "download"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".partial", delete=False) as output:
-            temporary = Path(output.name)
-            # A signed DownloadURL is sufficient; never forward the CLMS bearer.
-            response = client.request("GET", url, timeout=(30, 300), stream=True, allow_redirects=False)
-            if response.status_code != 200:
-                raise ValueError()
-            digest = sha256()
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                transferred += output.write(chunk)
-                digest.update(chunk)
+        if failed_archive.exists():
+            task_id = _read_pending(pending_task_path(root, asset, year), asset, year)
+            if task_id is None:
+                raise ValueError("CLMS retained validation archive requires compatible pending task")
+            temporary = failed_archive
+        else:
+            task_id, url = request_download_url(asset, year, pending_path=pending_task_path(root, asset, year),
+                                                client=client, token_provider=token_provider, timeout=timeout)
+            stage = "download"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".partial", delete=False) as output:
+                temporary = Path(output.name)
+                # A signed DownloadURL is sufficient; never forward the CLMS bearer.
+                response = client.request("GET", url, timeout=(30, 300), stream=True, allow_redirects=False)
+                if response.status_code != 200:
+                    raise ValueError()
+                digest = sha256()
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    transferred += output.write(chunk)
+                    digest.update(chunk)
+            archive_hash = digest.hexdigest()
         stage = "raster/ZIP validation"
         with tempfile.TemporaryDirectory() as directory:
             raster_hash = extract_validated_raster(temporary, Path(directory) / "raster.tif", asset)
-        metadata = {"source_id": LEGACY["source_id"], "sha256": digest.hexdigest(),
+        metadata = {"source_id": LEGACY["source_id"], "sha256": archive_hash or sha256_file(temporary),
                     "source_signature": contract_signature(asset, year),
                     "bytes": temporary.stat().st_size, "contract": product_contract(asset, year),
                     "raster_sha256": raster_hash, "TaskID": task_id,
@@ -411,9 +444,15 @@ def acquire_product(root: Path, asset: dict, year: int, *, offline: bool = False
             raise
         if stage == "download":
             raise ValueError(f"CLMS legacy download failure ({type(error).__name__}, {transferred} bytes transferred); pending TaskID retained") from None
+        if stage == "raster/ZIP validation":
+            if temporary != failed_archive:
+                temporary.rename(failed_archive)
+                temporary = failed_archive
+            reason = str(error) if isinstance(error, RasterValidationError) else "validation_io"
+            raise ValueError(f"CLMS legacy raster/ZIP validation failure ({reason}); pending TaskID retained") from None
         raise ValueError(f"CLMS legacy {stage} failure; pending TaskID retained") from None
     finally:
-        if temporary is not None:
+        if temporary is not None and temporary != failed_archive:
             temporary.unlink(missing_ok=True)
         if response is not None:
             response.close()

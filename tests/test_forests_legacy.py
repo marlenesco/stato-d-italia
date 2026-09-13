@@ -541,7 +541,13 @@ def test_nested_zip_validation_and_cleanup(tmp_path, monkeypatch, case):
         assert legacy.extract_validated_raster(archive, destination, asset) == legacy.sha256(raster_bytes).hexdigest()
         assert destination.read_bytes() == raster_bytes
     else:
-        with pytest.raises(ValueError, match="invalid or ambiguous"):
+        reasons = {
+            "zero_tiffs": "nested_tiffs_zero", "multiple_tiffs": "nested_tiffs_multiple",
+            "zero_zips": "direct_tiffs_zero_nested_zips_zero", "multiple_zips": "nested_zips_multiple",
+            "corrupt_inner": "nested_zip_invalid", "corrupt_outer": "outer_zip_invalid",
+            "invalid_raster": "unexpected_values", "multiple_outer_tiffs": "direct_tiffs_multiple",
+        }
+        with pytest.raises(legacy.RasterValidationError, match=f"^{reasons[case]}$"):
             legacy.extract_validated_raster(archive, destination, asset)
         assert not destination.exists()
     assert not list(scratch.iterdir())
@@ -557,6 +563,75 @@ def test_validator_rejects_incompatible_raster(tmp_path, overrides):
     with pytest.raises(ValueError):
         legacy.extract_validated_raster(archive, raster, asset)
     assert not raster.exists()
+
+
+@pytest.mark.parametrize("reason", ["raster_open", "crs", "band_count", "rotation",
+                                  "resolution_x", "resolution_y", "nodata", "scale",
+                                  "offset", "dtype", "unexpected_values"])
+def test_raster_diagnostic_rules(tmp_path, reason):
+    asset = legacy.LEGACY["assets"][0]
+    path = tmp_path / "raster.tif"
+    if reason == "raster_open":
+        path.write_bytes(b"fake signed URL https://example.org/?secret=token")
+    else:
+        transform = from_origin(4500000, 2500000, 20, 20)
+        if reason == "rotation":
+            transform = rasterio.Affine(20, 1, 4500000, 0, -20, 2500000)
+        if reason == "resolution_x":
+            transform = from_origin(4500000, 2500000, 100, 20)
+        if reason == "resolution_y":
+            transform = from_origin(4500000, 2500000, 20, 100)
+        with rasterio.open(path, "w", driver="GTiff", width=1, height=1,
+                           count=2 if reason == "band_count" else 1,
+                           dtype="float32" if reason == "dtype" else "uint8",
+                           crs="EPSG:4326" if reason == "crs" else "EPSG:3035",
+                           transform=transform, nodata=0 if reason == "nodata" else 255) as dataset:
+            dataset.write(np.array([[101 if reason == "unexpected_values" else 1]], dtype="uint8"), 1)
+            if reason == "scale":
+                dataset.scales = (2.0,)
+            if reason == "offset":
+                dataset.offsets = (1.0,)
+    with pytest.raises(legacy.RasterValidationError) as error:
+        legacy.validate_raster(path, asset)
+    assert str(error.value) == reason
+    assert "secret" not in str(error.value)
+
+
+def test_raster_open_exception_text_is_redacted(tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("https://example.org/?signed=secret bearer private-key")
+    monkeypatch.setattr(legacy.rasterio, "open", fail)
+    with pytest.raises(legacy.RasterValidationError, match="^raster_open$"):
+        legacy.validate_raster(tmp_path / "fixed.tif", legacy.LEGACY["assets"][0])
+
+
+def test_failed_archive_retained_reused_and_promoted(tmp_path):
+    asset = legacy.LEGACY["assets"][0]
+    invalid = zip_bytes(asset, resolution=100)
+    client = Client(submitted(), completed("https://example.org/?signed=secret"), Response(data=invalid))
+    path = legacy.raw_path(tmp_path, asset, 2012)
+    failed = path.with_suffix(".zip.validation-failed")
+    pending = legacy.pending_task_path(tmp_path, asset, 2012)
+    for attempt in range(2):
+        active_client = client if attempt == 0 else Client()
+        with pytest.raises(ValueError) as error:
+            legacy.acquire_product(tmp_path, asset, 2012, client=active_client, token_provider=lambda: "fake-bearer")
+        assert str(error.value) == "CLMS legacy raster/ZIP validation failure (resolution_x); pending TaskID retained"
+        assert failed.read_bytes() == invalid
+        assert pending.exists()
+        assert not path.exists()
+        assert not path.with_suffix(".zip.metadata.json").exists()
+        assert not list(tmp_path.rglob("*.partial"))
+        if attempt:
+            assert not active_client.calls
+    failed.write_bytes(zip_bytes(asset))
+    no_network = Client()
+    result = legacy.acquire_product(tmp_path, asset, 2012, client=no_network)
+    assert not no_network.calls
+    assert result["changed"] and result["TaskID"] == "65267487597"
+    assert result["sha256"] == legacy.sha256_file(path)
+    assert path.with_suffix(".zip.metadata.json").exists()
+    assert not failed.exists() and not pending.exists()
 
 
 def retain(root, asset, year, values=None):
